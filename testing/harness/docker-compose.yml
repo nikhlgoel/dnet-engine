@@ -1,0 +1,92 @@
+# Phase 0 simulation harness (T010).
+#
+# Topology, per contracts/harness.md §2:
+#
+#   [ Windows host: dnetd under test ]
+#              |  edge network, via published ports
+#              v
+#   [ utm ] --- transit network --- [ endpoint ]
+#   netem + iptables                 transport cores + HTTP origin
+#
+# The client under test is `dnetd` on the Windows host, because dnetd is a
+# Windows service and cannot run in a Linux container. Conditions are applied
+# on the utm container's transit-facing interface, so they shape the whole
+# client-to-endpoint path. See HARNESS-NOTES.md for what this does and does
+# not cover.
+
+name: dnet-harness
+
+services:
+  utm:
+    build:
+      context: ./utm
+    container_name: dnet-utm
+    hostname: utm
+    # NET_ADMIN is required for tc/netem and iptables. It is confined to this
+    # container; the host is never modified (HN-04).
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    sysctls:
+      net.ipv4.ip_forward: "1"
+    networks:
+      edge:
+        ipv4_address: 172.31.0.10
+      transit:
+        ipv4_address: 172.32.0.10
+    ports:
+      # Profile ports published to the Windows host. dnetd connects to
+      # 127.0.0.1 on these, and traffic traverses the shaped path.
+      - "51820:51820/udp"   # Profile A - AmneziaWG
+      - "44443:44443/udp"   # Profile B - Hysteria 2
+      - "8443:8443/tcp"     # Profile C - VLESS+REALITY
+      - "8080:8080/tcp"     # plain HTTP origin, for baseline comparison
+      - "9090:9090/tcp"     # harness control + ground-truth reporting
+    volumes:
+      - ./conditions:/opt/conditions:ro
+      - ./.state:/opt/state
+    healthcheck:
+      test: ["CMD", "test", "-f", "/opt/state/ready"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    restart: unless-stopped
+
+  endpoint:
+    build:
+      context: ./endpoint
+    container_name: dnet-endpoint
+    hostname: endpoint
+    cap_add:
+      - NET_ADMIN
+    networks:
+      transit:
+        ipv4_address: 172.32.0.20
+    volumes:
+      # The endpoint shapes its own egress, which is the download path. netem's
+      # `root` qdisc is egress-only, so shaping only the utm would leave bulk
+      # downloads undegraded - measured and confirmed, see HARNESS-NOTES.md.
+      - ./conditions:/opt/conditions:ro
+      - ./.state:/opt/state
+    healthcheck:
+      test: ["CMD", "test", "-f", "/opt/state/endpoint-ready"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    restart: unless-stopped
+
+networks:
+  # Host-facing. The client reaches the utm through published ports.
+  edge:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.31.0.0/24
+  # utm <-> endpoint. All conditions are applied on this side, so they shape
+  # traffic without interfering with the host's own connectivity.
+  transit:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.32.0.0/24

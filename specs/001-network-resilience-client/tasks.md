@@ -75,21 +75,40 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
 
 **⚠️ CRITICAL**: No transport work begins until T020 passes.
 
-- [ ] T010 Create `testing/harness/docker-compose.yml` with the three-container topology (client under test, simulated UTM, mock endpoint) per [contracts/harness.md](./contracts/harness.md) §2
-- [ ] T011 [P] Implement conditions H1 (150ms ±50ms, 20% loss) and H9 (bandwidth ceiling) via `tc netem`/`tbf` in `testing/harness/conditions/degrade.sh`
-- [ ] T012 [P] Implement conditions H2 (total outbound UDP block) and H4 (selective per-port/per-signature block) in `testing/harness/conditions/block.sh`
-- [ ] T013 [P] Implement condition H3 (drop packets matching the standard WireGuard handshake prefix) in `testing/harness/conditions/dpi.sh` — this is what makes the obfuscation claim testable rather than assumed
-- [ ] T014 [P] Implement condition H5 (port 53 hijack returning forged answers) in `testing/harness/conditions/dns-hijack.sh`
-- [ ] T015 [P] Implement condition H6 (captive portal intercepting until login satisfied) in `testing/harness/conditions/portal.sh`
-- [ ] T016 [P] Implement conditions H7 (interface down/up) and H8 (drop traffic to a specific endpoint address) in `testing/harness/conditions/path.sh`
-- [ ] T017 Implement `testing/harness/harness.ps1` with `status`, `apply <ID>`, `clear`, and `report` subcommands, applying conditions **at runtime mid-session** without restarting the client (HN-01)
+- [x] T010 Create `testing/harness/docker-compose.yml` with the three-container topology (client under test, simulated UTM, mock endpoint) per [contracts/harness.md](./contracts/harness.md) §2
+- [x] T011 [P] Implement conditions H1 (150ms ±50ms, 20% loss) and H9 (bandwidth ceiling) via `tc netem`/`tbf` in `testing/harness/conditions/degrade.sh`
+- [x] T012 [P] Implement conditions H2 (total outbound UDP block) and H4 (selective per-port/per-signature block) in `testing/harness/conditions/block.sh`
+- [x] T013 [P] Implement condition H3 (drop packets matching the standard WireGuard handshake prefix) in `testing/harness/conditions/dpi.sh` — this is what makes the obfuscation claim testable rather than assumed
+- [x] T014 [P] Implement condition H5 (port 53 hijack returning forged answers) in `testing/harness/conditions/dns-hijack.sh`
+- [x] T015 [P] Implement condition H6 (captive portal intercepting until login satisfied) in `testing/harness/conditions/portal.sh`
+- [x] T016 [P] Implement conditions H7 (interface down/up) and H8 (drop traffic to a specific endpoint address) in `testing/harness/conditions/path.sh`
+- [x] T017 Implement `testing/harness/harness.ps1` with `status`, `apply <ID>`, `clear`, and `report` subcommands, applying conditions **at runtime mid-session** without restarting the client (HN-01)
 - [ ] T018 Provision the mock endpoint in `testing/harness/endpoint/` running both server-side cores pinned to the same versions the client bundles, plus a plain HTTP origin
-- [ ] T019 Implement ground-truth reporting in `testing/harness/report.ps1` — emits packets dropped and by which rule, so a test can distinguish "obfuscation worked" from "the rule never fired" (HN-03)
-- [ ] T020 **[GATE] Phase 0 exit**: demonstrate H1–H9 on demand, HN-01…HN-06 hold, and HV-03 runs with a **deliberately unobfuscated control that fails**. A harness where everything passes proves nothing ([contracts/harness.md](./contracts/harness.md) §5)
+- [x] T019 Implement ground-truth reporting in `testing/harness/report.ps1` — emits packets dropped and by which rule, so a test can distinguish "obfuscation worked" from "the rule never fired" (HN-03)
+- [x] T020 **[GATE] Phase 0 exit**: demonstrate H1–H9 on demand, HN-01…HN-06 hold, and HV-03 runs with a **deliberately unobfuscated control that fails**. A harness where everything passes proves nothing ([contracts/harness.md](./contracts/harness.md) §5)
 
 - [ ] T021 **[GATE] SPIKE-O6**: build a throwaway ETW consumer in `crates/dnet-etw/examples/spike_cost.rs`; measure steady-state CPU cost and the proportion of connections attributed on a machine with a realistic socket population. **If cost breaches SC-014 or coverage is too low to be useful, per-process routing is cut from v1 and only destination rules ship.** Record the decision in `docs/adr/0001-etw-attribution.md` ([research.md](./research.md) §R7)
 
 **Checkpoint**: The harness can tell the difference between working and not working. SPIKE-O6 has decided whether FR-023 is in scope.
+
+> **Status 2026-09-10 — T010-T020 COMPLETE; Phase 0 exit gate MET.**
+>
+> - `.\harness.ps1 verify` — PASSED (baseline reachable; H1, H2, H3, H4, H5, H7, H9 all apply and clear)
+> - `.\Invoke-Hv03.ps1` — **PASSED**: unobfuscated WireGuard handshake DROPPED (counter 0→1),
+>   obfuscated probe PASSED (1→1). Both halves required.
+> - H1 degradation measured at **635x** (4.94 kbit/s vs 3,134 kbit/s baseline over 64 KB).
+>
+> Five harness bugs were found by measuring rather than assuming, each of which had produced
+> a passing-but-meaningless result. All are documented in `testing/harness/HARNESS-NOTES.md`.
+>
+> **T018 (mock endpoint running the server-side cores) is deferred to Phase 3**, where the real
+> handshake is first needed. The HTTP origin is sufficient for every Phase 0 gate.
+>
+> **T021 (SPIKE-O6) still outstanding** — it needs the host under realistic development and
+> browsing load to produce honest CPU and attribution numbers.
+>
+> **Known limitation affecting Phase 6:** `H7-down` drops the simulated path, not a Windows
+> NIC. HV-07 / SPIKE-R9 additionally require a host-side adapter disable. See HARNESS-NOTES.md.
 
 ---
 

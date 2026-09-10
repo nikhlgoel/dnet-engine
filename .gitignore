@@ -1,30 +1,102 @@
-# Rust
+# =============================================================================
+# DNet Engine
+#
+# Tracked: Rust/TS source, configuration, Cargo.lock, ADRs, specs, licence
+# texts, and generated BUILD-PROVENANCE.md files.
+#
+# Not tracked: build output, fetched or built third-party binaries, secrets,
+# and local runtime state.
+# =============================================================================
+
+# ---------- Rust build output ----------
 /target/
+**/target/
 **/*.rs.bk
 *.pdb
 
-# Node / Tauri
+# Cargo.lock IS tracked: this workspace produces binaries, so builds must be
+# reproducible. (It would be ignored only for a library-only crate.)
+!Cargo.lock
+
+# ---------- Coverage and test artifacts ----------
+*.profraw
+*.profdata
+/coverage/
+/lcov.info
+llvm-cov-target/
+
+# ---------- Node / Tauri (Phase 9) ----------
 node_modules/
 dist/
+.pnpm-store/
 apps/dnet-tray/src-tauri/target/
+apps/dnet-tray/src-tauri/gen/
 
-# Vendored third-party binaries: fetched by `cargo xtask fetch-vendor`, never committed.
-# Licence texts under vendor/ ARE committed - see the negations below.
-vendor/**/*.dll
+# ---------- Vendored third-party artifacts ----------
+# Binaries are produced by `cargo xtask fetch-vendor` (downloaded for Wintun,
+# built from pinned source for the two transport cores). They are never
+# committed: they bloat history, and their provenance is recorded instead.
 vendor/**/*.exe
+vendor/**/*.dll
 vendor/**/*.sys
+vendor/**/*.so
+vendor/**/*.dylib
+vendor/**/*.a
+vendor/**/*.lib
 vendor/**/*.zip
 vendor/**/*.tar.gz
-!vendor/**/LICENSE*
-!vendor/**/*.md
-!vendor/**/*.toml
+vendor/**/*.tgz
+vendor/**/*.msi
 
-# Local runtime state
+# Transient source checkouts made while building the cores.
+vendor/**/.src/
+vendor/**/.download/
+
+# ...but licence texts, provenance, and READMEs under vendor/ ARE tracked.
+# These satisfy the GPLv3 §6 source offer and the attribution obligations.
+!vendor/**/LICENSE
+!vendor/**/LICENSE.*
+!vendor/**/COPYING*
+!vendor/**/NOTICE*
+!vendor/**/BUILD-PROVENANCE.md
+!vendor/**/README.md
+
+# ---------- Secrets and environment ----------
+# Nothing here should ever reach the repository. Cloud API signing keys in
+# particular are stored under DPAPI at runtime, never on disk in the tree
+# (see contracts/provisioning.md PR-03, PR-04).
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+!vendor/**/*.key
+*.p12
+*.pfx
+*.oci
+oci_api_key*
+config.local.*
+secrets.*
+
+# ---------- Local runtime state ----------
+# dnetd writes generated core configuration and undo records here at runtime.
 /run/
 *.log
+logs/
 
-# OS / editor
+# ---------- Test harness runtime state (Phase 2) ----------
+testing/harness/.state/
+testing/harness/**/*.pcap
+testing/harness/**/captures/
+
+# ---------- OS / editor ----------
 Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
 .DS_Store
 .vscode/
+!.vscode/extensions.json
 .idea/
+*.swp
+*~
