@@ -18,6 +18,11 @@
 # reproducible. (It would be ignored only for a library-only crate.)
 !Cargo.lock
 
+# ---------- Python bytecode (harness scripts, tooling) ----------
+__pycache__/
+*.py[cod]
+*$py.class
+
 # ---------- Coverage and test artifacts ----------
 *.profraw
 *.profdata
