@@ -1,0 +1,23 @@
+[package]
+name = "dnet-provision"
+description = "Cloud provisioning, server bootstrap, keepalive, cleanup."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+dnet-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+reqwest = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true, features = ["rt", "time", "fs"] }
+windows = { workspace = true, features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

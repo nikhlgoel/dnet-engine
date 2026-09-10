@@ -1,0 +1,73 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/dnetd",
+    "crates/dnet-core",
+    "crates/dnet-ipc",
+    "crates/dnet-supervisor",
+    "crates/dnet-config",
+    "crates/dnet-etw",
+    "crates/dnet-netstate",
+    "crates/dnet-provision",
+    "crates/xtask",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.83"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/nikhlgoel/dnet-engine"
+authors = ["DNet Engine contributors"]
+
+[workspace.dependencies]
+# Internal
+dnet-core = { path = "crates/dnet-core" }
+dnet-ipc = { path = "crates/dnet-ipc" }
+dnet-supervisor = { path = "crates/dnet-supervisor" }
+dnet-config = { path = "crates/dnet-config" }
+dnet-etw = { path = "crates/dnet-etw" }
+dnet-netstate = { path = "crates/dnet-netstate" }
+dnet-provision = { path = "crates/dnet-provision" }
+
+# Async runtime
+tokio = { version = "1.42", default-features = false }
+tokio-util = "0.7"
+futures = "0.3"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Errors and logging
+thiserror = "2.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Windows
+windows = "0.58"
+windows-sys = "0.59"
+windows-service = "0.7"
+
+# ETW
+ferrisetw = "1.1"
+
+# Network / HTTP
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+rustls = "0.23"
+
+# Utility
+uuid = { version = "1.11", features = ["v4", "serde"] }
+sha2 = "0.10"
+
+# Dev
+proptest = "1.5"
+tempfile = "3.14"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"

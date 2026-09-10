@@ -1,0 +1,27 @@
+[package]
+name = "dnetd"
+description = "DNet Engine privileged background service."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "dnetd"
+path = "src/main.rs"
+
+[dependencies]
+dnet-core = { workspace = true }
+dnet-ipc = { workspace = true }
+dnet-supervisor = { workspace = true }
+dnet-config = { workspace = true }
+dnet-etw = { workspace = true }
+dnet-netstate = { workspace = true }
+dnet-provision = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+windows-service = { workspace = true }

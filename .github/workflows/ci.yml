@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # Constitution licence obligations. Runs first and gates everything else:
+  # a build that violates them is not shippable regardless of test results.
+  licence-compliance:
+    name: Licence obligations
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Reject vendored Wintun source; require signed DLL
+        run: cargo xtask verify-vendor
+
+      - name: Confine primary core vendor name to attribution surfaces
+        run: cargo xtask lint-branding
+
+  build-and-test:
+    name: Build and test
+    needs: licence-compliance
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Unit and contract tests
+        run: cargo test --workspace
+
+  coverage:
+    name: Coverage (>=80%)
+    needs: build-and-test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-llvm-cov
+
+      # Constitution Principle IV. Excludes the UI and the supervised third-party
+      # processes, per specs/001-network-resilience-client/plan.md.
+      - name: Enforce coverage floor
+        run: >
+          cargo llvm-cov --workspace
+          --ignore-filename-regex "(apps/|vendor/|crates/xtask/)"
+          --fail-under-lines 80
+
+  # Constitution Principle III: every network-path test runs against the simulated
+  # hostile network, never live infrastructure. Enabled once Phase 0 (T010-T020) lands.
+  harness:
+    name: Integration (simulated network)
+    needs: build-and-test
+    runs-on: windows-latest
+    if: false # enable at T020
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+
+      - name: Start simulation harness
+        run: docker compose -f testing/harness/docker-compose.yml up -d --wait
+
+      - name: Integration tests
+        run: cargo nextest run --profile integration
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f testing/harness/docker-compose.yml down -v

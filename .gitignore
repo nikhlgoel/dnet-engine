@@ -1,0 +1,30 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# Node / Tauri
+node_modules/
+dist/
+apps/dnet-tray/src-tauri/target/
+
+# Vendored third-party binaries: fetched by `cargo xtask fetch-vendor`, never committed.
+# Licence texts under vendor/ ARE committed - see the negations below.
+vendor/**/*.dll
+vendor/**/*.exe
+vendor/**/*.sys
+vendor/**/*.zip
+vendor/**/*.tar.gz
+!vendor/**/LICENSE*
+!vendor/**/*.md
+!vendor/**/*.toml
+
+# Local runtime state
+/run/
+*.log
+
+# OS / editor
+Thumbs.db
+.DS_Store
+.vscode/
+.idea/

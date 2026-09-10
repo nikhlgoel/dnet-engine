@@ -1,0 +1,18 @@
+[package]
+name = "dnet-supervisor"
+description = "Child process lifecycle for the supervised transport cores."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+dnet-core = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["process", "rt", "time", "io-util", "sync", "macros"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -1,0 +1,15 @@
+[package]
+name = "dnet-etw"
+description = "ETW real-time session; connect-time PID attribution."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+dnet-core = { workspace = true }
+ferrisetw = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

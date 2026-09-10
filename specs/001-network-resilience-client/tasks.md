@@ -39,10 +39,10 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
 
 **Purpose**: Workspace, vendoring, and the two CI checks that enforce the binding licence obligations.
 
-- [ ] T001 Create the Rust workspace root `Cargo.toml` with members `crates/dnetd`, `crates/dnet-core`, `crates/dnet-ipc`, `crates/dnet-supervisor`, `crates/dnet-config`, `crates/dnet-etw`, `crates/dnet-netstate`, `crates/dnet-provision`, `crates/xtask`
-- [ ] T002 [P] Add `LICENSE` (GPLv3 full text) and `THIRD-PARTY-NOTICES.md` at repository root, with attribution sections for the primary transport core, `amneziawg-go`, and Wintun
-- [ ] T003 [P] Add `.gitignore` covering `target/`, `node_modules/`, `vendor/**/*.dll`, `vendor/**/*.exe`, `dist/`, and `*.pdb`
-- [ ] T004 [P] Configure `rustfmt.toml` and `clippy.toml`; set `#![deny(warnings)]` policy in CI only, not in source
+- [x] T001 Create the Rust workspace root `Cargo.toml` with members `crates/dnetd`, `crates/dnet-core`, `crates/dnet-ipc`, `crates/dnet-supervisor`, `crates/dnet-config`, `crates/dnet-etw`, `crates/dnet-netstate`, `crates/dnet-provision`, `crates/xtask`
+- [x] T002 [P] Add `LICENSE` (GPLv3 full text) and `THIRD-PARTY-NOTICES.md` at repository root, with attribution sections for the primary transport core, `amneziawg-go`, and Wintun
+- [x] T003 [P] Add `.gitignore` covering `target/`, `node_modules/`, `vendor/**/*.dll`, `vendor/**/*.exe`, `dist/`, and `*.pdb`
+- [x] T004 [P] Configure `rustfmt.toml` and `clippy.toml`; set `#![deny(warnings)]` policy in CI only, not in source
 - [ ] T005 Implement `cargo xtask fetch-vendor` in `crates/xtask/src/fetch_vendor.rs` — downloads pinned releases of the primary core, `amneziawg-go`, and the **vendor-signed prebuilt Wintun DLL**, verifying each against a recorded SHA-256
 - [ ] T006 Implement `cargo xtask verify-vendor` in `crates/xtask/src/verify_vendor.rs` — asserts the Authenticode signature on `vendor/wintun/wintun.dll` and **fails the build if any Wintun source file exists anywhere in the tree** (Constitution licence obligation 2, [research.md](./research.md) §R6)
 - [ ] T007 Implement `cargo xtask lint-branding` in `crates/xtask/src/lint_branding.rs` — greps UI strings, installer manifests, README, and marketing assets for the primary core's vendor name and fails outside the allowlist (`THIRD-PARTY-NOTICES.md`, the About screen, and `docs/`/`specs/` engineering documents) (Constitution licence obligation 1)
@@ -50,6 +50,16 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
 - [ ] T009 [P] Add `cargo llvm-cov` to CI with `--fail-under-lines 80`, excluding `apps/` and `vendor/`
 
 **Checkpoint**: Both licence obligations are mechanically enforced before any code exists that could violate them.
+
+> **Status 2026-09-10** — T001–T004 complete and validated (TOML parses, workspace members
+> resolve, branding-lint logic simulated over the real tree: 24 files scanned, 0 violations;
+> no Wintun source present).
+>
+> **T005–T009 are written but NOT verified: the Rust toolchain is not installed on this
+> machine**, so nothing has been compiled or run. They stay unchecked until `cargo build`
+> and `cargo test` actually pass — Constitution Principle IV requires reading real output,
+> not assuming it. T005 additionally needs upstream versions chosen and SHA-256 digests
+> pinned before it does anything.
 
 ---
 
