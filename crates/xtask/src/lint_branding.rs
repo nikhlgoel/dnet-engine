@@ -14,31 +14,58 @@
 use anyhow::{anyhow, bail, Result};
 use std::path::{Path, PathBuf};
 
-/// The vendor name, in the spellings that would plausibly appear.
+/// Names DNet Engine must not use in branding, UI, installer, or marketing.
+///
+/// Two independent obligations, both recorded in `.specify/memory/constitution.md`:
+///
+/// - **Obligation 1** — the primary transport core's licence carries a GPLv3 §7(e)
+///   term declining to grant trademark rights.
+/// - **Obligation 3** — the Wintun prebuilt licence §3(e) forbids using the
+///   WireGuard LLC, WireGuard project, or Wintun names to endorse or promote
+///   products derived from the Software (ADR-0004, Finding 1).
+///
 /// Assembled at runtime so this source file does not itself trip the lint.
 fn forbidden_terms() -> Vec<String> {
-    let base = ["sing", "box"].join("-");
-    vec![base.clone(), base.replace('-', ""), base.replace('-', "_")]
+    let core = ["sing", "box"].join("-");
+    let wg = ["wire", "guard"].join("");
+    let wt = ["win", "tun"].join("");
+    vec![
+        core.clone(),
+        core.replace('-', ""),
+        core.replace('-', "_"),
+        wg,
+        wt,
+    ]
 }
 
 /// Surfaces the obligation actually covers: anything user-facing or promotional.
 const LINTED_ROOTS: &[&str] = &["apps", "installer", "crates", "vendor"];
 const LINTED_ROOT_FILES: &[&str] = &["README.md"];
 
-/// Attribution is required, so these surfaces are allowed to name the vendor.
-/// Engineering documents under `docs/` and `specs/` are internal records, not
-/// branding or marketing, and are likewise exempt.
+/// Attribution is required, so these surfaces are allowed to name the vendors.
+/// Engineering documents under `docs/` and `specs/`, and the `xtask` build tooling,
+/// are internal records rather than branding or marketing, and are likewise exempt.
+///
+/// What this check protects is what a *user* sees: shipped binaries' strings, the UI,
+/// the installer, and the README.
 const ALLOWED: &[&str] = &[
     "THIRD-PARTY-NOTICES.md",
     "docs/",
     "specs/",
     "vendor/primary-core/LICENSE",
     "vendor/primary-core/NOTICE.md",
+    "vendor/primary-core/BUILD-PROVENANCE.md",
+    "vendor/amneziawg-go/LICENSE",
+    "vendor/amneziawg-go/BUILD-PROVENANCE.md",
+    "vendor/amneziawg-go/README.md",
+    "vendor/wintun/LICENSE.txt",
+    "vendor/wintun/README.md",
+    // Build tooling. `xtask` never ships to a user, so it is not a branding or
+    // marketing surface; and its whole job is naming what it fetches, builds, and
+    // checks for. Linting it would make the check unsatisfiable.
+    "crates/xtask/",
     // The About screen is the one UI surface permitted to carry attribution.
     "apps/dnet-tray/src/lib/About.svelte",
-    // This linter and its tests necessarily mention what they search for.
-    "crates/xtask/src/lint_branding.rs",
-    "crates/xtask/tests/",
 ];
 
 const LINTED_EXTENSIONS: &[&str] = &[
@@ -91,11 +118,15 @@ pub fn run(repo_root: &Path) -> Result<()> {
         eprintln!("  {}:{}: {}", rel.display(), line, shown);
     }
     eprintln!();
-    eprintln!("The primary transport core's licence carries a GPLv3 §7(e) term declining");
-    eprintln!("to grant trademark rights. DNet Engine must not use that name in its product");
-    eprintln!("name, branding, UI, installer, or marketing.");
+    eprintln!("Two licence obligations restrict these names in branding, UI, installer,");
+    eprintln!("and marketing surfaces:");
     eprintln!();
-    eprintln!("Refer to it in code and configuration as `primary_core` / `PrimaryCore`.");
+    eprintln!("  1. The primary transport core's licence carries a GPLv3 §7(e) term");
+    eprintln!("     declining to grant trademark rights. Refer to it in code and");
+    eprintln!("     configuration as `primary_core` / `PrimaryCore`.");
+    eprintln!("  3. The Wintun prebuilt licence §3(e) forbids using the WireGuard LLC,");
+    eprintln!("     WireGuard project, or Wintun names to endorse or promote this product.");
+    eprintln!();
     eprintln!("Attribution belongs in THIRD-PARTY-NOTICES.md and the About screen only.");
     bail!("lint-branding failed")
 }
@@ -126,8 +157,8 @@ fn walk(root: &Path) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let entries =
-            std::fs::read_dir(&dir).map_err(|e| anyhow!("failed to read {}: {e}", dir.display()))?;
+        let entries = std::fs::read_dir(&dir)
+            .map_err(|e| anyhow!("failed to read {}: {e}", dir.display()))?;
         for entry in entries.flatten() {
             let path = entry.path();
             let name = entry.file_name();

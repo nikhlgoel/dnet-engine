@@ -43,23 +43,29 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
 - [x] T002 [P] Add `LICENSE` (GPLv3 full text) and `THIRD-PARTY-NOTICES.md` at repository root, with attribution sections for the primary transport core, `amneziawg-go`, and Wintun
 - [x] T003 [P] Add `.gitignore` covering `target/`, `node_modules/`, `vendor/**/*.dll`, `vendor/**/*.exe`, `dist/`, and `*.pdb`
 - [x] T004 [P] Configure `rustfmt.toml` and `clippy.toml`; set `#![deny(warnings)]` policy in CI only, not in source
-- [ ] T005 Implement `cargo xtask fetch-vendor` in `crates/xtask/src/fetch_vendor.rs` — downloads pinned releases of the primary core, `amneziawg-go`, and the **vendor-signed prebuilt Wintun DLL**, verifying each against a recorded SHA-256
-- [ ] T006 Implement `cargo xtask verify-vendor` in `crates/xtask/src/verify_vendor.rs` — asserts the Authenticode signature on `vendor/wintun/wintun.dll` and **fails the build if any Wintun source file exists anywhere in the tree** (Constitution licence obligation 2, [research.md](./research.md) §R6)
-- [ ] T007 Implement `cargo xtask lint-branding` in `crates/xtask/src/lint_branding.rs` — greps UI strings, installer manifests, README, and marketing assets for the primary core's vendor name and fails outside the allowlist (`THIRD-PARTY-NOTICES.md`, the About screen, and `docs/`/`specs/` engineering documents) (Constitution licence obligation 1)
-- [ ] T008 Add GitHub Actions workflow `.github/workflows/ci.yml` running `verify-vendor`, `lint-branding`, `cargo fmt --check`, `cargo clippy`, and `cargo test --workspace` on `windows-latest`
-- [ ] T009 [P] Add `cargo llvm-cov` to CI with `--fail-under-lines 80`, excluding `apps/` and `vendor/`
+- [x] T005 Implement `cargo xtask fetch-vendor` in `crates/xtask/src/fetch_vendor.rs` — downloads pinned releases of the primary core, `amneziawg-go`, and the **vendor-signed prebuilt Wintun DLL**, verifying each against a recorded SHA-256
+- [x] T006 Implement `cargo xtask verify-vendor` in `crates/xtask/src/verify_vendor.rs` — asserts the Authenticode signature on `vendor/wintun/wintun.dll` and **fails the build if any Wintun source file exists anywhere in the tree** (Constitution licence obligation 2, [research.md](./research.md) §R6)
+- [x] T007 Implement `cargo xtask lint-branding` in `crates/xtask/src/lint_branding.rs` — greps UI strings, installer manifests, README, and marketing assets for the primary core's vendor name and fails outside the allowlist (`THIRD-PARTY-NOTICES.md`, the About screen, and `docs/`/`specs/` engineering documents) (Constitution licence obligation 1)
+- [x] T008 Add GitHub Actions workflow `.github/workflows/ci.yml` running `verify-vendor`, `lint-branding`, `cargo fmt --check`, `cargo clippy`, and `cargo test --workspace` on `windows-latest`
+- [x] T009 [P] Add `cargo llvm-cov` to CI with `--fail-under-lines 80`, excluding `apps/` and `vendor/`
 
 **Checkpoint**: Both licence obligations are mechanically enforced before any code exists that could violate them.
 
-> **Status 2026-09-10** — T001–T004 complete and validated (TOML parses, workspace members
-> resolve, branding-lint logic simulated over the real tree: 24 files scanned, 0 violations;
-> no Wintun source present).
+> **Status 2026-09-10 — Phase 1 COMPLETE.** Verified with the real toolchain
+> (rustc 1.98.1, MSVC 14.44 + SDK 10.0.26100, Go 1.27.0):
 >
-> **T005–T009 are written but NOT verified: the Rust toolchain is not installed on this
-> machine**, so nothing has been compiled or run. They stay unchecked until `cargo build`
-> and `cargo test` actually pass — Constitution Principle IV requires reading real output,
-> not assuming it. T005 additionally needs upstream versions chosen and SHA-256 digests
-> pinned before it does anything.
+> - `cargo build --workspace` — clean, 9 crates
+> - `cargo fmt --all --check` — clean
+> - `cargo clippy --workspace --all-targets -- -D warnings` — clean
+> - `cargo test --workspace` — 6 passed, 0 failed
+> - `cargo xtask fetch-vendor` — built both cores from pinned commits
+> - `cargo xtask verify-vendor` — OK (signature valid, no Wintun source, licences present)
+> - `cargo xtask lint-branding` — OK, **and verified by negative test**: a planted
+>   "powered by <core> and Wintun" string in `dnetd` was caught and failed the build
+>
+> Vendored artifacts: primary core **41.63 MB** (down from 78.03 MB prebuilt, a 47%
+> reduction from minimal build tags), `amneziawg-go` 3.36 MB, Wintun DLL 0.41 MB —
+> **45.39 MB uncompressed**, comfortably inside SC-012 once installer-compressed.
 
 ---
 

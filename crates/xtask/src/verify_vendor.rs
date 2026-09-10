@@ -4,9 +4,11 @@
 //! vendor-signed prebuilt DLL only, never built from source.**
 //!
 //! Wintun's source is GPLv2, which is incompatible with this project's GPLv3.
-//! The prebuilt signed DLLs carry a separate, more permissive licence and are the
-//! vendor's only supported distribution path. See `docs/Research-Critique.md` §6.1
-//! and `specs/001-network-resilience-client/research.md` §R6.
+//! The prebuilt signed DLLs carry a separate **proprietary** licence (not a permissive
+//! one) whose §3(d) permits redistribution only alongside software using the documented
+//! API, and whose §3(a) forbids extraction from other products. Compatibility rests on
+//! aggregation under GPLv3 §5: DNet Engine's own code neither links nor loads the DLL.
+//! See `docs/adr/0004-vendored-binary-pins.md` and `research.md` §R6.
 //!
 //! This check fails the build. It is not advisory.
 
@@ -90,7 +92,10 @@ fn check_no_wintun_source(repo_root: &Path, failures: &mut Vec<String>) -> Resul
 fn check_signed_dll(repo_root: &Path, failures: &mut Vec<String>) -> Result<()> {
     let dll = repo_root.join("vendor/wintun/wintun.dll");
     if !dll.exists() {
-        println!("verify-vendor: note - {} not present; run `cargo xtask fetch-vendor` before packaging", dll.display());
+        println!(
+            "verify-vendor: note - {} not present; run `cargo xtask fetch-vendor` before packaging",
+            dll.display()
+        );
         return Ok(());
     }
 
@@ -137,11 +142,15 @@ fn authenticode_status(path: &Path) -> Result<Option<String>> {
         return Ok(None);
     }
     let status = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    Ok(if status.is_empty() { None } else { Some(status) })
+    Ok(if status.is_empty() {
+        None
+    } else {
+        Some(status)
+    })
 }
 
-/// Every bundled dependency must ship its licence text (GPLv3 §6 and the
-/// permissive Wintun binary licence both require it).
+/// Every bundled dependency must ship its licence text: GPLv3 §6 requires it for the
+/// GPL components, and the Wintun prebuilt licence requires its notices be retained.
 fn check_licence_texts(repo_root: &Path, failures: &mut Vec<String>) -> Result<()> {
     let required = [
         "vendor/wintun/LICENSE.txt",

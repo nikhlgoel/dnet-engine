@@ -1,6 +1,6 @@
 # ADR-0004: Vendored binary pins and supply-chain verification
 
-**Status**: Proposed — three decisions need the project owner
+**Status**: Accepted — all three decisions approved and implemented 2026-09-10
 **Date**: 2026-09-10
 **Task**: T005 (`cargo xtask fetch-vendor`)
 **Supersedes in part**: `research.md` §R1 and §R6 characterisations
@@ -123,3 +123,39 @@ Option B is the better end state and becomes cheap once Finding 2 adds Go to the
   third naming obligation added.
 - T005 stays blocked until decisions 1 and 2 are made; the primary core and Wintun pins above
   are final and can be committed now.
+
+---
+
+## Outcome (2026-09-10)
+
+All three decisions were approved and implemented in `cargo xtask fetch-vendor`.
+
+| Artifact | How obtained | Result |
+|---|---|---|
+| Primary core | Built from commit `0b89958` with `with_quic,with_utls,with_clash_api,with_gvisor` | **41.63 MB** (was 78.03 MB prebuilt — **47% smaller**) |
+| `amneziawg-go` | Built from commit `b5928ef`, default tags | 3.36 MB |
+| Wintun | Signed prebuilt DLL, SHA-256 verified | 0.41 MB |
+| | | **45.39 MB total, uncompressed** |
+
+**Finding 3 resolved.** Option B (minimal build tags) alone brought the primary core
+inside a workable budget; Option A's compression is no longer load-bearing. 45.39 MB
+uncompressed becomes roughly 18–20 MB after installer compression, leaving ample room
+for `dnetd`, the tray, and the installer itself under SC-012's 60 MB.
+
+`with_wireguard` is deliberately **excluded** from the primary core: AmneziaWG is served
+by a separate supervised process (finding C14), so the core needs no WireGuard support.
+A unit test asserts this, because silently regaining the tag would inflate the binary for
+no benefit.
+
+**Provenance.** Sources are pinned by **commit SHA rather than tag** — a tag can be moved,
+a commit cannot — and `fetch-vendor` verifies `git rev-parse HEAD` against the pin after
+fetching, failing loudly if the tree is anything other than the pinned commit. Each build
+writes `vendor/<name>/BUILD-PROVENANCE.md` recording repository, version, commit, package,
+and build tags, so a shipped binary can be traced to its exact source. That is also how the
+GPLv3 §6 source offer for the primary core is satisfied.
+
+**Finding 1 implemented.** `lint-branding` now covers the WireGuard and Wintun names
+alongside the primary core's. Its allowlist exempts `crates/xtask/` (build tooling that
+never ships and whose job is naming what it checks for), `docs/`, `specs/`, vendor licence
+and provenance files, and the About screen. A negative test confirms the check still fails
+on a planted violation in `dnetd`.
