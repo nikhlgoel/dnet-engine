@@ -211,6 +211,7 @@ name = "dnet-ipc"
 version = "0.1.0"
 dependencies = [
  "dnet-core",
+ "proptest",
  "serde",
  "serde_json",
  "thiserror",

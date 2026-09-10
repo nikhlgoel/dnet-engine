@@ -1,31 +1,35 @@
-//! T021 / SPIKE-O6 — measure ETW attribution cost and coverage.
+//! T021 / SPIKE-O6 — measure ETW attribution cost and coverage. **Instrument v2.**
 //!
-//! **This decides whether per-process routing (FR-023) ships in v1 at all.**
+//! **This decides whether per-process routing (FR-023) ships in v1.**
 //!
-//! Two questions, both of which must be answered by measurement rather than hope:
+//! Run 1 (2026-09-10) reported 0.5% coverage and 1 ambient connect event in 30 s.
+//! That run could not tell apart three explanations, so v2 is designed to separate
+//! them in a single run rather than issue a verdict it cannot support:
 //!
-//! 1. **Cost** — does a real-time consumer on `Microsoft-Windows-Kernel-Network`
-//!    stay inside the idle-CPU budget (SC-014: <1% of a four-core machine)?
-//! 2. **Coverage** — what proportion of outbound connections are actually
-//!    attributed to the correct PID at connect time?
+//! 1. **Loopback special-casing.** Run 1's ground truth only connected to 127.0.0.1.
+//!    v2 measures loopback and a remote destination as separate classes. The verdict
+//!    uses the remote class, because remote traffic is what the product routes.
+//! 2. **Port byte order.** `sport`/`dport` may be carried in network byte order.
+//!    Reading them as native-endian `u16` misses every port except byte-palindromes,
+//!    about 0.4% of the ephemeral range — close to run 1's 0.5%. v2 checks both byte
+//!    orders and reports which one matched.
+//! 3. **A silent session.** v2 builds a histogram of every event id the provider
+//!    delivers, and gives no verdict if the session receives nothing.
 //!
-//! Coverage is measured against **ground truth**: this process opens a known
-//! number of TCP connections to a local listener, and we count how many come back
-//! from ETW with our own PID and the expected port. Counting "events parsed
-//! successfully" would measure parse success, not coverage, and would flatter the
-//! result.
-//!
-//! Requires Administrator. Run:
+//! Requires Administrator:
 //!   cargo build --release --example spike_cost -p dnet-etw
-//!   Start-Process -Verb RunAs .\target\release\examples\spike_cost.exe
+//!   .\target\release\examples\spike_cost.exe [--target HOST:PORT] [--skip-remote]
 //!
-//! If cost breaches SC-014 or coverage is too low to be useful, per-process
-//! routing is cut from v1 and only destination rules ship. That outcome is a
-//! success for this spike, not a failure.
+//! The remote class opens ordinary outbound TCP connections: by default 200 to
+//! 1.1.1.1:443, 50 ms apart — about the load of opening a few web pages. Use
+//! --target to pick another destination, or --skip-remote to measure loopback only.
+//! A loopback-only run gives no verdict.
+//!
+//! Exit codes: 0 PASS · 1 FAIL · 2 INSTRUMENT INVALID (no verdict).
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -40,227 +44,493 @@ use ferrisetw::EventRecord;
 /// Microsoft-Windows-Kernel-Network.
 const PROVIDER_GUID: &str = "7DD42A49-5329-4832-8DFD-43D979153A88";
 
-/// `TcpIpConnect` — an outbound TCP connection attempt.
-/// IPv4 is event id 12; the IPv6 counterpart is 28.
+/// `TcpIpConnect` ("connection attempted"): IPv4 is event 12, IPv6 is event 28.
 const EVENT_TCP_CONNECT_V4: u16 = 12;
 const EVENT_TCP_CONNECT_V6: u16 = 28;
 
-/// How many known connections to make when measuring coverage.
 const GROUND_TRUTH_CONNECTIONS: usize = 200;
-
-/// How long to observe ambient traffic when measuring cost.
+const CONNECT_SPACING: Duration = Duration::from_millis(50);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const COST_WINDOW: Duration = Duration::from_secs(30);
+/// Real-time delivery is buffered; wait this long for events to arrive.
+const DRAIN: Duration = Duration::from_secs(3);
+const LIVENESS_BURST: usize = 20;
+const DEFAULT_REMOTE_TARGET: &str = "1.1.1.1:443";
 
+/// Below this many events in the cost window, the CPU figure only describes an
+/// idle session, not attribution under load, and is reported that way.
+const MIN_EVENTS_FOR_REPRESENTATIVE_COST: u64 = 50;
+
+const COST_THRESHOLD_PCT: f64 = 1.0;
+const COVERAGE_THRESHOLD_PCT: f64 = 95.0;
+
+/// What the ETW callback has seen. The ETW thread writes it; main reads it.
 #[derive(Default)]
-struct Stats {
-    /// Every connect event seen, from any process.
-    events_total: AtomicU64,
-    /// Events where the payload yielded a usable PID and 5-tuple.
-    events_parsed: AtomicU64,
-    /// Events whose PID could not be read from the payload.
-    events_pid_missing: AtomicU64,
+struct Observed {
+    /// Every event id the provider delivered, with counts.
+    histogram: Mutex<BTreeMap<u16, u64>>,
+    /// Connect events (ids 12 and 28) from any process.
+    connects_total: AtomicU64,
+    /// Connect events whose payload PID is this process.
+    connects_own_pid: AtomicU64,
+    /// Connect events whose PID or port could not be parsed.
+    connects_unparsed: AtomicU64,
+    /// `sport` values from this process's connect events, exactly as parsed.
+    own_ports_raw: Mutex<HashSet<u16>>,
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("SPIKE-O6 — ETW attribution cost and coverage");
-    println!("=============================================");
-    println!();
+impl Observed {
+    fn histogram_total(&self) -> u64 {
+        self.histogram
+            .lock()
+            .expect("histogram mutex poisoned")
+            .values()
+            .sum()
+    }
+}
 
+/// Measurements for one class of ground-truth connections.
+struct ClassResult {
+    name: &'static str,
+    made: usize,
+    failed: usize,
+    /// Connect events carrying our PID, whatever their port.
+    own_pid_events: u64,
+    matched_raw: usize,
+    matched_swapped: usize,
+}
+
+impl ClassResult {
+    fn best_matched(&self) -> usize {
+        self.matched_raw.max(self.matched_swapped)
+    }
+
+    fn coverage_pct(&self) -> f64 {
+        if self.made == 0 {
+            return 0.0;
+        }
+        self.best_matched() as f64 / self.made as f64 * 100.0
+    }
+
+    /// What the numbers say about the cause, in plain terms.
+    fn interpretation(&self) -> &'static str {
+        let made = self.made as f64;
+        if self.made == 0 {
+            "no connections completed; nothing was measured"
+        } else if (self.own_pid_events as f64) < made * 0.05 {
+            "the provider did not emit connect events for this traffic"
+        } else if self.best_matched() as f64 >= made * 0.95 {
+            "events were emitted and attributed correctly"
+        } else {
+            "events carrying our PID arrived but ports did not match: a parsing \
+             problem, not a provider coverage problem"
+        }
+    }
+}
+
+struct Args {
+    target: String,
+    skip_remote: bool,
+}
+
+fn parse_args() -> Args {
+    let mut args = Args {
+        target: DEFAULT_REMOTE_TARGET.to_string(),
+        skip_remote: false,
+    };
+    let mut it = std::env::args().skip(1);
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--target" => {
+                if let Some(t) = it.next() {
+                    args.target = t;
+                }
+            }
+            "--skip-remote" => args.skip_remote = true,
+            other => eprintln!("ignoring unknown argument: {other}"),
+        }
+    }
+    args
+}
+
+fn on_event(record: &EventRecord, locator: &SchemaLocator, obs: &Observed, self_pid: u32) {
+    let id = record.event_id();
+    if let Ok(mut h) = obs.histogram.lock() {
+        *h.entry(id).or_insert(0) += 1;
+    }
+    if id != EVENT_TCP_CONNECT_V4 && id != EVENT_TCP_CONNECT_V6 {
+        return;
+    }
+    obs.connects_total.fetch_add(1, Ordering::Relaxed);
+
+    let Ok(schema) = locator.event_schema(record) else {
+        obs.connects_unparsed.fetch_add(1, Ordering::Relaxed);
+        return;
+    };
+    let parser = Parser::create(record, &schema);
+
+    // The PID comes from the EVENT PAYLOAD, never EVENT_TRACE_HEADER. Microsoft
+    // documents the header ProcessId as unreliable for network events (R7).
+    let pid: Option<u32> = parser.try_parse("PID").ok();
+    let sport: Option<u16> = parser.try_parse("sport").ok();
+
+    match (pid, sport) {
+        (Some(pid), Some(sport)) => {
+            if pid == self_pid {
+                obs.connects_own_pid.fetch_add(1, Ordering::Relaxed);
+                if let Ok(mut s) = obs.own_ports_raw.lock() {
+                    s.insert(sport);
+                }
+            }
+        }
+        _ => {
+            obs.connects_unparsed.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+fn main() {
+    let code = run();
+    std::process::exit(code);
+}
+
+fn run() -> i32 {
+    let args = parse_args();
     let self_pid = std::process::id();
-    println!("Process id: {self_pid}");
-    println!("Provider:   Microsoft-Windows-Kernel-Network ({PROVIDER_GUID})");
-    println!("Events:     TcpIpConnect (id {EVENT_TCP_CONNECT_V4} v4, {EVENT_TCP_CONNECT_V6} v6)");
+
+    println!("SPIKE-O6 — ETW attribution cost and coverage (instrument v2)");
+    println!("=============================================================");
+    println!("Process id:  {self_pid}");
+    println!("Provider:    Microsoft-Windows-Kernel-Network ({PROVIDER_GUID})");
+    println!("Connect ids: {EVENT_TCP_CONNECT_V4} (v4), {EVENT_TCP_CONNECT_V6} (v6)");
+    if args.skip_remote {
+        println!("Remote:      skipped (loopback-only run gives no verdict)");
+    } else {
+        println!("Remote:      {}", args.target);
+    }
     println!();
 
-    let stats = Arc::new(Stats::default());
-    // Ports observed for THIS process, used for the coverage measurement.
-    let own_ports: Arc<Mutex<HashSet<u16>>> = Arc::new(Mutex::new(HashSet::new()));
-
-    let cb_stats = Arc::clone(&stats);
-    let cb_ports = Arc::clone(&own_ports);
-
+    let obs = Arc::new(Observed::default());
+    let cb_obs = Arc::clone(&obs);
     let provider = Provider::by_guid(PROVIDER_GUID)
-        .add_callback(move |record: &EventRecord, locator: &SchemaLocator| {
-            let id = record.event_id();
-            if id != EVENT_TCP_CONNECT_V4 && id != EVENT_TCP_CONNECT_V6 {
-                return;
-            }
-            cb_stats.events_total.fetch_add(1, Ordering::Relaxed);
-
-            let Ok(schema) = locator.event_schema(record) else {
-                cb_stats.events_pid_missing.fetch_add(1, Ordering::Relaxed);
-                return;
-            };
-            let parser = Parser::create(record, &schema);
-
-            // CRITICAL: the PID is read from the EVENT PAYLOAD, never from
-            // EVENT_TRACE_HEADER. Microsoft documents the header ProcessId as
-            // unreliable for network events, because some are logged by separate
-            // threads. Using it would produce silently wrong attribution — the
-            // worst possible failure for a routing decision.
-            let pid: Option<u32> = parser.try_parse("PID").ok();
-            let sport: Option<u16> = parser.try_parse("sport").ok();
-            let dport: Option<u16> = parser.try_parse("dport").ok();
-
-            match (pid, sport, dport) {
-                (Some(pid), Some(sport), Some(_dport)) => {
-                    cb_stats.events_parsed.fetch_add(1, Ordering::Relaxed);
-                    if pid == self_pid {
-                        if let Ok(mut set) = cb_ports.lock() {
-                            set.insert(sport);
-                        }
-                    }
-                }
-                _ => {
-                    cb_stats.events_pid_missing.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-        })
+        .add_callback(move |r: &EventRecord, l: &SchemaLocator| on_event(r, l, &cb_obs, self_pid))
         .build();
 
     println!("Starting ETW session (requires Administrator)...");
     let (trace, handle) = match UserTrace::new()
-        .named(String::from("DNetSpikeO6"))
+        .named(String::from("DNetSpikeO6v2"))
         .enable(provider)
         .start()
     {
         Ok(v) => v,
-        // TraceError implements Debug but not Display, so format it with {:?}
-        // rather than converting it into a boxed error.
         Err(e) => {
-            eprintln!();
+            // TraceError implements Debug but not Display.
             eprintln!("FAILED to start the ETW session: {e:?}");
-            eprintln!();
             eprintln!("This almost always means the process is not elevated.");
-            eprintln!("Run it as Administrator:");
-            eprintln!("  Start-Process -Verb RunAs .\\target\\release\\examples\\spike_cost.exe");
-            return Err("could not start ETW session (Administrator required)".into());
+            return 2;
         }
     };
     std::thread::spawn(move || {
         let _ = UserTrace::process_from_handle(handle);
     });
-    println!("Session started.");
+
+    let remote_addr = if args.skip_remote {
+        None
+    } else {
+        match args
+            .target
+            .to_socket_addrs()
+            .ok()
+            .and_then(|mut a| a.next())
+        {
+            Some(addr) => Some(addr),
+            None => {
+                eprintln!(
+                    "INSTRUMENT INVALID: could not resolve --target {}",
+                    args.target
+                );
+                return 2;
+            }
+        }
+    };
+
+    // ------------------------------------------------------------ liveness
+    println!("[0/3] Liveness — confirming the session receives events at all.");
+    let before = obs.histogram_total();
+    let loopback = match LoopbackListener::start() {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("INSTRUMENT INVALID: could not start loopback listener: {e}");
+            return 2;
+        }
+    };
+    for _ in 0..LIVENESS_BURST {
+        let _ = match remote_addr {
+            Some(addr) => connect_remote(addr),
+            None => loopback.connect(),
+        };
+    }
+    std::thread::sleep(DRAIN);
+    let delivered = obs.histogram_total() - before;
+    println!("      Events delivered during burst: {delivered}");
+    if delivered == 0 {
+        println!();
+        println!("INSTRUMENT INVALID: the session received no events of any id.");
+        println!("No verdict is possible. Check the provider GUID and elevation.");
+        stop(trace);
+        return 2;
+    }
     println!();
 
     // ---------------------------------------------------------------- cost
-    println!("[1/2] Cost — observing ambient traffic for {}s.", COST_WINDOW.as_secs());
-    println!("      Keep your normal workload running.");
-
+    println!(
+        "[1/3] Cost — observing ambient traffic for {}s. Keep your workload running.",
+        COST_WINDOW.as_secs()
+    );
+    let events_before = obs.histogram_total();
+    let connects_before = obs.connects_total.load(Ordering::Relaxed);
     let cpu_before = process_cpu_time();
     let wall_before = Instant::now();
     std::thread::sleep(COST_WINDOW);
-    let cpu_used = process_cpu_time() - cpu_before;
+    let cpu_used = process_cpu_time().saturating_sub(cpu_before);
     let wall = wall_before.elapsed();
+    let window_events = obs.histogram_total() - events_before;
+    let window_connects = obs.connects_total.load(Ordering::Relaxed) - connects_before;
 
-    let total = stats.events_total.load(Ordering::Relaxed);
-    let parsed = stats.events_parsed.load(Ordering::Relaxed);
-    let missing = stats.events_pid_missing.load(Ordering::Relaxed);
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4) as f64;
+    let cpu_pct_machine = cpu_used.as_secs_f64() / wall.as_secs_f64() * 100.0 / cores;
+    let cost_representative = window_events >= MIN_EVENTS_FOR_REPRESENTATIVE_COST;
 
-    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4) as f64;
-    let cpu_pct_one_core = (cpu_used.as_secs_f64() / wall.as_secs_f64()) * 100.0;
-    let cpu_pct_machine = cpu_pct_one_core / cores;
-
-    println!();
-    println!("      Wall time          {:.1} s", wall.as_secs_f64());
-    println!("      CPU consumed       {:.3} s", cpu_used.as_secs_f64());
-    println!("      CPU, one core      {:.3} %", cpu_pct_one_core);
-    println!("      CPU, {cores}-core machine  {:.3} %", cpu_pct_machine);
-    println!("      Connect events     {total} ({:.1}/s)", total as f64 / wall.as_secs_f64());
-    println!("      Parsed with PID    {parsed}");
-    println!("      PID unreadable     {missing}");
+    println!("      CPU, {cores}-core machine   {cpu_pct_machine:.3} %");
+    println!("      Events (all ids)        {window_events}");
+    println!("      Connect events          {window_connects}");
+    if !cost_representative {
+        println!(
+            "      NOTE: fewer than {MIN_EVENTS_FOR_REPRESENTATIVE_COST} events — this CPU figure \
+             describes an idle session, not attribution under load."
+        );
+    }
+    print_histogram(&obs);
     println!();
 
     // ------------------------------------------------------------ coverage
-    println!("[2/2] Coverage — making {GROUND_TRUTH_CONNECTIONS} known connections.");
+    println!(
+        "[2/3] Coverage — loopback class ({GROUND_TRUTH_CONNECTIONS} connections to 127.0.0.1)."
+    );
+    let loop_result = measure_class("loopback", &obs, || loopback.connect());
+    print_class(&loop_result);
 
-    own_ports.lock().unwrap().clear();
-    let expected = make_known_connections(GROUND_TRUTH_CONNECTIONS)?;
+    let remote_result = remote_addr.map(|addr| {
+        println!(
+            "[3/3] Coverage — remote class ({GROUND_TRUTH_CONNECTIONS} connections to {addr})."
+        );
+        let r = measure_class("remote", &obs, || connect_remote(addr));
+        print_class(&r);
+        r
+    });
 
-    // Allow the ETW pipeline to drain; real-time delivery is buffered.
-    std::thread::sleep(Duration::from_secs(3));
-
-    let observed = own_ports.lock().unwrap().clone();
-    let matched = expected.iter().filter(|p| observed.contains(p)).count();
-    let coverage = (matched as f64 / expected.len() as f64) * 100.0;
-
+    stop(trace);
+    println!(
+        "Unparsed connect events overall: {}",
+        obs.connects_unparsed.load(Ordering::Relaxed)
+    );
     println!();
-    println!("      Connections made   {}", expected.len());
-    println!("      Attributed to us   {matched}");
-    println!("      Coverage           {coverage:.1} %");
+
+    verdict(
+        &loop_result,
+        remote_result.as_ref(),
+        cpu_pct_machine,
+        cost_representative,
+    )
+}
+
+fn verdict(
+    loop_result: &ClassResult,
+    remote: Option<&ClassResult>,
+    cpu_pct: f64,
+    cost_representative: bool,
+) -> i32 {
+    println!("Verdict");
+    println!("-------");
+
+    for r in std::iter::once(loop_result).chain(remote) {
+        if r.matched_swapped > r.matched_raw.saturating_mul(2) && r.matched_swapped > 0 {
+            println!(
+                "  FINDING ({}): ports arrive in NETWORK byte order. Attribution must \
+                 swap sport/dport (T075).",
+                r.name
+            );
+        }
+    }
+
+    let Some(remote) = remote else {
+        println!("  No verdict: loopback-only run. Re-run without --skip-remote.");
+        return 2;
+    };
+    if remote.made == 0 {
+        println!("  INSTRUMENT INVALID: no remote connection completed; nothing was measured.");
+        return 2;
+    }
+
+    let coverage = remote.coverage_pct();
+    let coverage_ok = coverage >= COVERAGE_THRESHOLD_PCT;
+    let cost_ok = cpu_pct < COST_THRESHOLD_PCT;
+
+    println!(
+        "  Coverage  {coverage:.1} % on remote traffic  {}",
+        if coverage_ok {
+            "PASS (>=95%)"
+        } else {
+            "FAIL (<95%)"
+        }
+    );
+    println!(
+        "  Cost      {cpu_pct:.3} %  {}",
+        match (cost_ok, cost_representative) {
+            (true, true) => "PASS (<1%)",
+            (false, _) => "FAIL (>=1%)",
+            (true, false) => "NOT ESTABLISHED (too few events in the window)",
+        }
+    );
     println!();
 
+    if !coverage_ok {
+        println!(
+            "  SPIKE-O6 FAILS on remote coverage: {}.",
+            remote.interpretation()
+        );
+        println!("  Per the pre-registered rule, FR-023 is cut from v1 — unless the");
+        println!("  interpretation above points to a parsing problem, which is fixable.");
+        return 1;
+    }
+    if !cost_ok {
+        println!("  SPIKE-O6 FAILS on cost. FR-023 is cut from v1.");
+        return 1;
+    }
+    if !cost_representative {
+        println!("  Coverage passes, but cost is NOT ESTABLISHED. Re-run the cost window");
+        println!("  under heavier traffic (active downloads or many tabs) before deciding.");
+        return 2;
+    }
+    println!("  SPIKE-O6 PASSES. FR-023 stays in v1, labelled best-effort (Principle VI).");
+    0
+}
+
+fn measure_class(
+    name: &'static str,
+    obs: &Observed,
+    connect: impl Fn() -> std::io::Result<u16>,
+) -> ClassResult {
+    obs.own_ports_raw
+        .lock()
+        .expect("port set mutex poisoned")
+        .clear();
+    let own_before = obs.connects_own_pid.load(Ordering::Relaxed);
+
+    let mut expected = Vec::with_capacity(GROUND_TRUTH_CONNECTIONS);
+    let mut failed = 0;
+    for _ in 0..GROUND_TRUTH_CONNECTIONS {
+        match connect() {
+            Ok(port) => expected.push(port),
+            Err(_) => failed += 1,
+        }
+        std::thread::sleep(CONNECT_SPACING);
+    }
+    std::thread::sleep(DRAIN);
+
+    let own_pid_events = obs.connects_own_pid.load(Ordering::Relaxed) - own_before;
+    let seen = obs
+        .own_ports_raw
+        .lock()
+        .expect("port set mutex poisoned")
+        .clone();
+    let matched_raw = expected.iter().filter(|p| seen.contains(p)).count();
+    let matched_swapped = expected
+        .iter()
+        .filter(|p| seen.contains(&p.swap_bytes()))
+        .count();
+
+    ClassResult {
+        name,
+        made: expected.len(),
+        failed,
+        own_pid_events,
+        matched_raw,
+        matched_swapped,
+    }
+}
+
+fn print_class(r: &ClassResult) {
+    println!(
+        "      Connections completed      {} ({} failed)",
+        r.made, r.failed
+    );
+    println!("      Connect events, our PID    {}", r.own_pid_events);
+    println!("      Port matches, native order {}", r.matched_raw);
+    println!("      Port matches, byte-swapped {}", r.matched_swapped);
+    println!("      Coverage (best order)      {:.1} %", r.coverage_pct());
+    println!("      Interpretation             {}", r.interpretation());
+    println!();
+}
+
+fn print_histogram(obs: &Observed) {
+    let h = obs.histogram.lock().expect("histogram mutex poisoned");
+    if h.is_empty() {
+        println!("      Event id histogram: empty");
+        return;
+    }
+    let summary: Vec<String> = h.iter().map(|(id, n)| format!("{id}:{n}")).collect();
+    println!("      Event id histogram (id:count) {}", summary.join(" "));
+}
+
+fn stop(trace: UserTrace) {
     if let Err(e) = trace.stop() {
         eprintln!("warning: failed to stop the ETW session cleanly: {e:?}");
     }
-
-    // ------------------------------------------------------------- verdict
-    println!("Verdict");
-    println!("-------");
-    let cost_ok = cpu_pct_machine < 1.0;
-    let coverage_ok = coverage >= 95.0;
-
-    println!(
-        "  Cost      {:.3} % of a {cores}-core machine  {}",
-        cpu_pct_machine,
-        if cost_ok { "PASS (SC-014 <1%)" } else { "FAIL (SC-014 <1%)" }
-    );
-    println!(
-        "  Coverage  {coverage:.1} %  {}",
-        if coverage_ok { "PASS (>=95%)" } else { "FAIL (<95%)" }
-    );
-    println!();
-    if cost_ok && coverage_ok {
-        println!("  SPIKE-O6 PASSES. Per-process routing (FR-023) stays in v1 scope,");
-        println!("  labelled best-effort per Constitution Principle VI.");
-    } else {
-        println!("  SPIKE-O6 FAILS. Per-process routing (FR-023) is CUT from v1;");
-        println!("  only destination rules ship. Record the decision in");
-        println!("  docs/adr/0001-etw-attribution.md.");
-    }
-    Ok(())
 }
 
-/// Opens `n` TCP connections to a local listener and returns the source ports
-/// actually used. These are the ground truth for the coverage measurement.
-fn make_known_connections(n: usize) -> std::io::Result<Vec<u16>> {
-    let listener = TcpListener::bind("127.0.0.1:0")?;
-    let addr = listener.local_addr()?;
+/// A local listener that accepts and immediately answers connections.
+struct LoopbackListener {
+    addr: SocketAddr,
+}
 
-    std::thread::spawn(move || {
-        for stream in listener.incoming().take(n) {
-            if let Ok(mut s) = stream {
+impl LoopbackListener {
+    fn start() -> std::io::Result<Self> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        std::thread::spawn(move || {
+            for mut s in listener.incoming().flatten() {
                 let mut buf = [0u8; 8];
                 let _ = s.read(&mut buf);
                 let _ = s.write_all(b"ok");
             }
-        }
-    });
-
-    let mut ports = Vec::with_capacity(n);
-    for _ in 0..n {
-        match TcpStream::connect(addr) {
-            Ok(mut s) => {
-                if let Ok(local) = s.local_addr() {
-                    ports.push(local.port());
-                }
-                let _ = s.write_all(b"ping");
-                let mut buf = [0u8; 8];
-                let _ = s.read(&mut buf);
-            }
-            Err(e) => eprintln!("      connection failed: {e}"),
-        }
-        std::thread::sleep(Duration::from_millis(5));
+        });
+        Ok(Self { addr })
     }
-    Ok(ports)
+
+    fn connect(&self) -> std::io::Result<u16> {
+        let mut s = TcpStream::connect(self.addr)?;
+        let port = s.local_addr()?.port();
+        let _ = s.write_all(b"ping");
+        Ok(port)
+    }
 }
 
-/// Total CPU time (kernel + user) consumed by this process.
+fn connect_remote(addr: SocketAddr) -> std::io::Result<u16> {
+    let s = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT)?;
+    Ok(s.local_addr()?.port())
+}
+
+/// Total CPU time (kernel + user) this process has consumed.
 fn process_cpu_time() -> Duration {
     use std::mem::zeroed;
     use windows::Win32::Foundation::FILETIME;
     use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
 
+    // SAFETY: GetProcessTimes writes only to the four FILETIME out-pointers, each
+    // of which points at a live, properly aligned stack value for the whole call.
     unsafe {
         let mut creation: FILETIME = zeroed();
         let mut exit: FILETIME = zeroed();

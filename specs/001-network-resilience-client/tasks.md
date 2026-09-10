@@ -88,6 +88,11 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
 - [x] T020 **[GATE] Phase 0 exit**: demonstrate H1–H9 on demand, HN-01…HN-06 hold, and HV-03 runs with a **deliberately unobfuscated control that fails**. A harness where everything passes proves nothing ([contracts/harness.md](./contracts/harness.md) §5)
 
 - [ ] T021 **[GATE] SPIKE-O6**: build a throwaway ETW consumer in `crates/dnet-etw/examples/spike_cost.rs`; measure steady-state CPU cost and the proportion of connections attributed on a machine with a realistic socket population. **If cost breaches SC-014 or coverage is too low to be useful, per-process routing is cut from v1 and only destination rules ship.** Record the decision in `docs/adr/0001-etw-attribution.md` ([research.md](./research.md) §R7)
+  > **Run 1 (2026-09-10): INCONCLUSIVE - not a fail.** The instrument used loopback-only ground truth,
+  > had no port-independent PID count, and read ports in native byte order without establishing the
+  > kernel byte order, so its 0.5% coverage figure is uninterpretable. FR-023 is retained provisionally;
+  > T074-T076 stay blocked. Run 2 pending with instrument v2. See `docs/adr/0001-etw-attribution.md`
+  > and BUG-006.
 
 **Checkpoint**: The harness can tell the difference between working and not working. SPIKE-O6 has decided whether FR-023 is in scope.
 
@@ -118,8 +123,8 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
 
 ### Contract tests first (TDD)
 
-- [ ] T022 [P] Write failing contract tests IPC-01…IPC-09 in `crates/dnet-ipc/tests/contract.rs` per [contracts/ipc-protocol.md](./contracts/ipc-protocol.md) §Contract tests
-- [ ] T023 [P] Write failing property tests for `EndpointHealth` transitions in `crates/dnet-core/tests/health.rs` — including that `Unreachable` is never terminal ([data-model.md](./data-model.md) §1.1)
+- [x] T022 [P] Write failing contract tests IPC-01…IPC-09 in `crates/dnet-ipc/tests/contract.rs` per [contracts/ipc-protocol.md](./contracts/ipc-protocol.md) §Contract tests
+- [x] T023 [P] Write failing property tests for `EndpointHealth` transitions in `crates/dnet-core/tests/health.rs` — including that `Unreachable` is never terminal ([data-model.md](./data-model.md) §1.1)
 
 ### Domain types
 
@@ -144,6 +149,14 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
 - [ ] T039 **[GATE] Plan Phase 2 exit**: IPC-01 passes — an unprivileged, non-console client issuing `Connect` receives `Unauthorized` and routing state is unchanged. This is SC-019 verified by explicit attempt
 
 **Checkpoint**: The privilege boundary holds under attack. Domain logic is unit-testable without Windows or a network.
+
+> **Status 2026-09-10 - T022 and T023 written and verified RED for the right reason.**
+> `crates/dnet-ipc/tests/contract.rs`: 45 tests (44 fail, 1 passes on a constant).
+> `crates/dnet-core/tests/health.rs`: 19 tests (17 fail, 2 pass on a constant and constructor).
+> All 811 panics are `todo!()`; clippy `--all-targets -D warnings` is clean. Spec gaps surfaced for
+> T025: `Degraded` has no specified transitions; failed-probe-from-`Unknown` is drawn ambiguously;
+> EWMA weight is unspecified. `MAX_FRAME_LEN` (1 MiB) is a chosen default the contract does not fix.
+> CI `build-and-test` fails until T024-T035 implement these contracts.
 
 ---
 

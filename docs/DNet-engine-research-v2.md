@@ -41,7 +41,7 @@ Instead, the v1 application features an integrated **Provisioning Wizard**. This
 The system utilizes **Wintun** for Layer 3 interception on Windows.
 
 * *Licensing Note:* The signed, prebuilt wintun.dll is strictly bundled as a proprietary aggregate under its EULA, never compiled from source, keeping it legally compatible with our GPLv3 Rust daemon.  
-* *Routing Loop Mitigation:* Because both supervised cores require a virtual adapter, there is a massive risk of a routing loop (where AmneziaWG encrypted UDP is captured by the primary core's TUN). The primary core *always* owns the capture TUN. When AmneziaWG is active, the primary core uses bind\_interface pointed at the AmneziaWG adapter, safeguarded by a strictly enforced host route bypassing the physical gateway.
+* *Routing Loop Mitigation:* Because both supervised cores require a virtual adapter, there is a massive risk of a routing loop (where AmneziaWG encrypted UDP is captured by the primary core's TUN). The primary core *always* owns the capture TUN. When AmneziaWG is active, the primary core uses bind\_interface pointed at the AmneziaWG adapter, safeguarded by a strictly enforced host route for the endpoint address **via the physical gateway**. That route sends AmneziaWG's encrypted UDP out through the physical interface so it **bypasses the TUN** instead of being recaptured by it. The host route is installed before the tunnel starts, and rewritten before any rebind when the network interface changes.
 
 ### **Application-Level Split Tunneling via ETW**
 
@@ -79,7 +79,7 @@ Version 1 focuses purely on **Seamless Failover**. If a user walks out of range 
 
 ## **Conclusion**
 
-The DNet Engine architecture represents a highly sophisticated, self-reliant network orchestration platform. By supervising lightweight instances of sing-box and amneziawg-go, the system effectively dismantles deep packet inspection capabilities while keeping the installed footprint under 60 MB. Guided by Test-Driven Development and strict architectural gating (such as routing loop prevention), this blueprint provides a foolproof path to restoring unrestricted internet connectivity to users in highly constrained network environments.
+The DNet Engine architecture represents a highly sophisticated, self-reliant network orchestration platform. By supervising lightweight instances of sing-box and amneziawg-go, the system effectively dismantles deep packet inspection capabilities while keeping the **installer** within the 60 MB cap set by SC-012 (the cap applies to the installer, not the installed footprint). Guided by Test-Driven Development and strict architectural gating (such as routing loop prevention), this blueprint provides a foolproof path to restoring unrestricted internet connectivity to users in highly constrained network environments.
 
 #### **Works cited**
 
