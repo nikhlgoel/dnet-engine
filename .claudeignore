@@ -1,0 +1,36 @@
+# Context-window management.
+#
+# Paths here are excluded from automatic context loading. They remain fully
+# present on disk, tracked by git, and readable on demand — this file affects
+# what gets pulled in automatically, not what exists.
+
+# ---------- Build output ----------
+target/
+**/target/
+*.exe
+*.dll
+*.sys
+*.pdb
+*.lib
+*.a
+
+# ---------- Documentation ----------
+# Large and stable. Temporarily remove this entry when documentation updates
+# are explicitly requested, then restore it.
+/docs/
+
+# ---------- Dependencies and vendored artifacts ----------
+node_modules/
+vendor/**/*.zip
+vendor/**/.src/
+
+# ---------- Lockfiles and generated data ----------
+Cargo.lock
+*.profraw
+*.profdata
+
+# ---------- Runtime and OS ----------
+/run/
+*.log
+.DS_Store
+Thumbs.db

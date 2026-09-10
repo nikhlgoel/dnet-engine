@@ -1,4 +1,4 @@
-[package]
+﻿[package]
 name = "dnet-etw"
 description = "ETW real-time session; connect-time PID attribution."
 version.workspace = true
@@ -13,3 +13,5 @@ dnet-core = { workspace = true }
 ferrisetw = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+windows = { workspace = true, features = ["Win32_Foundation", "Win32_System_Threading"] }
+

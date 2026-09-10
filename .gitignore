@@ -94,6 +94,12 @@ testing/harness/.state/
 testing/harness/**/*.pcap
 testing/harness/**/captures/
 
+# ---------- Documents ----------
+# Prose lives in markdown so it diffs. Binary office formats do not.
+docs/**/*.docx
+docs/**/*.pdf
+docs/**/*.pptx
+
 # ---------- OS / editor ----------
 Thumbs.db
 ehthumbs.db
