@@ -27,12 +27,28 @@ work. Their licence texts ship with the installer and are reproduced under `vend
 
 ## Wintun
 
-- **Licence**: the **prebuilt signed binaries** are distributed under a permissive
-  licence, distinct from the GPLv2 that covers Wintun's source.
-- **Compliance**: DNet Engine bundles **only** the vendor-signed prebuilt DLL and
-  never builds Wintun from source. Bundling the GPLv2 source would be incompatible
-  with this project's GPLv3 licence. Enforced in CI by `cargo xtask verify-vendor`,
-  which fails the build if any Wintun source file is present.
+- **Licence**: **proprietary**, not a FOSS licence. The prebuilt signed binaries are
+  distributed under the "Prebuilt Binaries License" reproduced in
+  `vendor/wintun/LICENSE.txt`, which is distinct from and additional to the GPLv2 that
+  covers Wintun's source.
+- **Redistribution basis**: §3(d) of that licence forbids redistribution *"without the
+  prior written consent of WireGuard LLC, except insofar as the Software is distributed
+  alongside other software that uses the Software only via the Permitted API."* DNet Engine
+  relies on that exception: the DLL is distributed alongside software that uses it solely
+  through the documented `wintun.h` API.
+- **Relationship to this project's GPLv3 licence**: DNet Engine's own code neither links
+  nor loads `wintun.dll`. The DLL is a dependency of the two supervised third-party
+  processes, which run as separate programs. The arrangement is aggregation under GPLv3 §5,
+  not a combined work.
+- **Compliance**:
+  - Only the vendor-signed prebuilt DLL is bundled, taken from the official distribution
+    zip as published. Wintun is never built from source (its source is GPLv2, incompatible
+    with this project's GPLv3), and the DLL is never extracted from another product
+    (forbidden by §3(a)). Enforced in CI by `cargo xtask verify-vendor`.
+  - The DLL is not modified, reverse engineered, or derived from.
+  - Per §3(e), DNet Engine does not use the WireGuard LLC, WireGuard project, or Wintun
+    names to endorse or promote itself. This attribution notice and the About screen are
+    not endorsement and are permitted.
 - **Licence text**: `vendor/wintun/LICENSE.txt`.
 
 ---

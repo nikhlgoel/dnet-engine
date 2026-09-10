@@ -85,15 +85,22 @@ does not implement AmneziaWG — verified, finding C14). Wintun for the virtual 
 without an ADR.
 
 **Licence obligations (binding, verified 2026-09-10).** The project is GPLv3 and every bundled
-dependency is compatible. Two obligations follow and are not negotiable:
+dependency is compatible. Three obligations follow and are not negotiable:
 
 1. **`sing-box` is GPL-3.0-or-later with an additional term permitted under GPLv3 §7(e): no
    derivative work may use its name or imply association without prior consent.** DNet Engine
    therefore MUST NOT use the sing-box name in its product name, branding, or marketing, and MUST NOT
    imply association or endorsement. Attribution in documentation and an about screen is required.
-2. **Wintun MUST be bundled as the vendor-signed prebuilt DLL only, never built from source.** The
-   source is GPLv2, which is incompatible with GPLv3; the prebuilt signed binaries carry a separate
-   permissive licence and are the vendor's only supported distribution path.
+2. **Wintun MUST be bundled as the vendor-signed prebuilt DLL only, taken from the official
+   distribution zip as published — never built from source, never extracted from another product.**
+   Wintun's source is GPLv2, incompatible with GPLv3. The prebuilt binaries carry a **proprietary**
+   licence (not a permissive one, contrary to an earlier characterisation — see ADR-0004) whose
+   §3(d) permits redistribution only alongside software using the documented API, and whose §3(a)
+   forbids extraction. DNet Engine's own code neither links nor loads the DLL, so the arrangement
+   is aggregation under GPLv3 §5.
+3. **DNet Engine MUST NOT use the WireGuard LLC, WireGuard project, or Wintun names to endorse or
+   promote itself** (Wintun prebuilt licence §3(e)). As with obligation 1, attribution in
+   documentation and the About screen is required and permitted; branding and marketing use is not.
 
 All bundled components run as separate processes, making the arrangement aggregation rather than a
 combined work. Licence texts and a source offer ship with the installer regardless.
@@ -160,10 +167,13 @@ and scope expansion must be justified, never assumed.
 
 All plans and reviews verify compliance with these principles before work is accepted.
 
-**Version**: 1.1.0 | **Ratified**: 2026-09-10 | **Last Amended**: 2026-09-10
+**Version**: 1.2.0 | **Ratified**: 2026-09-10 | **Last Amended**: 2026-09-10
 
 **Amendment log**
 
+- **1.2.0** — Corrected the Wintun prebuilt licence characterisation from "permissive" to
+  proprietary-with-a-redistribution-exception, after reading the shipped licence text. Added
+  naming obligation 3 (WireGuard/Wintun endorsement). Recorded in `docs/adr/0004-vendored-binary-pins.md`.
 - **1.1.0** — Closed open items O1–O4 against primary sources. Added binding licence obligations for
   sing-box naming and Wintun prebuilt-only bundling. Added `amneziawg-go` as a second supervised
   process following the verified finding that sing-box does not implement AmneziaWG (C14). Recorded
