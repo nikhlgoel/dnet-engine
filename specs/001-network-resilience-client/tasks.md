@@ -87,12 +87,12 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
 - [x] T019 Implement ground-truth reporting in `testing/harness/report.ps1` — emits packets dropped and by which rule, so a test can distinguish "obfuscation worked" from "the rule never fired" (HN-03)
 - [x] T020 **[GATE] Phase 0 exit**: demonstrate H1–H9 on demand, HN-01…HN-06 hold, and HV-03 runs with a **deliberately unobfuscated control that fails**. A harness where everything passes proves nothing ([contracts/harness.md](./contracts/harness.md) §5)
 
-- [ ] T021 **[GATE] SPIKE-O6**: build a throwaway ETW consumer in `crates/dnet-etw/examples/spike_cost.rs`; measure steady-state CPU cost and the proportion of connections attributed on a machine with a realistic socket population. **If cost breaches SC-014 or coverage is too low to be useful, per-process routing is cut from v1 and only destination rules ship.** Record the decision in `docs/adr/0001-etw-attribution.md` ([research.md](./research.md) §R7)
-  > **Run 1 (2026-09-10): INCONCLUSIVE - not a fail.** The instrument used loopback-only ground truth,
-  > had no port-independent PID count, and read ports in native byte order without establishing the
-  > kernel byte order, so its 0.5% coverage figure is uninterpretable. FR-023 is retained provisionally;
-  > T074-T076 stay blocked. Run 2 pending with instrument v2. See `docs/adr/0001-etw-attribution.md`
-  > and BUG-006.
+- [x] T021 **[GATE] SPIKE-O6**: build a throwaway ETW consumer in `crates/dnet-etw/examples/spike_cost.rs`; measure steady-state CPU cost and the proportion of connections attributed on a machine with a realistic socket population. **If cost breaches SC-014 or coverage is too low to be useful, per-process routing is cut from v1 and only destination rules ship.** Record the decision in `docs/adr/0001-etw-attribution.md` ([research.md](./research.md) §R7)
+  > **RESOLVED 2026-09-11: SPIKE-O6 PASSES.** Run 2 (instrument v2): remote coverage 100%, cost
+  > 0.000%, liveness confirmed (193 events). Run 1's 0.5% was the byte-order parsing defect (BUG-006),
+  > confirmed: native match 0/200, byte-swapped 200/200. **FR-023 is permanently retained; T074-T076
+  > are UNBLOCKED.** Binding constraint for T075: `sport`/`dport` arrive in network byte order and MUST
+  > be swapped to host order before matching. See `docs/adr/0001-etw-attribution.md` (Accepted).
 
 **Checkpoint**: The harness can tell the difference between working and not working. SPIKE-O6 has decided whether FR-023 is in scope.
 
@@ -129,7 +129,7 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
 ### Domain types
 
 - [ ] T024 [P] [US1] Implement `Endpoint`, `EndpointId`, `EndpointAddress`, `EndpointOrigin`, `CredentialRef` in `crates/dnet-core/src/endpoint.rs` — `CredentialRef` exposes **no accessor returning plaintext** ([data-model.md](./data-model.md) §1)
-- [ ] T025 [P] [US4] Implement `EndpointHealth` and its state machine in `crates/dnet-core/src/health.rs`
+- [x] T025 [P] [US4] Implement `EndpointHealth` and its state machine in `crates/dnet-core/src/health.rs`
 - [ ] T026 [P] [US1] Implement `ConnectionProfile`, `ProfileKind`, `Carrier`, `Viability`, `CoreBinding` in `crates/dnet-core/src/profile.rs`
 - [ ] T027 [P] [US3] Implement `FailoverTier` in `crates/dnet-core/src/tier.rs`, with the invariant that tier is set from measurement and is never inferred from `ProfileKind`
 - [ ] T028 [P] [US3] Implement `NetworkPath`, `PathKind`, `PathQuality`, `PathRole` in `crates/dnet-core/src/path.rs` — a path with `gateway = None` cannot become `Carrying` ([data-model.md](./data-model.md) §3)
@@ -139,7 +139,7 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
 
 ### IPC and service skeleton
 
-- [ ] T032 [US1] Implement named-pipe framing (4-byte LE length prefix + UTF-8 JSON) in `crates/dnet-ipc/src/frame.rs`, rejecting malformed, oversized, and truncated frames without panicking (IPC-08)
+- [x] T032 [US1] Implement named-pipe framing (4-byte LE length prefix + UTF-8 JSON) in `crates/dnet-ipc/src/frame.rs`, rejecting malformed, oversized, and truncated frames without panicking (IPC-08)
 - [ ] T033 [US1] Implement request/response types and the error model in `crates/dnet-ipc/src/protocol.rs` per [contracts/ipc-protocol.md](./contracts/ipc-protocol.md)
 - [ ] T034 [US1] Implement pipe creation with explicit SDDL in `crates/dnet-ipc/src/server.rs` — never a NULL DACL (IPC-02)
 - [ ] T035 [US1] Implement per-connection client identity verification in `crates/dnet-ipc/src/authz.rs` — `ImpersonateNamedPipeClient`, capture token, revert immediately; mutating requests require the interactive console user (IPC-01)
@@ -150,6 +150,16 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
 
 **Checkpoint**: The privilege boundary holds under attack. Domain logic is unit-testable without Windows or a network.
 
+> **Status 2026-09-11 - Phase 3 IPC + health layer GREEN.**
+>
+> T022 (45 IPC contract tests), T023 (27 health tests), T025 (health state machine), and T032 (frame
+> codec) are implemented and passing. The pure/testable cores of T033 (protocol codec + validators),
+> T034 (SDDL + connection loop), and T035 (authz decision) are done and turn IPC-01..09 green; their
+> OS-level remainders (real named-pipe binding, `ImpersonateNamedPipeClient`, request dispatch) and
+> the T039 attack gate are still open. Coverage on dnet-core + dnet-ipc is 91% lines (CI floor 80%,
+> scoped to implemented crates). Spec gaps for T025 were resolved in data-model.md §1.1.
+>
+> Superseded RED note (kept for history):
 > **Status 2026-09-10 - T022 and T023 written and verified RED for the right reason.**
 > `crates/dnet-ipc/tests/contract.rs`: 45 tests (44 fail, 1 passes on a constant).
 > `crates/dnet-core/tests/health.rs`: 19 tests (17 fail, 2 pass on a constant and constructor).

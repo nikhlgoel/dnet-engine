@@ -32,23 +32,53 @@ A destination the user owns, through which traffic exits.
 
 ### 1.1 EndpointHealth
 
+Full transition table (resolved 2026-09-11; earlier drafts left `Degraded` and the
+`Unknown`+failure edge unspecified).
+
 ```
-Unknown ──probe ok──▶ Healthy ──consecutive failures ≥ N──▶ Unreachable
-   │                     ▲                                       │
-   └──probe fail─────────┴───────────probe ok────────────────────┘
+                    probe ok (rtt<250ms, no loss)
+Unknown ───────────────────────────────────────────▶ Healthy
+   │                                                   │  ▲
+   │ probe fail (immediately)                          │  │ 3 consecutive good probes
+   ▼                                                   ▼  │
+Unreachable ◀─── N consecutive failures ─────── Degraded ─┘
+   │  ▲                                          ▲
+   │  │ N consecutive failures                   │ 2 consecutive probes
+   │  └──────────────── (from Healthy) ──────────┘ with rtt>250ms OR loss
+   │
+   └── probe ok ──▶ Healthy   (recovery; quality re-evaluated from there)
 ```
+
+| State | Enter when | Leave to |
+|---|---|---|
+| `Unknown` | initial, never probed | `Healthy` on first ok; **`Unreachable` on first failure** |
+| `Healthy` | ok probe, quality good | `Degraded` after 2 consecutive bad-quality probes; `Unreachable` after `N` consecutive failures |
+| `Degraded` | 2 consecutive probes with `rtt > 250ms` **or** reported loss | `Healthy` after 3 consecutive good probes; `Unreachable` after `N` consecutive failures |
+| `Unreachable` | `N` consecutive failures, **or** a failure from `Unknown` | `Healthy` on any successful probe (recovery) |
 
 | Field | Type | Notes |
 |---|---|---|
 | `state` | `Unknown \| Healthy \| Degraded \| Unreachable` | |
 | `last_probe` | `Option<Instant>` | |
 | `consecutive_failures` | `u32` | Threshold `N` is configuration, default 3 |
-| `rtt_ewma` | `Option<Duration>` | Feeds selection among healthy endpoints |
+| `consecutive_bad_quality` | `u32` | Successful-but-slow/lossy probes; `Healthy → Degraded` at 2 |
+| `consecutive_good_quality` | `u32` | Successful fast, lossless probes; `Degraded → Healthy` at 3 |
+| `rtt_ewma` | `Option<Duration>` | Smoothed RTT; `α = 1/8` (0.125) |
+| `rttvar_ewma` | `Option<Duration>` | Smoothed RTT variance; `β = 1/4` (0.25) |
+
+**Constants** (standard TCP smoothing, RFC 6298 / Jacobson-Karels):
+`DEGRADED_RTT_THRESHOLD = 250ms` · `DEGRADED_AFTER_BAD = 2` · `HEALTHY_AFTER_GOOD = 3` ·
+`RTT_EWMA_ALPHA = 0.125` · `RTTVAR_EWMA_BETA = 0.25`.
 
 **Invariants**
 - `Unreachable` is never terminal — a later successful probe returns it to the pool (FR-012, US4-3).
+- **A failed probe from `Unknown` transitions immediately to `Unreachable`.** An endpoint we have
+  no information about, whose first contact fails, is not used — we do not wait for `N` failures.
 - Transition to `Unreachable` on the *active* endpoint must raise a `ConnectionEvent` so the user is
   informed rather than silently migrated (FR-012).
+- A failed probe never leaves the RTT estimators changed — a failure measured no round trip.
+- A failed probe never resets to a "healthier" state; only a successful probe can move toward
+  `Healthy`.
 
 ---
 
@@ -200,6 +230,11 @@ CredentialValidation ─▶ CapacityCheck ─▶ InstanceCreate ─▶ NetworkCo
 **Invariants**
 - The type is named to make its nature unmissable at every call site; there is no `Attribution::Exact`.
 - A cache miss resolves to "no application rule matched", never to a guess.
+- **`sport`/`dport` from `TcpIpConnect` arrive in network byte order (big-endian).** Attribution
+  MUST convert them to host order before matching (`.swap_bytes()` on the natively-parsed `u16`).
+  Established empirically by SPIKE-O6 run 2 (native match 0/200, byte-swapped 200/200); see
+  ADR-0001. Reading them natively misattributes essentially every connection. `pid` is a `u32`
+  process id, not a port, and needs no swap. This is a required assertion in T075's tests.
 
 ---
 

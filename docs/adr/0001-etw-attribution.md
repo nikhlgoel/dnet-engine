@@ -1,7 +1,7 @@
 # ADR-0001: ETW connect-time process attribution (SPIKE-O6)
 
-**Status**: Proposed — run 1 inconclusive, decision pending run 2
-**Date**: 2026-09-10
+**Status**: **Accepted** — run 2 (2026-09-11) passed; FR-023 retained permanently
+**Date**: 2026-09-10 (run 1), 2026-09-11 (run 2, decision)
 **Task**: T021 (SPIKE-O6)
 **Decides**: FR-023 (per-process routing) and whether T074–T076 exist
 **Instrument**: `crates/dnet-etw/examples/spike_cost.rs`
@@ -156,15 +156,54 @@ can take this option at any time, without run 2.
 
 ---
 
-## Run 2
+## Run 2 — 2026-09-11, elevated, under realistic load
 
-*Pending.* To run it, from an elevated PowerShell with normal workload active:
+Instrument v2, host: 16 cores. Liveness confirmed (193 events during the opening burst),
+so the session was genuinely receiving events — the single defect that would have made any
+verdict meaningless is ruled out.
 
-```powershell
-cd D:\main\projects\personal\dnet-engine
-cargo build --release --example spike_cost -p dnet-etw
-.\target\release\examples\spike_cost.exe
-```
+| Measurement | Loopback | Remote (1.1.1.1:443) |
+|---|---|---|
+| Connections completed | 200 (0 failed) | 200 (0 failed) |
+| Connect events, our PID | 200 | 200 |
+| Port match, **native** order | 1 | 0 |
+| Port match, **byte-swapped** order | **200** | **200** |
+| Coverage (best order) | **100.0%** | **100.0%** |
+| Interpretation | emitted and attributed correctly | emitted and attributed correctly |
 
-By default this opens 200 outbound TCP connections to `1.1.1.1:443`, 50 ms apart. Use
-`--target HOST:PORT` to pick another destination.
+| Gate metric | Result | Threshold | Verdict |
+|---|---|---|---|
+| Coverage (remote) | 100.0% | ≥ 95% | **PASS** |
+| Cost | 0.000% of a 16-core machine | < 1% | **PASS** |
+| Unparsed connect events | 0 | — | clean |
+
+Cost is representative this time: 7,689 events (18 connect events) arrived in the window, well
+above the 50-event floor, so the figure describes attribution under real ambient load rather
+than an idle session. The event-id histogram confirms the provider is delivering the full
+connect/disconnect/data spectrum (ids 10–59), not a degenerate subset.
+
+### What run 2 settles
+
+1. **Run 1's 0.5% was the parsing defect, not a provider gap.** Native order matched 0–1;
+   byte-swapped matched all 200. This is exactly what BUG-006's byte-order hypothesis predicted,
+   and exactly what the manifest analysis (`sport` = `win:UInt16`, no `outType`; ferrisetw
+   decodes with `from_ne_bytes`) implied. The kernel writes ports in **network byte order**.
+2. **Coverage is genuinely 100%, not 100%-because-loopback.** Loopback and remote agree, and the
+   verdict uses remote — the traffic the product actually routes.
+3. **Cost is negligible under load** (0.000%, from a 7,689-event window).
+
+## Decision (run 2)
+
+> **FR-023 is permanently RETAINED.** Per-process routing ships in v1, labelled best-effort
+> (Constitution Principle VI). **T074–T076 are unblocked.**
+
+### Binding implementation constraint for T075
+
+**`sport` and `dport` from `TcpIpConnect` arrive in network byte order (big-endian).**
+`dnet-etw` attribution MUST convert them to host order (`u16::from_be` / `.swap_bytes()` on the
+natively-parsed value) before matching a connection to a rule. Reading them natively — as the
+run-1 instrument did — misattributes essentially every connection. This is recorded in
+`data-model.md` §7 and is a required assertion in T075's tests.
+
+The PID field is unaffected: it is a `u32` process id, not a port, and matched correctly in both
+runs.

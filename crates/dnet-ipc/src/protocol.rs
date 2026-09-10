@@ -1,11 +1,17 @@
 //! Request and response types, the error model, and wire-level validators.
 //!
 //! Contract: `specs/001-network-resilience-client/contracts/ipc-protocol.md`.
-//! These are the skeleton types the T022 contract tests are written against; the
-//! behaviour lands in T033.
+//! The pure decision and codec layer is implemented here (T033); wiring it to a real
+//! pipe and dispatching requests is T034.
+//!
+//! Wire encoding is done by hand against `serde_json::Value` rather than derived, so
+//! that `dnet-core`'s domain types carry no wire-format concern and the exact contract
+//! shape — including which strings are *rejected* — is explicit and testable.
 
+use dnet_core::profile::CoreBinding;
 use dnet_core::session::FailureCause;
 use dnet_core::tier::FailoverTier;
+use serde_json::{json, Value};
 
 /// Authorization class of a request (contract §Request classes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,7 +27,7 @@ pub enum RequestClass {
 /// Every request the service accepts.
 ///
 /// In the contract, `Connect` also carries optional endpoint and profile selectors.
-/// Those are added together with the domain identifier types in T024 and T026.
+/// Those are added with the domain identifier types in T024 and T026.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
     GetState,
@@ -49,9 +55,27 @@ pub enum Request {
 }
 
 impl Request {
-    /// The authorization class this request belongs to.
+    /// The authorization class this request belongs to (contract §Request classes).
     pub fn class(&self) -> RequestClass {
-        todo!("T033: map each request to its contract class")
+        use Request::*;
+        match self {
+            GetState | GetSession | ListEndpoints | ListProfiles | ListRules | GetDiagnostics => {
+                RequestClass::ReadOnly
+            }
+            Subscribe => RequestClass::Stream,
+            Connect { .. }
+            | Disconnect
+            | AddEndpoint
+            | RemoveEndpoint
+            | SetEndpointEnabled
+            | AddRule
+            | RemoveRule
+            | SetProfileParams
+            | EnableBrutal
+            | SetEncryptedDnsHandling
+            | StartProvisioning
+            | CancelProvisioning => RequestClass::Mutating,
+        }
     }
 }
 
@@ -83,6 +107,12 @@ pub enum IpcError {
     },
 }
 
+fn invalid(detail: impl Into<String>) -> IpcError {
+    IpcError::InvalidRequest {
+        detail: detail.into(),
+    }
+}
+
 /// Connection status reported in a `StateSnapshot`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionStatus {
@@ -110,35 +140,170 @@ pub struct StateSnapshot {
     pub active_profile: Option<ActiveProfile>,
 }
 
-/// Decode a `StateSnapshot` from its wire JSON.
-pub fn decode_state_snapshot(_json: &str) -> Result<StateSnapshot, IpcError> {
-    todo!("T033: decode StateSnapshot")
+// ------------------------------------------------------------------ FailureCause
+
+fn core_binding_str(core: &CoreBinding) -> &'static str {
+    match core {
+        CoreBinding::PrimaryCore => "PrimaryCore",
+        CoreBinding::AmneziaWgCore => "AmneziaWgCore",
+    }
 }
 
-/// Encode a `FailureCause` in its wire form: `{ "cause": ..., "detail": ... }`.
-pub fn encode_failure_cause(_cause: &FailureCause) -> String {
-    todo!("T033: encode FailureCause")
+fn core_binding_from_str(s: &str) -> Result<CoreBinding, IpcError> {
+    match s {
+        "PrimaryCore" => Ok(CoreBinding::PrimaryCore),
+        "AmneziaWgCore" => Ok(CoreBinding::AmneziaWgCore),
+        other => Err(invalid(format!("unknown core binding {other:?}"))),
+    }
+}
+
+/// Encode a `FailureCause` in its wire form: `{ "cause": ..., <fields> }`.
+pub fn encode_failure_cause(cause: &FailureCause) -> String {
+    let value = match cause {
+        FailureCause::NoEndpointReachable => json!({ "cause": "NoEndpointReachable" }),
+        FailureCause::AllProfilesBlocked => json!({ "cause": "AllProfilesBlocked" }),
+        FailureCause::CaptivePortalUnsatisfied => json!({ "cause": "CaptivePortalUnsatisfied" }),
+        FailureCause::InsufficientPrivilege => json!({ "cause": "InsufficientPrivilege" }),
+        FailureCause::CoreFailedPersistently { core } => {
+            json!({ "cause": "CoreFailedPersistently", "core": core_binding_str(core) })
+        }
+        FailureCause::NoUsablePath => json!({ "cause": "NoUsablePath" }),
+        FailureCause::ConfigurationInvalid { detail } => {
+            json!({ "cause": "ConfigurationInvalid", "detail": detail })
+        }
+    };
+    value.to_string()
 }
 
 /// Decode a `FailureCause`. `"Unknown"` is not a permitted value (FR-039, SC-020).
-pub fn decode_failure_cause(_wire: &str) -> Result<FailureCause, IpcError> {
-    todo!("T033: decode FailureCause")
+pub fn decode_failure_cause(wire: &str) -> Result<FailureCause, IpcError> {
+    let value: Value = serde_json::from_str(wire).map_err(|e| invalid(e.to_string()))?;
+    let cause = value
+        .get("cause")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("missing `cause`"))?;
+
+    match cause {
+        "NoEndpointReachable" => Ok(FailureCause::NoEndpointReachable),
+        "AllProfilesBlocked" => Ok(FailureCause::AllProfilesBlocked),
+        "CaptivePortalUnsatisfied" => Ok(FailureCause::CaptivePortalUnsatisfied),
+        "InsufficientPrivilege" => Ok(FailureCause::InsufficientPrivilege),
+        "NoUsablePath" => Ok(FailureCause::NoUsablePath),
+        "CoreFailedPersistently" => {
+            let core = value
+                .get("core")
+                .and_then(Value::as_str)
+                .ok_or_else(|| invalid("CoreFailedPersistently requires `core`"))?;
+            Ok(FailureCause::CoreFailedPersistently {
+                core: core_binding_from_str(core)?,
+            })
+        }
+        "ConfigurationInvalid" => {
+            let detail = value
+                .get("detail")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            Ok(FailureCause::ConfigurationInvalid { detail })
+        }
+        // Explicitly rejects "Unknown" and any other unrecognised cause.
+        other => Err(invalid(format!("unknown failure cause {other:?}"))),
+    }
 }
+
+// ------------------------------------------------------------------ StateSnapshot
+
+fn status_from_str(s: &str) -> Result<ConnectionStatus, IpcError> {
+    match s {
+        "Disconnected" => Ok(ConnectionStatus::Disconnected),
+        "Probing" => Ok(ConnectionStatus::Probing),
+        "Connected" => Ok(ConnectionStatus::Connected),
+        "Failed" => Ok(ConnectionStatus::Failed),
+        other => Err(invalid(format!("unknown status {other:?}"))),
+    }
+}
+
+fn tier_from_str(s: &str) -> Result<FailoverTier, IpcError> {
+    match s {
+        "Tier1" => Ok(FailoverTier::Tier1),
+        "Tier2" => Ok(FailoverTier::Tier2),
+        other => Err(invalid(format!("unknown tier {other:?}"))),
+    }
+}
+
+/// Decode a `StateSnapshot` from its wire JSON.
+///
+/// An active profile MUST carry a valid `tier`; a missing, null, or unknown tier is
+/// rejected (FR-016b, IPC-05).
+pub fn decode_state_snapshot(json: &str) -> Result<StateSnapshot, IpcError> {
+    let value: Value = serde_json::from_str(json).map_err(|e| invalid(e.to_string()))?;
+
+    let status = status_from_str(
+        value
+            .get("status")
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid("missing `status`"))?,
+    )?;
+
+    let active_profile = match value.get("active_profile") {
+        None | Some(Value::Null) => None,
+        Some(profile) => {
+            let id = profile
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| invalid("active profile missing `id`"))?
+                .to_owned();
+            let kind = profile
+                .get("kind")
+                .and_then(Value::as_str)
+                .ok_or_else(|| invalid("active profile missing `kind`"))?
+                .to_owned();
+            let tier = tier_from_str(
+                profile
+                    .get("tier")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| invalid("active profile missing `tier`"))?,
+            )?;
+            Some(ActiveProfile { id, kind, tier })
+        }
+    };
+
+    Ok(StateSnapshot {
+        status,
+        active_profile,
+    })
+}
+
+// ------------------------------------------------------------------ validators
 
 /// Refuse a Tier 2 selection made while a Tier 1 profile is viable, unless the client
 /// has explicitly acknowledged it (contract §Connect, FR-016b).
 pub fn check_tier_consent(
-    _selected: FailoverTier,
-    _tier1_viable: bool,
-    _acknowledged: bool,
+    selected: FailoverTier,
+    tier1_viable: bool,
+    acknowledged: bool,
 ) -> Result<(), IpcError> {
-    todo!("T033: enforce Tier 2 consent")
+    if selected == FailoverTier::Tier2 && tier1_viable && !acknowledged {
+        return Err(IpcError::TierDowngradeRequiresConsent {
+            tier: FailoverTier::Tier2,
+        });
+    }
+    Ok(())
 }
 
 /// A `because` must explain the event. It may not be empty, and it may not simply
-/// restate the event name (contract §Subscribe).
-pub fn validate_because(_event_name: &str, _because: &str) -> Result<(), IpcError> {
-    todo!("T033: validate ConnectionEvent explanations")
+/// restate the event name (contract §Subscribe, IPC-06).
+pub fn validate_because(event_name: &str, because: &str) -> Result<(), IpcError> {
+    let trimmed = because.trim();
+    if trimmed.is_empty() {
+        return Err(invalid("ConnectionEvent `because` must not be empty"));
+    }
+    if trimmed.eq_ignore_ascii_case(event_name.trim()) {
+        return Err(invalid(
+            "`because` must explain the event, not restate its name",
+        ));
+    }
+    Ok(())
 }
 
 /// What a diagnostic bundle is built from.
@@ -153,7 +318,20 @@ pub struct DiagnosticInput {
 }
 
 /// Build the diagnostic bundle. Destinations are excluded unless explicitly enabled
-/// (FR-035, IPC-07).
-pub fn build_diagnostic_bundle(_input: &DiagnosticInput) -> String {
-    todo!("T112: build the diagnostic bundle")
+/// (FR-035, IPC-07). Credential material never enters this input in the first place.
+pub fn build_diagnostic_bundle(input: &DiagnosticInput) -> String {
+    let mut out = String::new();
+    out.push_str("# DNet Engine diagnostics\n\n## Session events\n");
+    for event in &input.events {
+        out.push_str(event);
+        out.push('\n');
+    }
+    if input.destination_logging_enabled {
+        out.push_str("\n## Destinations (logging explicitly enabled)\n");
+        for destination in &input.destinations {
+            out.push_str(destination);
+            out.push('\n');
+        }
+    }
+    out
 }
