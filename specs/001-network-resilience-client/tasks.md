@@ -406,7 +406,20 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
 - [ ] T062 [P] [US4] Implement endpoint health probing and EWMA RTT scoring in `crates/dnet-core/src/endpoint_health.rs`
 - [ ] T063 [US4] Implement automatic endpoint migration on unreachability, emitting a `ConnectionEvent` so the user is informed rather than silently migrated, in `crates/dnet-core/src/migrate.rs` (FR-012)
 - [ ] T064 [US1] Implement distinguishable failure reporting for all seven `FailureCause` variants in `crates/dnetd/src/failure.rs` (FR-039, SC-020)
-- [ ] T065 [O5] Design and document the profile update feed integrity model in `docs/adr/0002-profile-update-feed.md` — a feed that can push routing changes is a supply-chain surface and must be signed (FR-007, FR-008, open item O5)
+- [x] T065 [O5] Design and document the profile update feed integrity model in `docs/adr/0002-profile-update-feed.md` — a feed that can push routing changes is a supply-chain surface and must be signed (FR-007, FR-008, open item O5)
+  > **Done 2026-09-12; ADR status Proposed.**
+  > - **Mechanism.** Ed25519 in DSSE v1 envelopes. Root keys (2 of 3) are compiled into `dnetd` and
+  >   sign a keys document. That document delegates short-lived signing keys, which sign the feed.
+  > - **Attack coverage.** Rollback, freeze, fast-forward, mix-and-match and endless-data defences
+  >   follow TUF v1.0.36.
+  > - **Scope.** Parameters only. The closed schema has nowhere to put routing rules, DNS,
+  >   endpoints, credentials, Brutal settings or user-visible text. A compromised signing key can
+  >   therefore only weaken obfuscation.
+  > - **Endpoint-tied parameters.** Parameters the endpoint must also know (AmneziaWG `s1`/`s2`/
+  >   `h1`–`h4`, Hysteria 2 obfuscation, the REALITY target) are staged for re-provisioning. They
+  >   are never applied by the client alone.
+  > - **Owner decisions D1–D4** (hosting, fetching while disconnected, root custody, scope) are open.
+  >   **T066 must not start until they are approved.**
 - [ ] T066 [US1] Implement signed profile feed ingestion in `crates/dnet-core/src/feed.rs` per the ADR from T065
 - [ ] T067 [O7] Verify whether the pinned primary-core version implements the newer obfuscation layer (Gecko) or only Salamander; record in `docs/adr/0003-obfuscation-layers.md` and tune Profile B accordingly (open item O7)
 - [ ] T068 **[GATE] Plan Phase 4 exit**: HV-01, HV-02, HV-03, HV-04, HV-09, HV-12 pass. HV-03 must show the obfuscated profile connecting **and** the unobfuscated control failing

@@ -437,6 +437,9 @@ work is accepted. Gate-independent work is sequenced first. This entry closes wh
 - **O5** Define the transport-profile update channel and its integrity model — a profile feed that
   can push routing changes is a supply-chain surface and must be signed (D6). *Blocking the profile
   update feature, not the rest of v1.*
+  **Designed 2026-09-12** in `docs/adr/0002-profile-update-feed.md` (Proposed). The feed is
+  signed, carries parameters only, and has no routing content. It closes when owner decisions
+  D1–D4 are approved.
 - **O6** Confirm ETW connect-time PID correlation is achievable at acceptable CPU cost. The event
   schema is now verified (6.2); what remains is the **cost and coverage** measurement. Prototype in
   Phase 0 before committing to D5's per-process path. *Blocking the per-process routing feature only.*
