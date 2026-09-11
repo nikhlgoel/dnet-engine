@@ -52,13 +52,17 @@ mod win {
     use dnet_netstate::host_route::{
         bring_up, on_carrying_path_change, tear_down, HostRoute, TunnelBringup,
     };
+    use dnet_netstate::undo::UndoRegistry;
+    use dnet_netstate::undo_file::FileStore;
     use dnet_netstate::win_bringup::{TunnelSpec, WindowsTunnelBringup};
-    use dnet_netstate::win_route::{best_route_to, default_gateway};
+    use dnet_netstate::win_route::{best_route_to, default_gateway, WindowsUndoExecutor};
     use dnet_netstate::NetstateError;
+    use dnet_supervisor::error::SupervisorError;
     use dnet_supervisor::process::CoreCommand;
     use dnet_supervisor::reap::start_cores;
     use dnet_supervisor::shutdown::shutdown_all;
     use dnet_supervisor::windows_runtime::WindowsCoreRuntime;
+    use std::sync::Arc;
 
     const ADAPTER: &str = "dnet-awg0";
     const CHECKPOINT_TIMEOUT: Duration = Duration::from_secs(180);
@@ -289,6 +293,22 @@ mod win {
             );
         }
 
+        // Restoration state for this run. Anything an earlier, crashed run left is reversed
+        // before this run touches the routing table.
+        let undo = Arc::new(
+            UndoRegistry::open(Box::new(FileStore::new(
+                args.run_dir.join("state").join("undo.json"),
+            )))
+            .context("opening the undo journal")?,
+        );
+        let leftover = undo.replay(&WindowsUndoExecutor)?;
+        if leftover.restored > 0 || !leftover.failed.is_empty() {
+            tracing::warn!(?leftover, "reversed state left by an earlier run");
+        }
+        if !leftover.failed.is_empty() {
+            bail!("state left by an earlier run could not be restored: {leftover:?}");
+        }
+
         let params: ClientParams = serde_json::from_slice(
             &std::fs::read(&args.params)
                 .with_context(|| format!("reading {}", args.params.display()))?,
@@ -350,34 +370,47 @@ mod win {
             },
             ADAPTER,
             Duration::from_secs(30),
-            // Routes are removed by tear_down and the adapter's own address and route
-            // vanish with it, so there is nothing further to restore in the spike.
-            Box::new(|| Ok(())),
+            // Replays whatever tear_down could not remove. The adapter's own address and
+            // route vanish with the adapter, so they are never recorded.
+            {
+                let undo = undo.clone();
+                Box::new(move || match undo.replay(&WindowsUndoExecutor) {
+                    Ok(report) if report.failed.is_empty() => Ok(()),
+                    Ok(report) => Err(SupervisorError::Runtime(format!(
+                        "undo replay left {} record(s)",
+                        report.failed.len()
+                    ))),
+                    Err(e) => Err(SupervisorError::Runtime(e.to_string())),
+                })
+            },
         );
 
-        let tunnel = WindowsTunnelBringup::new(TunnelSpec {
-            adapter: ADAPTER.into(),
-            address: params.client_address,
-            prefix_len: params.prefix_len,
-            private_key: PrivateKey::new(params.client_private_key_hex),
-            obfuscation: ObfuscationParams {
-                jc: params.obfuscation.jc,
-                jmin: params.obfuscation.jmin,
-                jmax: params.obfuscation.jmax,
-                s1: params.obfuscation.s1,
-                s2: params.obfuscation.s2,
-                h1: params.obfuscation.h1,
-                h2: params.obfuscation.h2,
-                h3: params.obfuscation.h3,
-                h4: params.obfuscation.h4,
+        let tunnel = WindowsTunnelBringup::new(
+            TunnelSpec {
+                adapter: ADAPTER.into(),
+                address: params.client_address,
+                prefix_len: params.prefix_len,
+                private_key: PrivateKey::new(params.client_private_key_hex),
+                obfuscation: ObfuscationParams {
+                    jc: params.obfuscation.jc,
+                    jmin: params.obfuscation.jmin,
+                    jmax: params.obfuscation.jmax,
+                    s1: params.obfuscation.s1,
+                    s2: params.obfuscation.s2,
+                    h1: params.obfuscation.h1,
+                    h2: params.obfuscation.h2,
+                    h3: params.obfuscation.h3,
+                    h4: params.obfuscation.h4,
+                },
+                peer: PeerConfig {
+                    public_key: params.server_public_key_hex,
+                    endpoint: SocketAddr::new(args.endpoint, params.listen_port).to_string(),
+                    allowed_ips: vec!["0.0.0.0/0".into()],
+                    persistent_keepalive: Some(25),
+                },
             },
-            peer: PeerConfig {
-                public_key: params.server_public_key_hex,
-                endpoint: SocketAddr::new(args.endpoint, params.listen_port).to_string(),
-                allowed_ips: vec!["0.0.0.0/0".into()],
-                persistent_keepalive: Some(25),
-            },
-        });
+            undo.clone(),
+        );
         let route = HostRoute::for_endpoint(&bypass, gateway);
 
         let mut report = Report {
@@ -428,8 +461,10 @@ mod win {
         // Defensive: whichever gateway was current, remove anything this run still owns.
         let _ = tunnel.routes().remove(&route);
         let cores_down = shutdown_all(&runtime).await;
-        report.teardown_ok =
-            tunnel_down.is_ok() && cores_down.is_ok() && !tunnel.routes().owns(&route);
+        report.teardown_ok = tunnel_down.is_ok()
+            && cores_down.is_ok()
+            && !tunnel.routes().owns(&route)
+            && undo.outstanding().is_empty();
         if let Err(e) = tunnel_down {
             tracing::error!(error = %e, "tunnel teardown failed");
         }

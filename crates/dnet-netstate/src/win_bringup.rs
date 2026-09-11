@@ -1,6 +1,7 @@
 //! The real `TunnelBringup`: routes via the IP Helper API, tunnel control via UAPI.
 //!
-//! - **host route** — `WindowsRouteInstaller` (`CreateIpForwardEntry2`, owned rows only)
+//! - **host route** — `WindowsRouteInstaller` (`CreateIpForwardEntry2`, owned rows only,
+//!   each recorded in the undo registry before it is created)
 //! - **start tunnel** — assign the tunnel address and adapter route, then one UAPI
 //!   `set` carrying private key + obfuscation + peer together (AW-04). Handshakes begin
 //!   the moment the peer exists, which is why `bring_up` installs the host route first.
@@ -13,6 +14,7 @@
 #![cfg(windows)]
 
 use std::net::IpAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use dnet_config::amneziawg::{
@@ -23,6 +25,7 @@ use dnet_config::uapi_pipe;
 use crate::adapter;
 use crate::error::NetstateError;
 use crate::host_route::{HostRoute, TunnelBringup};
+use crate::undo::UndoRegistry;
 use crate::win_route::WindowsRouteInstaller;
 
 /// How long a single UAPI operation may take before it is treated as failed.
@@ -48,10 +51,10 @@ pub struct WindowsTunnelBringup {
 }
 
 impl WindowsTunnelBringup {
-    pub fn new(spec: TunnelSpec) -> Self {
+    pub fn new(spec: TunnelSpec, undo: Arc<UndoRegistry>) -> Self {
         Self {
             spec,
-            routes: WindowsRouteInstaller::new(),
+            routes: WindowsRouteInstaller::new(undo),
         }
     }
 

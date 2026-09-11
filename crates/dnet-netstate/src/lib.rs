@@ -5,6 +5,8 @@
 pub mod adapter;
 pub mod error;
 pub mod host_route;
+pub mod undo;
+pub mod undo_file;
 pub mod win_bringup;
 pub mod win_route;
 

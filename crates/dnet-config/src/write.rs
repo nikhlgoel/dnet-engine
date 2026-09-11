@@ -49,15 +49,16 @@ pub mod win {
     use std::path::Path;
 
     use windows::core::{PCWSTR, PWSTR};
-    use windows::Win32::Foundation::{LocalFree, BOOL, HLOCAL};
+    use windows::Win32::Foundation::{LocalFree, BOOL, HANDLE, HLOCAL};
     use windows::Win32::Security::Authorization::{
         ConvertSecurityDescriptorToStringSecurityDescriptorW,
         ConvertStringSecurityDescriptorToSecurityDescriptorW, GetNamedSecurityInfoW,
-        SetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT,
+        GetSecurityInfo, SetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT,
     };
     use windows::Win32::Security::{
-        GetSecurityDescriptorDacl, ACL, DACL_SECURITY_INFORMATION,
-        PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+        GetSecurityDescriptorDacl, ACL, DACL_SECURITY_INFORMATION, OBJECT_SECURITY_INFORMATION,
+        OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+        PSID,
     };
 
     fn wide(s: &str) -> Vec<u16> {
@@ -129,15 +130,50 @@ pub mod win {
 
     /// Read `path`'s DACL back as SDDL (for verification).
     pub fn read_dacl_sddl(path: &Path) -> io::Result<String> {
+        read_sddl(path, DACL_SECURITY_INFORMATION)
+    }
+
+    /// Read `path`'s owner and DACL as SDDL, e.g. `O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)`.
+    pub fn read_owner_and_dacl_sddl(path: &Path) -> io::Result<String> {
+        read_sddl(path, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION)
+    }
+
+    /// Read an open file's owner and DACL as SDDL. Checking the handle, then reading through
+    /// the same handle, cannot be raced by swapping the file at its path in between.
+    pub fn read_owner_and_dacl_sddl_of(file: &std::fs::File) -> io::Result<String> {
+        use std::os::windows::io::AsRawHandle;
+        let info = OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+        let mut descriptor = PSECURITY_DESCRIPTOR::default();
+        // SAFETY: the handle is open for the lifetime of `file`, which outlives the call;
+        // `descriptor` receives a LocalAlloc'd buffer freed by `descriptor_to_sddl`.
+        let status = unsafe {
+            GetSecurityInfo(
+                HANDLE(file.as_raw_handle()),
+                SE_FILE_OBJECT,
+                info,
+                None,
+                None,
+                None,
+                None,
+                Some(&mut descriptor),
+            )
+        };
+        if status.is_err() {
+            return Err(io::Error::from_raw_os_error(status.0 as i32));
+        }
+        descriptor_to_sddl(descriptor, info)
+    }
+
+    fn read_sddl(path: &Path, info: OBJECT_SECURITY_INFORMATION) -> io::Result<String> {
         let path_w = wide_path(path);
         let mut descriptor = PSECURITY_DESCRIPTOR::default();
         // SAFETY: `path_w` is NUL-terminated; `descriptor` receives a LocalAlloc'd
-        // buffer that is freed below.
+        // buffer freed by `descriptor_to_sddl`.
         let status = unsafe {
             GetNamedSecurityInfoW(
                 PCWSTR(path_w.as_ptr()),
                 SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION,
+                info,
                 None,
                 None,
                 None,
@@ -148,14 +184,21 @@ pub mod win {
         if status.is_err() {
             return Err(io::Error::from_raw_os_error(status.0 as i32));
         }
+        descriptor_to_sddl(descriptor, info)
+    }
 
+    /// Convert and free a LocalAlloc'd security descriptor.
+    fn descriptor_to_sddl(
+        descriptor: PSECURITY_DESCRIPTOR,
+        info: OBJECT_SECURITY_INFORMATION,
+    ) -> io::Result<String> {
         let mut text = PWSTR::null();
         // SAFETY: `descriptor` is valid; `text` receives a LocalAlloc'd string.
         let converted = unsafe {
             ConvertSecurityDescriptorToStringSecurityDescriptorW(
                 descriptor,
                 SDDL_REVISION_1,
-                DACL_SECURITY_INFORMATION,
+                info,
                 &mut text,
                 None,
             )

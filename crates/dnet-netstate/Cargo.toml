@@ -11,12 +11,15 @@ authors.workspace = true
 [dependencies]
 dnet-core = { workspace = true }
 dnet-config = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
 windows = { workspace = true, features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
+tempfile = { workspace = true }
 # For the SPIKE-R4 runner (examples/spike_r4.rs) only.
 dnet-supervisor = { workspace = true }
 anyhow = { workspace = true }

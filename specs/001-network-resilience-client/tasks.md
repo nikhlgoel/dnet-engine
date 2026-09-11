@@ -154,7 +154,31 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
   > config mutations return an honest `InternalError` ("not available in this build") because the
   > transport engine is Phases 4-6 and request payloads arrive with the tray (Phase 9). The SCM path
   > is not CI-testable; the domain store and dispatch are unit-tested (14 dnetd tests).
-- [ ] T037 [US1] Implement the undo-record registry in `crates/dnet-netstate/src/undo.rs` — every routing, DNS, or adapter mutation registers its undo **before** being applied
+- [x] T037 [US1] Implement the undo-record registry in `crates/dnet-netstate/src/undo.rs` — every routing, DNS, or adapter mutation registers its undo **before** being applied
+  > **2026-09-11.**
+  >
+  > - **Registry.** `UndoRegistry::apply` is write-ahead: it persists the record, then runs
+  >   the mutation. If the record cannot be persisted, the mutation never runs. A failed
+  >   mutation, or a target that already existed, withdraws the record.
+  > - **One restoration path.** Normal teardown (`undo`) and crash replay (`replay`, newest
+  >   first, failures kept) both use the same `UndoExecutor`, so every disconnect exercises
+  >   the crash path.
+  > - **Journal.** `undo_file.rs` stores it at `%PROGRAMDATA%\DNet Engine\state\undo.json`
+  >   using temp-file, flush and rename. It is trusted only if the file is owned by SYSTEM
+  >   or Administrators and protected so that only those two have access, checked and read
+  >   through one handle. The directory must also be SYSTEM- or Administrators-owned.
+  >   Anything malformed is refused whole, never partially loaded.
+  > - **Wired in.** The host-route installer records every route before creating it, and
+  >   never records a route that already existed. Removal runs `WindowsUndoExecutor`. The
+  >   SPIKE-R4 runner replays leftovers at start and in its shutdown hook.
+  > - **Scope.** Host routes are the only routing/DNS/adapter mutation that exists today.
+  >   The AmneziaWG adapter's address and route are not recorded: they vanish with the
+  >   adapter, and SUP-05 reaps a leftover core. New mutation kinds add an `UndoRecord`
+  >   variant.
+  > - **Verification.** 19 new unprivileged tests. Five elevated `--ignored` tests **passed
+  >   elevated on 2026-09-11** against the real routing table: install and remove, crash then
+  >   replay, pre-existing route untouched, already-gone reversal, and restricted journal
+  >   save/load.
 - [ ] T038 [US1] Implement restoration-on-start recovery in `crates/dnetd/src/recovery.rs` — replays outstanding undo records at service start, because a crash leaves no one to run the shutdown path ([data-model.md](./data-model.md) §Cross-cutting 1)
 - [x] T039 **[GATE] Plan Phase 2 exit**: IPC-01 passes — an unprivileged, non-console client issuing `Connect` receives `Unauthorized` and routing state is unchanged. This is SC-019 verified by explicit attempt
   > **PASSED 2026-09-11.** Real named pipe with the production SDDL; client identity captured by
@@ -417,7 +441,7 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
 
 - [ ] T112 [P] Implement the diagnostic bundle excluding credential material and browsing destinations by default, in `crates/dnetd/src/diagnostics.rs` (FR-035, IPC-07)
 - [ ] T113 [P] Add the statement that obfuscation conceals content and protocol but **not** traffic volume or destination, to README, first-run flow, and About screen (FR-033, Principle VI)
-- [ ] T114 Build the WiX/NSIS installer in `installer/`, registering `dnetd` as a LocalSystem service and bundling `THIRD-PARTY-NOTICES.md` and every dependency licence text. Place the signed `wintun.dll` **beside each core executable** (the patched primary core loads it only from its own directory, digest-verified; ADR-0004 Finding 4), in an Administrators-only directory; run `cargo xtask verify-vendor` on the staged payload
+- [ ] T114 Build the WiX/NSIS installer in `installer/`, registering `dnetd` as a LocalSystem service and bundling `THIRD-PARTY-NOTICES.md` and every dependency licence text. Place the signed `wintun.dll` **beside each core executable** (the patched primary core loads it only from its own directory, digest-verified; ADR-0004 Finding 4), in an Administrators-only directory; run `cargo xtask verify-vendor` on the staged payload. Create `%PROGRAMDATA%\DNet Engine` (and `run`, `state` beneath it) **owned by SYSTEM or Administrators with a protected DACL**, replacing or refusing a directory that already exists with another owner. Any user can pre-create a `%PROGRAMDATA%` subdirectory and, as its owner, regain rights to replace the generated core config (T049) or the undo journal (T037) inside it
 - [ ] T115 Verify installer size at or below 60 MB (SC-012); if exceeded, reduce bundled artifacts before relaxing the target
 - [ ] T116 Measure idle RSS at or below 150 MB combined and idle CPU below 1% on a four-core machine (SC-013, SC-014)
 - [ ] T117 Verify no measurable slowdown to a concurrent compile, test suite, and editor while connected (SC-015)

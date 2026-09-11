@@ -6,4 +6,7 @@ pub enum NetstateError {
     /// A routing/adapter operation failed.
     #[error("network-state operation failed: {0}")]
     Operation(String),
+    /// The undo journal could not be read, written, or trusted.
+    #[error("undo journal: {0}")]
+    Journal(String),
 }

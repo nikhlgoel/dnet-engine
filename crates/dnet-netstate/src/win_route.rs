@@ -2,19 +2,26 @@
 //!
 //! Installs a `/32` (or `/128`) route to each resolved endpoint address through the
 //! physical gateway, on the interface that actually reaches that gateway. The installer
-//! records exactly the rows it created and deletes only those: a pre-existing identical
+//! owns exactly the routes it created and deletes only those: a pre-existing identical
 //! route is left alone, never removed on teardown.
+//!
+//! Every route is created through the undo registry (T037), so its reversal is on disk
+//! before the route exists, and removal runs the same [`WindowsUndoExecutor`] that crash
+//! replay does.
 
 #![cfg(windows)]
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-use windows::Win32::Foundation::{ERROR_NOT_FOUND, ERROR_OBJECT_ALREADY_EXISTS, WIN32_ERROR};
-use windows::Win32::NetworkManagement::IpHelper::{
-    CreateIpForwardEntry2, DeleteIpForwardEntry2, GetBestRoute2, InitializeIpForwardEntry,
-    MIB_IPFORWARD_ROW2,
+use windows::Win32::Foundation::{
+    ERROR_FILE_NOT_FOUND, ERROR_NOT_FOUND, ERROR_OBJECT_ALREADY_EXISTS, WIN32_ERROR,
 };
+use windows::Win32::NetworkManagement::IpHelper::{
+    ConvertInterfaceLuidToIndex, CreateIpForwardEntry2, DeleteIpForwardEntry2, GetBestRoute2,
+    GetIpForwardEntry2, InitializeIpForwardEntry, MIB_IPFORWARD_ROW2,
+};
+use windows::Win32::NetworkManagement::Ndis::NET_LUID_LH;
 use windows::Win32::Networking::WinSock::{
     AF_INET, AF_INET6, IN6_ADDR, IN6_ADDR_0, IN_ADDR, IN_ADDR_0, MIB_IPPROTO_NETMGMT, SOCKADDR_IN,
     SOCKADDR_IN6, SOCKADDR_INET,
@@ -22,6 +29,7 @@ use windows::Win32::Networking::WinSock::{
 
 use crate::error::NetstateError;
 use crate::host_route::HostRoute;
+use crate::undo::{Mutation, UndoExecutor, UndoId, UndoRecord, UndoRegistry};
 
 /// A TEST-NET-2 address (RFC 5737): never assigned, so the best route to it is the
 /// machine's default route.
@@ -87,6 +95,8 @@ pub fn from_sockaddr_inet(sa: &SOCKADDR_INET) -> Option<IpAddr> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BestRoute {
     pub interface_index: u32,
+    /// The interface's LUID, which unlike the index is stable across restarts.
+    pub interface_luid: u64,
     /// Prefix length of the matched route: `0` means the default route.
     pub prefix_len: u8,
     /// The next hop, or `None` when the destination is on-link.
@@ -104,6 +114,8 @@ pub fn best_route_to(dest: IpAddr) -> Result<BestRoute, NetstateError> {
     let next_hop = from_sockaddr_inet(&row.NextHop).filter(|ip| !ip.is_unspecified());
     Ok(BestRoute {
         interface_index: row.InterfaceIndex,
+        // SAFETY: NET_LUID_LH is a union over a u64; every bit pattern is a valid u64.
+        interface_luid: unsafe { row.InterfaceLuid.Value },
         prefix_len: row.DestinationPrefix.PrefixLength,
         next_hop,
     })
@@ -145,71 +157,135 @@ pub fn resolve_destination(host: &str, gateway: IpAddr) -> Result<Vec<IpAddr>, N
     Ok(matching)
 }
 
-/// Build the host-route row: `dest/32|128` via `gateway` on the interface that reaches it.
-fn host_route_row(dest: IpAddr, gateway: IpAddr) -> Result<MIB_IPFORWARD_ROW2, NetstateError> {
-    // The interface is the one the OS uses to reach the *gateway* — the physical link.
-    // Querying the gateway (on-link) rather than the endpoint is deliberate: once a TUN
-    // exists, the best route to the endpoint would be the TUN.
-    let via = best_route_to(gateway)?;
+/// A host-route row: `dest/32|128` via `next_hop` on the interface with this LUID.
+fn route_row(interface_luid: u64, dest: IpAddr, next_hop: IpAddr) -> MIB_IPFORWARD_ROW2 {
     let mut row = MIB_IPFORWARD_ROW2::default();
     // SAFETY: `row` is a valid, writable MIB_IPFORWARD_ROW2.
     unsafe { InitializeIpForwardEntry(&mut row) };
-    row.InterfaceIndex = via.interface_index;
+    row.InterfaceLuid = NET_LUID_LH {
+        Value: interface_luid,
+    };
     row.DestinationPrefix.Prefix = to_sockaddr_inet(dest);
     row.DestinationPrefix.PrefixLength = if dest.is_ipv4() { 32 } else { 128 };
-    row.NextHop = to_sockaddr_inet(gateway);
+    row.NextHop = to_sockaddr_inet(next_hop);
     row.Metric = 0;
     row.Protocol = MIB_IPPROTO_NETMGMT;
-    Ok(row)
+    row
+}
+
+/// Whether a route with this row's key (interface, prefix, next hop) exists.
+fn route_exists(row: &MIB_IPFORWARD_ROW2) -> bool {
+    let mut probe = *row;
+    // SAFETY: `probe` is an initialised row whose key fields are set; the call fills the rest.
+    unsafe { GetIpForwardEntry2(&mut probe) }.is_ok()
+}
+
+/// Whether an interface with this LUID currently exists. Read-only and unprivileged.
+pub fn interface_exists(interface_luid: u64) -> bool {
+    let luid = NET_LUID_LH {
+        Value: interface_luid,
+    };
+    let mut index = 0u32;
+    // SAFETY: both pointers reference live locals for the duration of the call.
+    unsafe { ConvertInterfaceLuidToIndex(&luid, &mut index) }.is_ok()
+}
+
+/// Reverses undo records on the real routing table. Used both for normal teardown and for
+/// replay after a crash.
+pub struct WindowsUndoExecutor;
+
+impl UndoExecutor for WindowsUndoExecutor {
+    fn reverse(&self, record: &UndoRecord) -> Result<(), NetstateError> {
+        match record {
+            UndoRecord::HostRoute {
+                interface_luid,
+                destination,
+                next_hop,
+            } => {
+                // A route cannot outlive its interface, so a vanished interface (an unplugged
+                // tether, a removed adapter) means the route is already gone.
+                if !interface_exists(*interface_luid) {
+                    return Ok(());
+                }
+                let row = route_row(*interface_luid, *destination, *next_hop);
+                // SAFETY: `row` is fully initialised by `route_row`.
+                let status = unsafe { DeleteIpForwardEntry2(&row) };
+                // Gone already, or its interface is: either way nothing of ours remains.
+                if status == ERROR_NOT_FOUND || status == ERROR_FILE_NOT_FOUND {
+                    return Ok(());
+                }
+                win32(status, "DeleteIpForwardEntry2")
+            }
+        }
+    }
 }
 
 struct OwnedRoute {
     destination: String,
     gateway: IpAddr,
-    row: MIB_IPFORWARD_ROW2,
+    id: UndoId,
 }
 
-// SAFETY: MIB_IPFORWARD_ROW2 is plain data (integers and unions of integers) with no
-// pointers or thread affinity.
-unsafe impl Send for OwnedRoute {}
-
 /// Installs and removes endpoint host routes, owning exactly what it created.
-#[derive(Default)]
 pub struct WindowsRouteInstaller {
+    undo: Arc<UndoRegistry>,
     owned: Mutex<Vec<OwnedRoute>>,
 }
 
 impl WindowsRouteInstaller {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(undo: Arc<UndoRegistry>) -> Self {
+        Self {
+            undo,
+            owned: Mutex::new(Vec::new()),
+        }
     }
 
     /// Install the host route to every resolved address of the route's destination.
     /// Returns the addresses now routed via the gateway.
     pub fn install(&self, route: &HostRoute) -> Result<Vec<IpAddr>, NetstateError> {
         let addrs = resolve_destination(route.destination(), route.gateway())?;
+        // The interface is the one the OS uses to reach the *gateway* — the physical link.
+        // Querying the gateway (on-link) rather than the endpoint is deliberate: once a TUN
+        // exists, the best route to the endpoint would be the TUN.
+        let via = best_route_to(route.gateway())?;
         let mut owned = self.owned.lock().expect("route ownership mutex poisoned");
         for &dest in &addrs {
-            let row = host_route_row(dest, route.gateway())?;
-            // SAFETY: `row` is fully initialised above.
-            let status = unsafe { CreateIpForwardEntry2(&row) };
-            if status == ERROR_OBJECT_ALREADY_EXISTS {
-                // An identical route already exists and is not ours: use it, never delete.
+            let row = route_row(via.interface_luid, dest, route.gateway());
+            // Checked before registering, so a route someone else owns never gets an undo
+            // record that a crash could leave behind to delete it.
+            if route_exists(&row) {
                 tracing::warn!(%dest, "endpoint host route already present; not taking ownership");
                 continue;
             }
-            win32(status, "CreateIpForwardEntry2")?;
-            owned.push(OwnedRoute {
-                destination: route.destination().to_string(),
-                gateway: route.gateway(),
-                row,
-            });
+            let record = UndoRecord::HostRoute {
+                interface_luid: via.interface_luid,
+                destination: dest,
+                next_hop: route.gateway(),
+            };
+            let id = self.undo.apply(record, || {
+                // SAFETY: `row` is fully initialised by `route_row`.
+                let status = unsafe { CreateIpForwardEntry2(&row) };
+                if status == ERROR_OBJECT_ALREADY_EXISTS {
+                    // Created by someone else since the check: use it, never delete it.
+                    tracing::warn!(%dest, "endpoint host route appeared concurrently; not taking ownership");
+                    return Ok(Mutation::AlreadyPresent);
+                }
+                win32(status, "CreateIpForwardEntry2").map(|()| Mutation::Applied)
+            })?;
+            if let Some(id) = id {
+                owned.push(OwnedRoute {
+                    destination: route.destination().to_string(),
+                    gateway: route.gateway(),
+                    id,
+                });
+            }
         }
         Ok(addrs)
     }
 
     /// Remove the host routes this installer created for `route`. Idempotent: a route
-    /// already gone is not an error.
+    /// already gone is not an error. A route that cannot be removed stays owned, and its
+    /// undo record stays on disk for replay.
     pub fn remove(&self, route: &HostRoute) -> Result<(), NetstateError> {
         let mut owned = self.owned.lock().expect("route ownership mutex poisoned");
         let mut first_error = None;
@@ -217,18 +293,17 @@ impl WindowsRouteInstaller {
             if r.destination != route.destination() || r.gateway != route.gateway() {
                 return true;
             }
-            // SAFETY: `row` is the exact row passed to CreateIpForwardEntry2.
-            let status = unsafe { DeleteIpForwardEntry2(&r.row) };
-            if status.is_ok() || status == ERROR_NOT_FOUND {
-                false
-            } else {
-                first_error.get_or_insert(status);
-                true
+            match self.undo.undo(r.id, &WindowsUndoExecutor) {
+                Ok(()) => false,
+                Err(e) => {
+                    first_error.get_or_insert(e);
+                    true
+                }
             }
         });
         match first_error {
             None => Ok(()),
-            Some(status) => win32(status, "DeleteIpForwardEntry2"),
+            Some(e) => Err(e),
         }
     }
 
@@ -255,6 +330,7 @@ impl WindowsRouteInstaller {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::undo::MemoryStore;
     use dnet_config::ActiveEndpointBypass;
     use dnet_core::endpoint::EndpointAddress;
 
@@ -289,7 +365,14 @@ mod tests {
     #[test]
     fn best_route_query_succeeds_for_loopback() {
         // Read-only and unprivileged: every machine has a route to its loopback.
-        assert!(best_route_to(IpAddr::V4(Ipv4Addr::LOCALHOST)).is_ok());
+        let route = best_route_to(IpAddr::V4(Ipv4Addr::LOCALHOST)).unwrap();
+        assert_ne!(route.interface_luid, 0);
+    }
+
+    fn test_route(last_octet: u8, gateway: IpAddr) -> HostRoute {
+        let host = format!("203.0.113.{last_octet}");
+        let bypass = ActiveEndpointBypass::new(&EndpointAddress::new(host, 1).unwrap());
+        HostRoute::for_endpoint(&bypass, gateway)
     }
 
     /// Installs and removes a real route to an unassigned TEST-NET-3 address via the
@@ -299,9 +382,10 @@ mod tests {
     fn a_real_host_route_is_installed_preferred_and_removed() {
         let gateway = default_gateway().expect("test host needs an IPv4 default gateway");
         let dest = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 77));
-        let bypass = ActiveEndpointBypass::new(&EndpointAddress::new("203.0.113.77", 1).unwrap());
-        let route = HostRoute::for_endpoint(&bypass, gateway);
-        let installer = WindowsRouteInstaller::new();
+        let route = test_route(77, gateway);
+        let store = MemoryStore::new();
+        let registry = Arc::new(UndoRegistry::open(Box::new(store.clone())).unwrap());
+        let installer = WindowsRouteInstaller::new(registry.clone());
 
         installer.install(&route).unwrap();
         let chosen = best_route_to(dest).unwrap();
@@ -310,9 +394,112 @@ mod tests {
             "the /32 host route must be preferred"
         );
         assert_eq!(chosen.next_hop, Some(gateway));
+        assert_eq!(
+            registry.outstanding().len(),
+            1,
+            "the route's undo must be recorded"
+        );
 
         installer.remove(&route).unwrap();
         assert!(!installer.owns(&route));
+        assert!(registry.outstanding().is_empty());
         assert_ne!(best_route_to(dest).unwrap().prefix_len, 32);
+    }
+
+    /// SC-016 for routes: a run that dies without teardown leaves a journal, and a fresh
+    /// registry over that journal removes the route.
+    #[test]
+    #[ignore = "requires an elevated Administrator (run: cargo test -p dnet-netstate -- --ignored)"]
+    fn a_route_left_by_a_crashed_run_is_removed_by_replay() {
+        use crate::undo_file::FileStore;
+
+        let gateway = default_gateway().expect("test host needs an IPv4 default gateway");
+        let dest = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 78));
+        let root = tempfile::tempdir().unwrap();
+        let journal = root.path().join("state").join("undo.json");
+
+        {
+            let registry =
+                Arc::new(UndoRegistry::open(Box::new(FileStore::new(&journal))).unwrap());
+            let installer = WindowsRouteInstaller::new(registry);
+            installer.install(&test_route(78, gateway)).unwrap();
+            assert_eq!(best_route_to(dest).unwrap().prefix_len, 32);
+            // Dropped without `remove`: the process died.
+        }
+        assert_eq!(
+            best_route_to(dest).unwrap().prefix_len,
+            32,
+            "nothing restored it yet"
+        );
+
+        let restarted = UndoRegistry::open(Box::new(FileStore::new(&journal))).unwrap();
+        let report = restarted.replay(&WindowsUndoExecutor).unwrap();
+
+        assert_eq!((report.restored, report.failed.len()), (1, 0));
+        assert!(restarted.outstanding().is_empty());
+        assert_ne!(best_route_to(dest).unwrap().prefix_len, 32);
+    }
+
+    /// A pre-existing identical route is used but never recorded, so neither teardown nor
+    /// replay can remove it.
+    #[test]
+    #[ignore = "requires an elevated Administrator (run: cargo test -p dnet-netstate -- --ignored)"]
+    fn a_pre_existing_route_is_never_recorded_or_removed() {
+        let gateway = default_gateway().expect("test host needs an IPv4 default gateway");
+        let dest = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 79));
+        let theirs = WindowsRouteInstaller::new(Arc::new(
+            UndoRegistry::open(Box::new(MemoryStore::new())).unwrap(),
+        ));
+        theirs.install(&test_route(79, gateway)).unwrap();
+
+        let registry = Arc::new(UndoRegistry::open(Box::new(MemoryStore::new())).unwrap());
+        let ours = WindowsRouteInstaller::new(registry.clone());
+        ours.install(&test_route(79, gateway)).unwrap();
+        assert!(registry.outstanding().is_empty());
+        ours.remove(&test_route(79, gateway)).unwrap();
+        assert_eq!(
+            best_route_to(dest).unwrap().prefix_len,
+            32,
+            "not ours to remove"
+        );
+
+        theirs.remove(&test_route(79, gateway)).unwrap();
+        assert_ne!(best_route_to(dest).unwrap().prefix_len, 32);
+    }
+
+    /// An interface that no longer exists took its routes with it. Runs unelevated because
+    /// the routing table is never touched: without the interface check this would be a
+    /// delete attempt, which an unprivileged caller is denied.
+    #[test]
+    fn reversing_a_route_on_a_vanished_interface_succeeds_without_touching_routes() {
+        assert!(!interface_exists(0x0006_0000_0000_7f3a));
+        let record = UndoRecord::HostRoute {
+            interface_luid: 0x0006_0000_0000_7f3a,
+            destination: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 80)),
+            next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+        };
+        WindowsUndoExecutor.reverse(&record).unwrap();
+    }
+
+    #[test]
+    fn a_present_interface_exists() {
+        let luid = best_route_to(IpAddr::V4(Ipv4Addr::LOCALHOST))
+            .unwrap()
+            .interface_luid;
+        assert!(interface_exists(luid));
+    }
+
+    /// Reversal is idempotent: deleting a route that is already gone, on an interface that
+    /// still exists, is success.
+    #[test]
+    #[ignore = "requires an elevated Administrator (run: cargo test -p dnet-netstate -- --ignored)"]
+    fn reversing_a_route_that_is_already_gone_succeeds() {
+        let gateway = default_gateway().expect("test host needs an IPv4 default gateway");
+        let record = UndoRecord::HostRoute {
+            interface_luid: best_route_to(gateway).unwrap().interface_luid,
+            destination: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 80)),
+            next_hop: gateway,
+        };
+        WindowsUndoExecutor.reverse(&record).unwrap();
     }
 }
