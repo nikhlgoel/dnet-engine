@@ -11,7 +11,9 @@ use dnet_core::health::HealthState;
 use dnet_core::ids::EndpointId;
 use dnet_core::ids::ProfileId;
 use dnet_core::profile::{ConnectionProfile, ProfileKind, ProfileParams};
-use dnet_core::rule::{builtin_bypass_rules, validate_rule_set, RoutingRule};
+use dnet_core::rule::{
+    builtin_rules, validate_dns_leak_protection, validate_rule_set, RoutingRule,
+};
 use serde_json::{json, Value};
 
 /// Everything the daemon knows about endpoints, profiles, and routing.
@@ -45,7 +47,7 @@ impl DomainState {
         Self {
             endpoints: Vec::new(),
             profiles,
-            rules: builtin_bypass_rules(None),
+            rules: builtin_rules(None),
         }
     }
 
@@ -59,6 +61,9 @@ impl DomainState {
             "active_profile": Value::Null,
             "active_endpoint": Value::Null,
             "carrying_path": Value::Null,
+            // Fail closed by default: with no tunnel up, would-be-tunnelled traffic
+            // (and DNS) is dropped rather than routed to the physical interface.
+            "routing_posture": "FailClosed",
             "warnings": [],
         })
         .to_string()
@@ -167,11 +172,14 @@ impl DomainState {
         self.endpoints.len() != before
     }
 
-    /// Add a user rule, rejecting a precedence collision across the whole set (FR-022).
+    /// Add a user rule, rejecting a precedence collision across the whole set (FR-022)
+    /// and any change that would weaken DNS-leak protection (the DNS-capture rule must
+    /// remain present and top-priority).
     pub fn add_rule(&mut self, rule: RoutingRule) -> Result<(), DomainError> {
         let mut candidate = self.rules.clone();
         candidate.push(rule);
         validate_rule_set(&candidate)?;
+        validate_dns_leak_protection(&candidate)?;
         self.rules = candidate;
         Ok(())
     }
@@ -212,6 +220,7 @@ fn rule_action_name(action: dnet_core::rule::RuleAction) -> &'static str {
     match action {
         dnet_core::rule::RuleAction::Tunnel => "Tunnel",
         dnet_core::rule::RuleAction::Bypass => "Bypass",
+        dnet_core::rule::RuleAction::Capture => "Capture",
     }
 }
 
@@ -307,6 +316,44 @@ mod tests {
             serde_json::from_str(&DomainState::seeded().state_snapshot_json()).unwrap();
         assert_eq!(json["status"], "Disconnected");
         assert_eq!(json["active_profile"], Value::Null);
+    }
+
+    #[test]
+    fn disconnected_snapshot_is_fail_closed() {
+        let json: Value =
+            serde_json::from_str(&DomainState::seeded().state_snapshot_json()).unwrap();
+        assert_eq!(json["routing_posture"], "FailClosed");
+    }
+
+    #[test]
+    fn seeded_rules_include_dns_leak_protection() {
+        let state = DomainState::seeded();
+        assert_eq!(
+            dnet_core::rule::validate_dns_leak_protection(state.rules()),
+            Ok(())
+        );
+        assert!(state.rules().iter().any(RoutingRule::is_dns_capture));
+    }
+
+    #[test]
+    fn a_user_rule_cannot_undercut_the_dns_capture_rule() {
+        let mut state = DomainState::seeded();
+        // Precedence 0 is the DNS-capture rule; a user rule there collides and is
+        // rejected, so DNS capture stays top-priority.
+        let clash = RoutingRule::user(
+            RuleMatcher::IpCidr(dnet_core::rule::IpCidr::parse("8.8.8.8/32").unwrap()),
+            RuleAction::Bypass,
+            0,
+        )
+        .unwrap();
+        assert!(state.add_rule(clash).is_err());
+    }
+
+    #[test]
+    fn rules_json_exposes_the_capture_action() {
+        let json: Value = serde_json::from_str(&DomainState::seeded().rules_json()).unwrap();
+        let rules = json["rules"].as_array().unwrap();
+        assert!(rules.iter().any(|r| r["action"] == "Capture"));
     }
 
     #[test]

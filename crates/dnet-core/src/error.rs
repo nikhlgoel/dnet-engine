@@ -47,4 +47,15 @@ pub enum DomainError {
     /// More than one network path was marked as carrying traffic.
     #[error("at most one path may be carrying; found {0}")]
     MultipleCarryingPaths(usize),
+
+    /// A rule set lacked the built-in DNS-capture rule, so plaintext port-53 queries
+    /// could leak to the physical network (DNS-leak prevention, FakeIP).
+    #[error("rule set must contain the built-in DNS-capture rule; without it DNS can leak")]
+    MissingDnsCapture,
+
+    /// A `DnsPort` matcher was paired with an action other than `Capture`. Port-53
+    /// traffic must always be captured into the tunnel, never tunnelled-with-fallback
+    /// or bypassed.
+    #[error("a DnsPort matcher must use the Capture action")]
+    DnsPortRequiresCapture,
 }

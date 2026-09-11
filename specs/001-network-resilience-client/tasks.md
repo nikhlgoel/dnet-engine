@@ -133,7 +133,9 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
 - [x] T026 [P] [US1] Implement `ConnectionProfile`, `ProfileKind`, `Carrier`, `Viability`, `CoreBinding` in `crates/dnet-core/src/profile.rs`
 - [ ] T027 [P] [US3] Implement `FailoverTier` in `crates/dnet-core/src/tier.rs`, with the invariant that tier is set from measurement and is never inferred from `ProfileKind`
 - [x] T028 [P] [US3] Implement `NetworkPath`, `PathKind`, `PathQuality`, `PathRole` in `crates/dnet-core/src/path.rs` — a path with `gateway = None` cannot become `Carrying` ([data-model.md](./data-model.md) §3)
+  - Fail-closed kill switch: `crates/dnet-core/src/posture.rs` adds `RoutingPosture` (`Tunnelled { tier } | FailClosed` — **no** direct-fallback variant) and `select_posture`, which returns `FailClosed` whenever no path carries or no profile is `Working`, so lost tunnels drop traffic rather than exposing the physical interface ([data-model.md](./data-model.md) §3).
 - [x] T029 [P] [US5] Implement `RoutingRule`, `RuleMatcher`, `RuleAction`, `Reliability` in `crates/dnet-core/src/rule.rs` — make constructing a `Deterministic` application rule **impossible at the type level** ([data-model.md](./data-model.md) §4)
+  - DNS-leak protection: added `RuleMatcher::DnsPort` + `RuleAction::Capture` (only constructible together), the built-in `DnsPort → Capture` rule at precedence `0`, and `validate_dns_leak_protection`, so all outbound port-53 traffic is captured into the tunnel and no bypass can outrank it ([data-model.md](./data-model.md) §4).
 - [x] T030 [P] [US1] Implement `ConnectionSession`, `ConnectionEvent`, `FailureCause`, `SessionOutcome` in `crates/dnet-core/src/session.rs` — `FailureCause` has exactly the seven variants and no `Unknown`
 - [ ] T031 [US1] Implement the built-in non-deletable bypass rule set (RFC1918, link-local, multicast, captive-portal probe hosts, active endpoint address) in `crates/dnet-core/src/builtin_rules.rs`
 

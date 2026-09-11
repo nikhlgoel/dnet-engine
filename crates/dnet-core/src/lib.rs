@@ -11,6 +11,7 @@ pub mod error;
 pub mod health;
 pub mod ids;
 pub mod path;
+pub mod posture;
 pub mod profile;
 pub mod rule;
 pub mod session;

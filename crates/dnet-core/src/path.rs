@@ -2,6 +2,10 @@
 //!
 //! One `NetworkPath` is one physical way the machine reaches the internet. Owned by
 //! `dnet-netstate`, projected into `dnet-core` for selection and failover.
+//!
+//! A path becoming `Unusable` never routes tunnelled traffic to the raw interface: the
+//! resulting routing posture is decided by [`crate::posture::select_posture`], which
+//! fails closed when no path carries and no profile is viable (the kill switch).
 
 use std::net::IpAddr;
 use std::time::Duration;

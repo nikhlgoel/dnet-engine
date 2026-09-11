@@ -41,7 +41,7 @@ pub enum Carrier {
 /// serving core, and the expected failover tier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProfileKind {
-    /// Obfuscated WireGuard, served by the AmneziaWG process. UDP, Tier 1.
+    /// Obfuscated WG transport, served by the AmneziaWG process. UDP, Tier 1.
     AmneziaWg,
     /// QUIC with Salamander/Gecko, served by the primary core. UDP, Tier 1.
     Hysteria2,

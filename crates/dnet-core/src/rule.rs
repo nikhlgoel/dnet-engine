@@ -28,6 +28,11 @@ pub enum RuleAction {
     Tunnel,
     /// Keep it on the local network, direct.
     Bypass,
+    /// Force it into the TUN for FakeIP resolution, and **drop it if the tunnel is not
+    /// up** — never let it reach the physical interface. Used only for the built-in
+    /// DNS-capture rule, so no plaintext port-53 query can leak to the local network
+    /// (DNS-leak prevention).
+    Capture,
 }
 
 /// A parsed CIDR block.
@@ -77,6 +82,10 @@ pub enum RuleMatcher {
     IpCidr(IpCidr),
     /// An originating application by executable path. Always best-effort.
     Application(String),
+    /// All outbound DNS traffic — destination port 53, on both UDP and TCP. Matched
+    /// before any address- or domain-based rule so no query can be routed around the
+    /// tunnel. Only ever paired with `RuleAction::Capture`.
+    DnsPort,
 }
 
 /// A statement that traffic matching a criterion is tunnelled or bypassed.
@@ -111,10 +120,15 @@ impl RoutingRule {
             RuleMatcher::Domain(p) | RuleMatcher::DomainSuffix(p) | RuleMatcher::Application(p) => {
                 p.trim().is_empty()
             }
-            RuleMatcher::IpCidr(_) => false,
+            RuleMatcher::IpCidr(_) | RuleMatcher::DnsPort => false,
         };
         if pattern_empty {
             return Err(DomainError::EmptyPattern);
+        }
+        // Port-53 traffic must always be *captured*: never tunnelled-with-fallback and
+        // never bypassed, or a query could reach the physical network.
+        if matches!(matcher, RuleMatcher::DnsPort) && action != RuleAction::Capture {
+            return Err(DomainError::DnsPortRequiresCapture);
         }
         Ok(Self {
             id,
@@ -155,6 +169,12 @@ impl RoutingRule {
             _ => Reliability::Deterministic,
         }
     }
+
+    /// Whether this rule is the DNS-capture rule (port-53 traffic forced into the
+    /// tunnel). There is exactly one, built-in and non-deletable.
+    pub fn is_dns_capture(&self) -> bool {
+        matches!(self.matcher, RuleMatcher::DnsPort) && self.action == RuleAction::Capture
+    }
 }
 
 /// The captive-portal probe hosts that must stay reachable before login (FR-026).
@@ -176,15 +196,32 @@ const LOCAL_BYPASS_CIDRS: &[&str] = &[
     "ff00::/8",       // IPv6 multicast
 ];
 
-/// The built-in, non-deletable bypass rules: local ranges, captive-portal probe hosts,
-/// and the active endpoint address. These make local resources and portal login work
-/// with no user configuration, and mirror the R4 host route for the endpoint so rule
-/// evaluation and the route table agree (data-model §4).
-///
-/// Built-ins take the lowest precedence values, so they win.
-pub fn builtin_bypass_rules(active_endpoint: Option<&EndpointAddress>) -> Vec<RoutingRule> {
-    let mut rules = Vec::new();
-    let mut precedence = 0u32;
+/// The DNS-capture rule: all outbound port-53 traffic is forced into the tunnel for
+/// FakeIP resolution, and dropped if the tunnel is down. It takes precedence 0 — the
+/// lowest value, so it wins over every other rule including the local-range bypasses —
+/// so no plaintext DNS query can be routed around the tunnel (DNS-leak prevention).
+fn dns_capture_rule() -> RoutingRule {
+    RoutingRule::build(
+        RuleId::new(),
+        RuleMatcher::DnsPort,
+        RuleAction::Capture,
+        0,
+        true,
+    )
+    .expect("built-in DNS-capture rule is always valid")
+}
+
+/// The built-in, non-deletable rules, lowest precedence first (they win):
+/// 1. **DNS capture** (port 53) — the top-priority anti-leak rule.
+/// 2. `Bypass` for the active endpoint address, mirroring the R4 host route so rule
+///    evaluation and the route table agree.
+/// 3. `Bypass` for local ranges (RFC1918, link-local, multicast) and captive-portal
+///    probe hosts, so local resources and portal login work with no configuration
+///    (FR-024, FR-026, SC-018).
+pub fn builtin_rules(active_endpoint: Option<&EndpointAddress>) -> Vec<RoutingRule> {
+    // Precedence 0 is reserved for DNS capture; everything else starts at 1.
+    let mut rules = vec![dns_capture_rule()];
+    let mut precedence = 1u32;
     let mut push = |matcher: RuleMatcher, p: &mut u32| {
         // Built-in matchers are constructed from constants and never empty, so this
         // cannot fail; `expect` documents that.
@@ -219,6 +256,21 @@ pub fn validate_rule_set(rules: &[RoutingRule]) -> Result<(), DomainError> {
         if !seen.insert(rule.precedence) {
             return Err(DomainError::PrecedenceCollision(rule.precedence));
         }
+    }
+    Ok(())
+}
+
+/// Validate that a rule set protects against DNS leaks: it must contain the DNS-capture
+/// rule, and that rule must hold the strictly-lowest precedence, so no bypass can route
+/// port-53 traffic around the tunnel. Enforced on every rule-set mutation.
+pub fn validate_dns_leak_protection(rules: &[RoutingRule]) -> Result<(), DomainError> {
+    let capture = rules
+        .iter()
+        .find(|r| r.is_dns_capture())
+        .ok_or(DomainError::MissingDnsCapture)?;
+    let min_precedence = rules.iter().map(RoutingRule::precedence).min();
+    if min_precedence != Some(capture.precedence()) {
+        return Err(DomainError::MissingDnsCapture);
     }
     Ok(())
 }
@@ -303,10 +355,13 @@ mod tests {
     #[test]
     fn builtins_cover_local_ranges_portal_hosts_and_the_endpoint() {
         let addr = EndpointAddress::new("vpn.example", 443).unwrap();
-        let rules = builtin_bypass_rules(Some(&addr));
+        let rules = builtin_rules(Some(&addr));
 
         assert!(rules.iter().all(RoutingRule::is_builtin));
-        assert!(rules.iter().all(|r| r.action() == RuleAction::Bypass));
+        // Every built-in bypasses, except the single DNS-capture rule.
+        assert!(rules
+            .iter()
+            .all(|r| r.action() == RuleAction::Bypass || r.is_dns_capture()));
 
         // Endpoint host present.
         assert!(rules
@@ -327,9 +382,73 @@ mod tests {
 
     #[test]
     fn builtins_without_an_endpoint_omit_the_endpoint_rule() {
-        let rules = builtin_bypass_rules(None);
+        let rules = builtin_rules(None);
         assert!(rules.iter().all(RoutingRule::is_builtin));
         assert!(!rules.is_empty());
+    }
+
+    #[test]
+    fn the_dns_capture_rule_is_built_in_and_wins_over_everything() {
+        let addr = EndpointAddress::new("vpn.example", 443).unwrap();
+        let rules = builtin_rules(Some(&addr));
+
+        let capture: Vec<_> = rules.iter().filter(|r| r.is_dns_capture()).collect();
+        assert_eq!(capture.len(), 1, "exactly one DNS-capture rule");
+
+        let dns = capture[0];
+        assert!(dns.is_builtin());
+        assert_eq!(dns.action(), RuleAction::Capture);
+        assert_eq!(dns.reliability(), Reliability::Deterministic);
+        // It holds the strictly-lowest precedence, so it beats every bypass.
+        let min = rules.iter().map(RoutingRule::precedence).min().unwrap();
+        assert_eq!(dns.precedence(), min);
+        assert_eq!(dns.precedence(), 0);
+    }
+
+    #[test]
+    fn a_dns_port_matcher_may_not_bypass_or_tunnel() {
+        for action in [RuleAction::Bypass, RuleAction::Tunnel] {
+            assert_eq!(
+                RoutingRule::user(RuleMatcher::DnsPort, action, 5),
+                Err(DomainError::DnsPortRequiresCapture)
+            );
+        }
+        // Capture is accepted.
+        assert!(RoutingRule::user(RuleMatcher::DnsPort, RuleAction::Capture, 5).is_ok());
+    }
+
+    #[test]
+    fn leak_protection_requires_the_capture_rule_at_top_precedence() {
+        let ok = builtin_rules(None);
+        assert_eq!(validate_dns_leak_protection(&ok), Ok(()));
+
+        // A set with no DNS-capture rule is rejected.
+        let no_dns = vec![RoutingRule::user(
+            RuleMatcher::Domain("x.example".into()),
+            RuleAction::Tunnel,
+            1,
+        )
+        .unwrap()];
+        assert_eq!(
+            validate_dns_leak_protection(&no_dns),
+            Err(DomainError::MissingDnsCapture)
+        );
+
+        // A capture rule that does not hold the lowest precedence is rejected: a lower
+        // bypass could otherwise route port-53 around the tunnel.
+        let capture_outranked = vec![
+            RoutingRule::user(RuleMatcher::DnsPort, RuleAction::Capture, 5).unwrap(),
+            RoutingRule::user(
+                RuleMatcher::IpCidr(IpCidr::parse("8.8.8.8/32").unwrap()),
+                RuleAction::Bypass,
+                1,
+            )
+            .unwrap(),
+        ];
+        assert_eq!(
+            validate_dns_leak_protection(&capture_outranked),
+            Err(DomainError::MissingDnsCapture)
+        );
     }
 
     #[test]

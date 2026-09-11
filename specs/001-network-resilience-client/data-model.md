@@ -134,6 +134,11 @@ One physical way the machine reaches the internet. Owned by `dnet-netstate`, pro
 - A path with `gateway = None` cannot become `Carrying` while Profile A is active — the endpoint host
   route cannot be installed without a gateway, and proceeding would create the R4 routing loop.
 - Quality is EWMA-smoothed; raw samples never drive transitions directly (FR-018, SC-007).
+- **Fail closed.** A path becoming `Unusable`, or the loss of the carrying path, never routes
+  would-be-tunnelled traffic to the raw physical interface. The routing posture is `RoutingPosture`
+  (`Tunnelled { tier } | FailClosed`) — a type with **no** direct-fallback variant, so the fallback
+  is unrepresentable. `posture::select_posture` returns `FailClosed` whenever no path carries or no
+  profile is `Working`; that is the default and the kill switch.
 
 ---
 
@@ -142,8 +147,8 @@ One physical way the machine reaches the internet. Owned by `dnet-netstate`, pro
 | Field | Type | Notes |
 |---|---|---|
 | `id` | `RuleId` | |
-| `matcher` | `RuleMatcher` | `Domain(pattern) \| DomainSuffix \| IpCidr \| Application(path)` |
-| `action` | `RuleAction` | `Tunnel \| Bypass` |
+| `matcher` | `RuleMatcher` | `Domain(pattern) \| DomainSuffix \| IpCidr \| Application(path) \| DnsPort` |
+| `action` | `RuleAction` | `Tunnel \| Bypass \| Capture` |
 | `precedence` | `u32` | Lower wins; documented and visible (FR-022) |
 | `reliability` | `Reliability` | `Deterministic \| BestEffort` |
 
@@ -151,6 +156,12 @@ One physical way the machine reaches the internet. Owned by `dnet-netstate`, pro
 - `Application(_)` matchers are **always** `BestEffort`. Every other matcher is `Deterministic`. This
   is a type-level guarantee, not a convention — construction of a deterministic application rule is
   impossible (Principle VI, FR-023).
+- **No DNS leak.** A built-in, non-deletable `DnsPort → Capture` rule matches all outbound port-53
+  traffic (UDP and TCP) and holds precedence `0` — the strictly-lowest, so it wins over every bypass,
+  including the local-range rules. Port-53 traffic is forced into the TUN for FakeIP resolution and
+  **dropped if the tunnel is down**, never routed to the physical network. A `DnsPort` matcher is only
+  constructible with the `Capture` action, and `validate_dns_leak_protection` rejects any rule set that
+  lacks the capture rule or lets another rule outrank it.
 - A built-in, non-deletable rule set gives `Bypass` to RFC1918 ranges, link-local, multicast, and the
   captive-portal probe hosts, so local resources and portal login work with no user configuration
   (FR-024, FR-026, SC-018).
