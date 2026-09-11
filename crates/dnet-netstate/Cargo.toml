@@ -10,6 +10,7 @@ authors.workspace = true
 
 [dependencies]
 dnet-core = { workspace = true }
+dnet-config = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
 windows = { workspace = true, features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock"] }

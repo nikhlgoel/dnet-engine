@@ -13,6 +13,7 @@ pub mod ids;
 pub mod path;
 pub mod posture;
 pub mod profile;
+pub mod profile_start;
 pub mod rule;
 pub mod session;
 pub mod tier;

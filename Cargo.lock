@@ -176,6 +176,7 @@ name = "dnet-config"
 version = "0.1.0"
 dependencies = [
  "dnet-core",
+ "dnet-netstate",
  "serde",
  "serde_json",
  "tempfile",
@@ -224,6 +225,7 @@ dependencies = [
 name = "dnet-netstate"
 version = "0.1.0"
 dependencies = [
+ "dnet-config",
  "dnet-core",
  "thiserror",
  "tokio",

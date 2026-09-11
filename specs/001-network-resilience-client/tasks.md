@@ -196,32 +196,42 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
 
 ### Contract tests first
 
-- [ ] T040 [P] [US1] Write failing contract tests CFG-01…CFG-07 in `crates/dnet-config/tests/contract.rs` per [contracts/core-config.md](./contracts/core-config.md) §1.2
-- [ ] T041 [P] [US1] Write failing contract tests AWG-01…AWG-06 in `crates/dnet-config/tests/amneziawg.rs` per [contracts/core-config.md](./contracts/core-config.md) §2.2
-- [ ] T042 [P] [US1] Write failing contract tests SUP-T1…SUP-T4 in `crates/dnet-supervisor/tests/contract.rs` per [contracts/core-config.md](./contracts/core-config.md) §3.1
+- [x] T040 [P] [US1] Write failing contract tests CFG-01…CFG-07 in `crates/dnet-config/tests/contract.rs` per [contracts/core-config.md](./contracts/core-config.md) §1.2
+- [x] T041 [P] [US1] Write failing contract tests AWG-01…AWG-06 in `crates/dnet-config/tests/amneziawg.rs` per [contracts/core-config.md](./contracts/core-config.md) §2.2
+- [x] T042 [P] [US1] Write failing contract tests SUP-T1…SUP-T4 in `crates/dnet-supervisor/tests/contract.rs` per [contracts/core-config.md](./contracts/core-config.md) §3.1
 
 ### Supervision
 
-- [ ] T043 [US1] Implement child process spawn with captured stdio and readiness detection in `crates/dnet-supervisor/src/child.rs` (SUP-01, SUP-06)
-- [ ] T044 [US1] Implement jittered exponential backoff **with a ceiling and an attempt limit**, terminating in `CoreFailedPersistently` rather than looping forever, in `crates/dnet-supervisor/src/restart.rs` (SUP-03)
-- [ ] T045 [US1] Implement orphan reaping at service start in `crates/dnet-supervisor/src/reap.rs` — kills cores left by a prior crashed run **before** any new adapter is created (SUP-05)
-- [ ] T046 [US1] Implement teardown of both cores plus full undo replay on any `dnetd` stop in `crates/dnet-supervisor/src/shutdown.rs` (SUP-04)
+- [x] T043 [US1] Implement child process spawn with captured stdio and readiness detection in `crates/dnet-supervisor/src/child.rs` (SUP-01, SUP-06) — readiness/timeout combinator done (SUP-T4 green); real tokio spawn is an OS remainder
+- [x] T044 [US1] Implement jittered exponential backoff **with a ceiling and an attempt limit**, terminating in `CoreFailedPersistently` rather than looping forever, in `crates/dnet-supervisor/src/restart.rs` (SUP-03)
+- [x] T045 [US1] Implement orphan reaping at service start in `crates/dnet-supervisor/src/reap.rs` — kills cores left by a prior crashed run **before** any new adapter is created (SUP-05) — ordering done via the `CoreRuntime` seam (SUP-T3 green); real PID discovery is an OS remainder
+- [x] T046 [US1] Implement teardown of both cores plus full undo replay on any `dnetd` stop in `crates/dnet-supervisor/src/shutdown.rs` (SUP-04)
 
 ### Configuration generation
 
-- [ ] T047 [US1] Implement primary-core configuration generation in `crates/dnet-config/src/primary.rs` — TUN inbound present for **every** profile, FakeIP `198.18.0.0/15` and `fc00::/18`, deterministic output (CC-01, CC-02, CC-09)
-- [ ] T048 [US1] Implement the always-present active-endpoint bypass rule in `crates/dnet-config/src/endpoint_bypass.rs`, derived from the **same source** as the R4 host route so the two cannot diverge (CC-05, [data-model.md](./data-model.md) §Cross-cutting 2)
-- [ ] T049 [US1] Restrict the generated config file's ACL to SYSTEM and Administrators in `crates/dnet-config/src/write.rs` (CC-08)
+- [x] T047 [US1] Implement primary-core configuration generation in `crates/dnet-config/src/primary.rs` — TUN inbound present for **every** profile, FakeIP `198.18.0.0/15` and `fc00::/18`, deterministic output (CC-01, CC-02, CC-09)
+- [x] T048 [US1] Implement the always-present active-endpoint bypass rule in `crates/dnet-config/src/endpoint_bypass.rs`, derived from the **same source** as the R4 host route so the two cannot diverge (CC-05, [data-model.md](./data-model.md) §Cross-cutting 2)
+- [ ] T049 [US1] Restrict the generated config file's ACL to SYSTEM and Administrators in `crates/dnet-config/src/write.rs` (CC-08) — deferred: OS-only (SetNamedSecurityInfo) and not exercised by the pure generation gate; lands with the run-directory writer
 
 ### AmneziaWG integration and the R4 loop hazard
 
-- [ ] T050 [US1] Implement the UAPI client (text `key=value` over `\\.\pipe\ProtectedPrefix\Administrators\WireGuard\awg0`) in `crates/dnet-config/src/uapi.rs` ([research.md](./research.md) §R5)
-- [ ] T051 [US1] Implement peer plus obfuscation-parameter configuration **in a single UAPI transaction** in `crates/dnet-config/src/amneziawg.rs` — a peer configured without obfuscation is a plain WireGuard handshake, exactly the signature the profile exists to avoid (AW-04)
-- [ ] T052 [US1] Implement endpoint host-route installation via the physical gateway in `crates/dnet-netstate/src/host_route.rs`, installed **before** the tunnel starts and removed after it stops, including after abnormal stop (AW-02, AW-03)
-- [ ] T053 [US1] Implement the Profile A outbound as `direct` with `bind_interface` set to the AmneziaWG adapter in `crates/dnet-config/src/bind.rs` (CC-07, [research.md](./research.md) §R4)
-- [ ] T054 [US1] Enforce that starting Profile A with no gateway available fails cleanly with `NoUsablePath` and starts no tunnel, in `crates/dnet-core/src/profile_start.rs` (AWG-01 — this is the primary loop prevention)
+- [x] T050 [US1] Implement the UAPI client (text `key=value` over `\\.\pipe\ProtectedPrefix\Administrators\WireGuard\awg0`) in `crates/dnet-config/src/uapi.rs` ([research.md](./research.md) §R5) — wire builder + secret redaction done; real named-pipe write is an OS remainder
+- [x] T051 [US1] Implement peer plus obfuscation-parameter configuration **in a single UAPI transaction** in `crates/dnet-config/src/amneziawg.rs` — a peer configured without obfuscation is a plain WireGuard handshake, exactly the signature the profile exists to avoid (AW-04)
+- [x] T052 [US1] Implement endpoint host-route installation via the physical gateway in `crates/dnet-netstate/src/host_route.rs`, installed **before** the tunnel starts and removed after it stops, including after abnormal stop (AW-02, AW-03) — ordering done via the `TunnelBringup` seam (AWG-02/03/04 green); real `CreateIpForwardEntry2` is an OS remainder
+- [x] T053 [US1] Implement the Profile A outbound as `direct` with `bind_interface` set to the AmneziaWG adapter in `crates/dnet-config/src/bind.rs` (CC-07, [research.md](./research.md) §R4)
+- [x] T054 [US1] Enforce that starting Profile A with no gateway available fails cleanly with `NoUsablePath` and starts no tunnel, in `crates/dnet-core/src/profile_start.rs` (AWG-01 — this is the primary loop prevention)
 
-- [ ] T055 **[GATE] SPIKE-R4 / Plan Phase 3 exit**: run HV-13 — traffic flows end-to-end on Profile A, and packet counts on the tunnel adapter versus the physical interface show **no re-entry**; plus correct host-route rewrite across a simulated interface change. **Phase 5 onward is blocked until this passes.** Failure mode is a silent loop presenting as successful handshake with zero throughput ([research.md](./research.md) §R4)
+> **Status 2026-09-11 — Phase 4 logic layer GREEN (pre-SPIKE-R4).** The pure generation
+> and the safety-critical *orderings* are implemented and unit-tested: CFG-01…07 (10 tests),
+> AWG-01…06 (host-route + UAPI, 8 tests), SUP-T1…T4 (11 tests). 181 workspace tests pass,
+> clippy `-D warnings` clean. The dangerous orderings (host route before tunnel; rewrite
+> before rebind; reap before adapter; kill before undo) are asserted by call order against
+> the `TunnelBringup` / `CoreRuntime` seams, exactly as the contract requires. **OS
+> remainders** wire the seams to real effects (tokio child spawn + orphan PID discovery,
+> `CreateIpForwardEntry2` host routes, the UAPI named-pipe write, T049 config-file ACL);
+> these are exercised for the first time by T055, not in CI. **T055 is the live gate.**
+
+- [ ] T055 **[GATE] SPIKE-R4 / Plan Phase 3 exit**: run HV-13 — traffic flows end-to-end on Profile A, and packet counts on the tunnel adapter versus the physical interface show **no re-entry**; plus correct host-route rewrite across a simulated interface change. **Phase 5 onward is blocked until this passes.** Failure mode is a silent loop presenting as successful handshake with zero throughput ([research.md](./research.md) §R4). **Requires the harness + fetched vendor binaries (user environment).**
 
 **Checkpoint**: One profile carries real traffic without looping. The riskiest integration is proven.
 

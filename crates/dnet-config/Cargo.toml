@@ -18,3 +18,7 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# The AWG contract tests assert the host-route/tunnel ordering, which lives in
+# dnet-netstate. This is a dev-only dependency edge (dnet-netstate depends on
+# dnet-config normally); Cargo permits a dev-dependency cycle.
+dnet-netstate = { workspace = true }
