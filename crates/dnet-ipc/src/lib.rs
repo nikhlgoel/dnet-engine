@@ -9,3 +9,7 @@ pub mod authz;
 pub mod frame;
 pub mod protocol;
 pub mod server;
+pub mod service;
+
+#[cfg(windows)]
+pub(crate) mod win;

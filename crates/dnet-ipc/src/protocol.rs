@@ -335,3 +335,72 @@ pub fn build_diagnostic_bundle(input: &DiagnosticInput) -> String {
     }
     out
 }
+
+// ------------------------------------------------------------------ request wire
+
+/// Decode a request from its wire JSON: `{ "request": "<Name>", <fields> }`.
+///
+/// Every field is validated server-side; the caller is treated as hostile input
+/// (Principle V). Unknown request names are rejected rather than ignored.
+pub fn decode_request(wire: &str) -> Result<Request, IpcError> {
+    let value: Value = serde_json::from_str(wire).map_err(|e| invalid(e.to_string()))?;
+    let name = value
+        .get("request")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("missing `request`"))?;
+
+    let request = match name {
+        "GetState" => Request::GetState,
+        "GetSession" => Request::GetSession,
+        "ListEndpoints" => Request::ListEndpoints,
+        "ListProfiles" => Request::ListProfiles,
+        "ListRules" => Request::ListRules,
+        "GetDiagnostics" => Request::GetDiagnostics,
+        "Connect" => Request::Connect {
+            acknowledge_tier2: value
+                .get("acknowledge_tier2")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        },
+        "Disconnect" => Request::Disconnect,
+        "AddEndpoint" => Request::AddEndpoint,
+        "RemoveEndpoint" => Request::RemoveEndpoint,
+        "SetEndpointEnabled" => Request::SetEndpointEnabled,
+        "AddRule" => Request::AddRule,
+        "RemoveRule" => Request::RemoveRule,
+        "SetProfileParams" => Request::SetProfileParams,
+        "EnableBrutal" => Request::EnableBrutal,
+        "SetEncryptedDnsHandling" => Request::SetEncryptedDnsHandling,
+        "StartProvisioning" => Request::StartProvisioning,
+        "CancelProvisioning" => Request::CancelProvisioning,
+        "Subscribe" => Request::Subscribe,
+        other => return Err(invalid(format!("unknown request {other:?}"))),
+    };
+    Ok(request)
+}
+
+/// The stable wire code for an error (contract §Error model).
+fn error_code(error: &IpcError) -> &'static str {
+    match error {
+        IpcError::Unauthorized { .. } => "Unauthorized",
+        IpcError::InvalidRequest { .. } => "InvalidRequest",
+        IpcError::TierDowngradeRequiresConsent { .. } => "TierDowngradeRequiresConsent",
+        IpcError::CapacityUnavailable => "CapacityUnavailable",
+        IpcError::NotConnected => "NotConnected",
+        IpcError::ServiceBusy => "ServiceBusy",
+        IpcError::InternalError { .. } => "InternalError",
+    }
+}
+
+/// Encode an error in its wire form (contract §Error model). The `detail` is always
+/// actionable; a bare error reaching the UI is a defect. Never leaks credential
+/// material — `IpcError` carries none.
+pub fn encode_ipc_error(error: &IpcError) -> String {
+    let retryable = matches!(error, IpcError::CapacityUnavailable | IpcError::ServiceBusy);
+    json!({
+        "error": error_code(error),
+        "detail": error.to_string(),
+        "retryable": retryable,
+    })
+    .to_string()
+}

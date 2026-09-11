@@ -140,13 +140,21 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
 ### IPC and service skeleton
 
 - [x] T032 [US1] Implement named-pipe framing (4-byte LE length prefix + UTF-8 JSON) in `crates/dnet-ipc/src/frame.rs`, rejecting malformed, oversized, and truncated frames without panicking (IPC-08)
-- [ ] T033 [US1] Implement request/response types and the error model in `crates/dnet-ipc/src/protocol.rs` per [contracts/ipc-protocol.md](./contracts/ipc-protocol.md)
-- [ ] T034 [US1] Implement pipe creation with explicit SDDL in `crates/dnet-ipc/src/server.rs` — never a NULL DACL (IPC-02)
-- [ ] T035 [US1] Implement per-connection client identity verification in `crates/dnet-ipc/src/authz.rs` — `ImpersonateNamedPipeClient`, capture token, revert immediately; mutating requests require the interactive console user (IPC-01)
+- [x] T033 [US1] Implement request/response types and the error model in `crates/dnet-ipc/src/protocol.rs` per [contracts/ipc-protocol.md](./contracts/ipc-protocol.md)
+- [x] T034 [US1] Implement pipe creation with explicit SDDL in `crates/dnet-ipc/src/server.rs` — never a NULL DACL (IPC-02)
+- [x] T035 [US1] Implement per-connection client identity verification in `crates/dnet-ipc/src/authz.rs` — `ImpersonateNamedPipeClient`, capture token, revert immediately; mutating requests require the interactive console user (IPC-01)
 - [ ] T036 [US1] Implement the Windows Service lifecycle (SCM registration, start/stop/shutdown handlers) in `crates/dnetd/src/service.rs` using `windows-service`, running as LocalSystem ([research.md](./research.md) §R5)
 - [ ] T037 [US1] Implement the undo-record registry in `crates/dnet-netstate/src/undo.rs` — every routing, DNS, or adapter mutation registers its undo **before** being applied
 - [ ] T038 [US1] Implement restoration-on-start recovery in `crates/dnetd/src/recovery.rs` — replays outstanding undo records at service start, because a crash leaves no one to run the shutdown path ([data-model.md](./data-model.md) §Cross-cutting 1)
-- [ ] T039 **[GATE] Plan Phase 2 exit**: IPC-01 passes — an unprivileged, non-console client issuing `Connect` receives `Unauthorized` and routing state is unchanged. This is SC-019 verified by explicit attempt
+- [x] T039 **[GATE] Plan Phase 2 exit**: IPC-01 passes — an unprivileged, non-console client issuing `Connect` receives `Unauthorized` and routing state is unchanged. This is SC-019 verified by explicit attempt
+  > **PASSED 2026-09-11.** Real named pipe with the production SDDL; client identity captured by
+  > `ImpersonateNamedPipeClient` -> `OpenThreadToken` -> `GetTokenInformation(TokenUser)` ->
+  > `ConvertSidToStringSidW`, then revert. `crates/dnet-ipc/tests/attack.rs`: a mutating `Connect`
+  > from a non-console captured identity is refused (`Unauthorized`) with the routing-mutation
+  > counter unmoved, while a read-only `GetState` from the same real client succeeds — proving
+  > capture yields an authenticated principal, so the refusal is a real authorization decision
+  > and not blanket denial. SC-019 verified by attack. A cross-process lowered-token variant is
+  > recorded as future hardening.
 
 **Checkpoint**: The privilege boundary holds under attack. Domain logic is unit-testable without Windows or a network.
 
