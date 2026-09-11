@@ -381,6 +381,35 @@ argument for keeping the profile set updatable (D6) rather than for dropping the
 user action, with prominent first-run disclosure and a single-action opt-out that states the
 consequence. Specified as FR-025 and FR-025a.
 
+### 6.5 Embedded binaries in the primary core: **CLOSED, remediated** *(2026-09-11)*
+
+§6.1's aggregation argument assumed every bundled binary was a separate file. An audit of the
+pinned primary core's source, and of the bytes of the binary we build, found that assumption false
+twice over.
+
+**What the audit found**
+
+- **Adapter DLL.** The core's TUN dependency (`sing-tun v0.9.0-beta.4`) compiled the signed
+  adapter DLL into the executable and mapped it from memory. The copy was byte-identical to the
+  official 0.14.1 release and validly signed, so it was not a modification. It was nonetheless
+  proprietary code inside a GPL executable we compile, contrary to the letter of constitution
+  obligation 2.
+- **Kernel driver.** The core also embedded the WinDivert kernel driver (LGPLv3/GPLv2, so
+  compatible). It was undisclosed, and was one config option away from being installed by a
+  LocalSystem process.
+
+**Remediation (approved and implemented)**
+
+- A reviewed loader patch that loads the separately shipped DLL from disk, with a digest check.
+- The `with_external_windivert` build tag, so the driver is not compiled in.
+- A `verify-vendor` byte scan that fails on any embedded executable image.
+- Constitution 1.3.0, which adds a binding no-embedded-copies rule.
+
+Full evidence and verification are in `docs/adr/0004-vendored-binary-pins.md`, Finding 4.
+
+**Lesson for Principle II.** Verifying *what we fetch* is not the same as verifying *what we ship*.
+Build outputs are now inspected, not just inputs.
+
 ## 7. Remaining Open Items
 
 - **O5** Define the transport-profile update channel and its integrity model — a profile feed that

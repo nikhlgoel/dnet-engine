@@ -154,10 +154,13 @@ function Invoke-Mode([string]$Mode) {
     $awgDir = Join-Path $run 'awg'; $priDir = Join-Path $run 'primary'
     New-Item -ItemType Directory -Force $awgDir, $priDir | Out-Null
     # Private per-run copies: orphan reaping matches these exact paths. The adapter
-    # driver DLL is the signed prebuilt, copied unmodified beside the core that loads it.
+    # driver DLL is the signed prebuilt, copied unmodified beside EACH core that loads it.
+    # Both cores load it from their own directory; neither carries an embedded copy
+    # (ADR-0004 Finding 4), and the primary core refuses a DLL that fails its digest pin.
     Copy-Item $staged.Awg $awgDir
     Copy-Item $staged.Driver $awgDir
     Copy-Item $staged.Primary $priDir
+    Copy-Item $staged.Driver $priDir
 
     $report = Join-Path $run 'runner-report.json'
     $runnerArgs = @('--mode', $tag, '--params', $ParamsFile, '--endpoint', $EndpointIp,

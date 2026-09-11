@@ -92,18 +92,36 @@ dependency is compatible. Three obligations follow and are not negotiable:
    therefore MUST NOT use the sing-box name in its product name, branding, or marketing, and MUST NOT
    imply association or endorsement. Attribution in documentation and an about screen is required.
 2. **Wintun MUST be bundled as the vendor-signed prebuilt DLL only, taken from the official
-   distribution zip as published — never built from source, never extracted from another product.**
-   Wintun's source is GPLv2, incompatible with GPLv3. The prebuilt binaries carry a **proprietary**
-   licence (not a permissive one, contrary to an earlier characterisation — see ADR-0004) whose
-   §3(d) permits redistribution only alongside software using the documented API, and whose §3(a)
-   forbids extraction. DNet Engine's own code neither links nor loads the DLL, so the arrangement
-   is aggregation under GPLv3 §5.
+   distribution zip as published — never built from source, never extracted from another product,
+   and never as a copy embedded inside another executable.** It ships as a separate file only,
+   beside the cores that load it at run time.
+   - **Why not source.** Wintun's source is GPLv2, incompatible with GPLv3.
+   - **Why the distribution terms are narrow.** The prebuilt binaries carry a **proprietary**
+     licence (not a permissive one, contrary to an earlier characterisation — see ADR-0004). Its
+     §3(d) permits redistribution only alongside software using the documented API, and its §3(a)
+     forbids extraction.
+   - **Why it is aggregation.** DNet Engine's own code neither links nor loads the DLL, and no
+     GPL-covered executable we build contains it. The arrangement is aggregation under GPLv3 §5.
+   - **Why embedding breaks that.** An embedded copy would put proprietary code inside a GPL
+     executable we compile; ADR-0004 Finding 4 found exactly that in the upstream primary core.
 3. **DNet Engine MUST NOT use the WireGuard LLC, WireGuard project, or Wintun names to endorse or
    promote itself** (Wintun prebuilt licence §3(e)). As with obligation 1, attribution in
    documentation and the About screen is required and permitted; branding and marketing use is not.
 
 All bundled components run as separate processes, making the arrangement aggregation rather than a
 combined work. Licence texts and a source offer ship with the installer regardless.
+
+**No embedded copies (binding).** Every third-party binary the product ships — DLL, driver, or
+executable — MUST be a separate, pinned, digest-verified file. No bundled executable may carry
+another binary image inside it.
+
+- **Upstream embedding is not accepted.** When an upstream dependency embeds one, it MUST be
+  removed at build time: by a build tag where upstream offers one, otherwise by a reviewed source
+  patch recorded in build provenance and shipped as part of the Corresponding Source.
+- **Kernel drivers need an ADR.** A kernel-mode driver MUST NOT be bundled at all without one.
+- **Enforced by the build.** `cargo xtask verify-vendor` scans every vendored core executable
+  and fails on any embedded executable image. The rule exists for licence clarity (obligation 2)
+  and for least privilege (Principle V): a component nobody can see is one nobody can review.
 
 **v1 platform.** Windows 10 1809+ and Windows 11, x64 and ARM64, only. Core logic sits behind
 platform-abstraction traits so Linux and Android are later ports rather than rewrites. macOS and iOS
@@ -167,9 +185,16 @@ and scope expansion must be justified, never assumed.
 
 All plans and reviews verify compliance with these principles before work is accepted.
 
-**Version**: 1.2.0 | **Ratified**: 2026-09-10 | **Last Amended**: 2026-09-10
+**Version**: 1.3.0 | **Ratified**: 2026-09-10 | **Last Amended**: 2026-09-11
 
 **Amendment log**
+
+- **1.3.0** — Added the binding **no-embedded-copies** rule. Tightened obligation 2: Wintun ships
+  only as a separate file, never embedded. Kernel-mode drivers now require an ADR before bundling.
+  Prompted by an audit finding that the pinned primary core embedded both the signed adapter DLL
+  and the WinDivert kernel driver. Remediated by a loader patch, the `with_external_windivert` build
+  tag, and a `verify-vendor` byte scan. Approved by the project owner 2026-09-11. Recorded in
+  `docs/adr/0004-vendored-binary-pins.md` (Finding 4) and `docs/Research-Critique.md` §6.5.
 
 - **1.2.0** — Corrected the Wintun prebuilt licence characterisation from "permissive" to
   proprietary-with-a-redistribution-exception, after reading the shipped licence text. Added

@@ -145,6 +145,16 @@ therefore both satisfies the licence and follows vendor guidance.
 **Note.** `dnetd` links no Wintun bindings itself — both supervised cores load the DLL. This removes
 a dependency the source blueprint assumed was necessary.
 
+**Amendment (2026-09-11).**
+
+- **Licence wording.** "More permissive licence" above was corrected to *proprietary with a
+  redistribution exception* (ADR-0004 Finding 1).
+- **Embedded copies.** The pinned primary core was later found to embed its own copy of the DLL.
+  It is now built with a patched loader that loads the separately shipped, digest-verified DLL from
+  beside the executable.
+- **Enforcement.** `verify-vendor` also fails on any executable image embedded in a core
+  (ADR-0004 Finding 4; constitution 1.3.0 no-embedded-copies rule).
+
 **Source.** wintun.net licensing and distribution statement. Recorded in `docs/Research-Critique.md`
 §6.1 as a binding obligation.
 

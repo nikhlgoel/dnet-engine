@@ -1,6 +1,7 @@
 # ADR-0004: Vendored binary pins and supply-chain verification
 
-**Status**: Accepted — all three decisions approved and implemented 2026-09-10
+**Status**: Accepted — all three decisions approved and implemented 2026-09-10; amended
+2026-09-11 by Finding 4 (embedded binaries), approved and implemented the same day
 **Date**: 2026-09-10
 **Task**: T005 (`cargo xtask fetch-vendor`)
 **Supersedes in part**: `research.md` §R1 and §R6 characterisations
@@ -159,3 +160,94 @@ alongside the primary core's. Its allowlist exempts `crates/xtask/` (build tooli
 never ships and whose job is naming what it checks for), `docs/`, `specs/`, vendor licence
 and provenance files, and the About screen. A negative test confirms the check still fails
 on a planted violation in `dnetd`.
+
+---
+
+## Finding 4 — The primary core embedded its own adapter DLL and a kernel driver *(2026-09-11)*
+
+The Outcome above verified what we **fetch**. It did not examine what the core's own
+dependencies **compile into** the executable. An audit of the pinned source, and of the bytes
+of the binary we built, found two embedded images.
+
+### Evidence
+
+| Image | Embedded by | In our `primary-core.exe` | Identity |
+|---|---|---|---|
+| Adapter DLL (`wintun.dll`) | `sing-tun v0.9.0-beta.4`, `internal/wintun/dll_windows_<arch>.go`: `//go:embed <arch>/wintun.dll`, loaded from memory by `memmod.LoadLibrary`. **No build tag disables it.** | Full 427,552-byte amd64 copy at offset 41,843,488 | All four architecture copies byte-identical to the official 0.14.1 zip (amd64 `e5da8447…`) with a valid WireGuard LLC Authenticode signature |
+| Packet-diversion kernel driver (`WinDivert64.sys`) | Core `common/windivert/embed_amd64.go`, `//go:build windows && amd64 && !with_external_windivert` | Full 94,144-byte copy at offset 41,626,560 | `8da08533…`; licence LGPL-3.0 or GPL-2.0 |
+
+`amneziawg-go` embeds neither. It uses `golang.zx2c4.com/wintun`, which loads the DLL from disk
+(`LoadLibraryEx` with `LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32`).
+
+### Assessment
+
+**Adapter DLL: a breach of Constitution obligation 2 as written; ambiguous under the DLL's own
+licence.**
+
+- The copy was unmodified and signed (§3(a)/(c) respected), and used only through the exported
+  API (§3(b)). The in-memory loader is WireGuard LLC's own MIT code.
+- But obligation 2 permits the DLL only *as the signed prebuilt, taken from the official zip*.
+  This copy instead reached the installer **inside a GPL-covered executable that we compile**.
+  That makes our object code contain proprietary code whose source cannot be offered, which
+  undermines the aggregation basis Finding 1 relies on. Whether an embedded copy counts as
+  "distributed alongside" under §3(d) is unclear, and we should not ship on an unclear reading.
+- Operationally, two independently versioned DLL copies (one embedded, one vendored) could
+  one day contend for the same driver service.
+
+**Packet-diversion driver: no licence breach (LGPLv3 is GPLv3-compatible), but a security
+liability.** It was an undocumented, signed kernel driver inside a LocalSystem process. The
+core installs it on first use of TLS `spoof` or the bridge protocol. No profile uses either,
+so the only thing standing between it and the kernel was the config file's ACL.
+
+### Decision (approved by the project owner 2026-09-11)
+
+| # | Mitigation |
+|---|---|
+| M1 | Patch `sing-tun`'s loader through a Go module `replace`. Delete the four embed files and their DLL directories. Load the official vendored DLL from beside the executable, by absolute path, only after its SHA-256 matches a per-architecture pin. The file is held open with read-only sharing from hash to load, closing the check-to-load race. |
+| M2 | Build the core with `with_external_windivert`. We never ship the driver file, so features that need it fail closed. A config contract test keeps generated configs away from them. |
+| M3 | `verify-vendor` scans every vendored core executable for embedded PE images. A byte-identical copy of any official DLL or the driver is named; any other embedded image fails too, since a different build would match no digest. |
+| M4 | This finding; `THIRD-PARTY-NOTICES.md`; Constitution 1.3.0 (no-embedded-copies rule). |
+
+### Implementation and verification
+
+- **Patch**: `crates/xtask/patches/sing-tun/internal/wintun/`, applied by `fetch-vendor`.
+  - The patch step refuses to build if the pinned core ever requires a different `sing-tun`
+    version, or if a listed file is missing; either forces a re-review.
+  - It asserts that no `go:embed`, `.dll`, or `.sys` remains in the patched package.
+  - It replaces by a **relative** path, so the build machine's directory layout is not recorded
+    in the shipped binary's build info.
+  - It records the patch digest and a build fingerprint in `BUILD-PROVENANCE.md`. A change to
+    the commit, tags, or patch forces a rebuild.
+- **Patch tests** (Go, run by `fetch-vendor` against the real vendored DLL):
+  - the pinned DLL loads and exports the Permitted API;
+  - a one-byte-tampered DLL is refused before loading;
+  - a missing DLL and a relative path are refused;
+  - the path resolves beside the executable.
+- **Pins**: `crates/xtask/src/pins.rs`, cross-checked by a unit test against the Go patch's own
+  digest constants.
+- **Results**:
+
+  | Check | Result |
+  |---|---|
+  | `verify-vendor` on the old binary | Fails, naming both images at the audited offsets |
+  | Rebuilt core size | 41.63 MB → **41.10 MB** (the two images removed) |
+  | `verify-vendor` on the rebuilt binary | OK |
+  | Pinned `check` on the Profile A config | Still accepted |
+
+- **Runtime proof on the rebuilt binary**, unelevated, starting a TUN inbound:
+
+  | DLL beside the core | Outcome |
+  |---|---|
+  | None | Fails to open `<exe dir>\wintun.dll` |
+  | Official | Loads, then adapter creation is *Access is denied* (the expected stop without elevation) |
+  | One byte flipped | *Does not match the pinned digest* |
+
+### Consequences
+
+- **Deployment**: the signed DLL must sit **beside each core executable** that uses it.
+  - The SPIKE-R4 runner stages it into both core directories.
+  - The installer (T114) must do the same, or install both cores into one directory.
+- **Source offer**: the primary core is now a modified build of `sing-tun`. The patch files are
+  part of its GPLv3 Corresponding Source and carry the modification notice required by §5(a).
+- **Pin bumps**: raising the primary-core or `sing-tun` pin means re-reviewing the patch. The
+  version check makes that unavoidable.

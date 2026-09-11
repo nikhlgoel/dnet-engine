@@ -1,20 +1,31 @@
 //! T006 — `cargo xtask verify-vendor`
 //!
 //! Enforces Constitution licence obligation 2: **Wintun MUST be bundled as the
-//! vendor-signed prebuilt DLL only, never built from source.**
+//! vendor-signed prebuilt DLL only, never built from source, and never as a copy
+//! embedded inside another executable.**
 //!
 //! Wintun's source is GPLv2, which is incompatible with this project's GPLv3.
 //! The prebuilt signed DLLs carry a separate **proprietary** licence (not a permissive
 //! one) whose §3(d) permits redistribution only alongside software using the documented
 //! API, and whose §3(a) forbids extraction from other products. Compatibility rests on
-//! aggregation under GPLv3 §5: DNet Engine's own code neither links nor loads the DLL.
-//! See `docs/adr/0004-vendored-binary-pins.md` and `research.md` §R6.
+//! aggregation under GPLv3 §5: DNet Engine's own code neither links nor loads the DLL, and
+//! no GPL-covered executable we build carries the DLL inside it.
+//! See `docs/adr/0004-vendored-binary-pins.md` (Finding 4) and `research.md` §R6.
 //!
 //! This check fails the build. It is not advisory.
 
 use anyhow::{anyhow, bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use crate::embedded::find_embedded_images;
+use crate::pins::{forbidden_embedded_images, sha256_hex, wintun_dll};
+
+/// Vendored executables that must not carry any embedded executable image.
+const CORE_EXECUTABLES: &[&str] = &[
+    "vendor/primary-core/primary-core.exe",
+    "vendor/amneziawg-go/amneziawg-go.exe",
+];
 
 /// File extensions that would indicate Wintun source has been vendored.
 const SOURCE_EXTENSIONS: &[&str] = &["c", "h", "cpp", "hpp", "vcxproj", "sln", "asm", "rc"];
@@ -27,12 +38,14 @@ pub fn run(repo_root: &Path) -> Result<()> {
 
     check_no_wintun_source(repo_root, &mut failures)?;
     check_signed_dll(repo_root, &mut failures)?;
+    check_no_embedded_images(repo_root, &mut failures)?;
     check_licence_texts(repo_root, &mut failures)?;
 
     if failures.is_empty() {
         println!("verify-vendor: OK");
         println!("  - no Wintun source present anywhere in the tree");
-        println!("  - vendor/wintun/wintun.dll carries a valid Authenticode signature");
+        println!("  - vendor/wintun/wintun.dll matches the pinned digest and is validly signed");
+        println!("  - no vendored core executable embeds a DLL, driver, or other PE image");
         println!("  - licence texts present for every bundled dependency");
         return Ok(());
     }
@@ -44,8 +57,37 @@ pub fn run(repo_root: &Path) -> Result<()> {
     eprintln!();
     eprintln!("This check enforces a binding licence obligation recorded in");
     eprintln!(".specify/memory/constitution.md. Bundling Wintun source would place");
-    eprintln!("GPLv2 code into a GPLv3 work. Use the vendor-signed prebuilt DLL.");
+    eprintln!("GPLv2 code into a GPLv3 work, and an embedded copy would place proprietary");
+    eprintln!("code inside a GPL executable. Ship only the vendor-signed prebuilt DLL, as a");
+    eprintln!("separate file; rebuild the cores with `cargo xtask fetch-vendor`.");
     bail!("verify-vendor failed")
+}
+
+/// Obligation 2's no-embedded-copies rule. A byte-identical copy of the official DLL, or
+/// the packet-diversion driver, inside a core executable is named. Any other embedded PE
+/// image is reported too: a different build of the same DLL would match no digest.
+fn check_no_embedded_images(repo_root: &Path, failures: &mut Vec<String>) -> Result<()> {
+    let forbidden = forbidden_embedded_images();
+    for rel in CORE_EXECUTABLES {
+        let exe = repo_root.join(rel);
+        if !exe.exists() {
+            continue;
+        }
+        let bytes = std::fs::read(&exe).with_context(|| format!("failed to read {rel}"))?;
+        for image in find_embedded_images(&bytes, &forbidden) {
+            failures.push(match image.identified {
+                Some(label) => format!(
+                    "{rel} embeds a byte-identical copy of the {label} at offset {}",
+                    image.offset
+                ),
+                None => format!(
+                    "{rel} embeds an unidentified executable image at offset {}",
+                    image.offset
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Walk the whole repository, not just `vendor/`. Someone vendoring Wintun source
@@ -97,6 +139,15 @@ fn check_signed_dll(repo_root: &Path, failures: &mut Vec<String>) -> Result<()> 
             dll.display()
         );
         return Ok(());
+    }
+
+    let pin = wintun_dll("amd64");
+    let digest = sha256_hex(&std::fs::read(&dll).context("failed to read wintun.dll")?);
+    if digest != pin.sha256 {
+        failures.push(format!(
+            "vendor/wintun/wintun.dll SHA-256 is {digest}, expected the pinned {} ({})",
+            pin.sha256, pin.label
+        ));
     }
 
     match authenticode_status(&dll)? {

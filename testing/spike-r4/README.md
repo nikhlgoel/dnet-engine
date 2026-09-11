@@ -56,7 +56,8 @@ Vendor binaries (already present in this working copy; needed on a fresh clone).
 Git, Go 1.25+, and `curl.exe`:
 
 ```powershell
-cargo run -p xtask -- fetch-vendor    # builds both cores from pinned source, fetches the signed driver DLL
+cargo run -p xtask -- fetch-vendor    # builds both cores from pinned source (primary core with the
+                                      # DLL-loader patch), fetches the signed driver DLL
 cargo run -p xtask -- verify-vendor   # expect: verify-vendor: OK
 ```
 

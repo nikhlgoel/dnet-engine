@@ -209,6 +209,35 @@ fn no_config_uses_a_field_removed_by_the_pinned_core() {
     }
 }
 
+/// The core is built without its embedded packet-diversion kernel driver (ADR-0004
+/// Finding 4), and we never ship the driver file. No generated config may reach a
+/// feature that would try to install it. Checked two ways: TLS `spoof` is never emitted,
+/// and inbound/outbound types stay inside the set the three profiles need. An
+/// allowlist, because a blocklist would miss a driver-backed type added upstream.
+#[test]
+fn no_config_reaches_a_feature_that_needs_the_packet_diversion_driver() {
+    const INBOUND_TYPES: &[&str] = &["tun"];
+    const OUTBOUND_TYPES: &[&str] = &["direct", "hysteria2", "vless"];
+    for kind in [
+        ProfileKind::AmneziaWg,
+        ProfileKind::Hysteria2,
+        ProfileKind::VlessReality,
+    ] {
+        let json = json_for(kind);
+        assert!(
+            !json.contains("\"spoof"),
+            "{kind:?} config emits TLS spoofing"
+        );
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        for (section, allowed) in [("inbounds", INBOUND_TYPES), ("outbounds", OUTBOUND_TYPES)] {
+            for entry in value[section].as_array().expect(section) {
+                let ty = entry["type"].as_str().expect("every entry has a type");
+                assert!(allowed.contains(&ty), "{kind:?} emits {section} type {ty}");
+            }
+        }
+    }
+}
+
 /// Every profile turns on the core's own loop guard, so bypassed traffic is bound to
 /// the physical NIC rather than re-entering the TUN.
 #[test]

@@ -5,3 +5,5 @@
 *.py          text eol=lf
 Dockerfile    text eol=lf
 *.yml         text eol=lf
+# Go patch files are hashed into build provenance; keep them byte-stable across checkouts.
+*.go          text eol=lf

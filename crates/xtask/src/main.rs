@@ -6,8 +6,10 @@
 use anyhow::{bail, Result};
 use std::path::PathBuf;
 
+mod embedded;
 mod fetch_vendor;
 mod lint_branding;
+mod pins;
 mod verify_vendor;
 
 fn main() -> Result<()> {
@@ -34,7 +36,7 @@ fn print_help() {
     eprintln!("usage: cargo xtask <task>");
     eprintln!();
     eprintln!("  fetch-vendor    download and hash-verify pinned third-party binaries");
-    eprintln!("  verify-vendor   assert signed Wintun DLL and reject vendored Wintun source");
+    eprintln!("  verify-vendor   assert signed Wintun DLL; reject its source and embedded copies");
     eprintln!("  lint-branding   assert the primary core vendor name stays in attribution files");
 }
 
