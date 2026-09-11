@@ -282,6 +282,7 @@ dependencies = [
  "dnet-provision",
  "dnet-supervisor",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",

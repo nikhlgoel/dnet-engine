@@ -179,7 +179,40 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
   >   elevated on 2026-09-11** against the real routing table: install and remove, crash then
   >   replay, pre-existing route untouched, already-gone reversal, and restricted journal
   >   save/load.
-- [ ] T038 [US1] Implement restoration-on-start recovery in `crates/dnetd/src/recovery.rs` — replays outstanding undo records at service start, because a crash leaves no one to run the shutdown path ([data-model.md](./data-model.md) §Cross-cutting 1)
+- [x] T038 [US1] Implement restoration-on-start recovery in `crates/dnetd/src/recovery.rs` — replays outstanding undo records at service start, because a crash leaves no one to run the shutdown path ([data-model.md](./data-model.md) §Cross-cutting 1)
+  > **2026-09-11.**
+  >
+  > - **Order.** `recover_at_start` runs first in both entry modes, before the control listener
+  >   exists: **kill orphaned cores, then replay the journal.** Cores go first for SUP-04's
+  >   reason: removing an endpoint host route while an orphaned tunnel still sends would loop
+  >   its packets.
+  > - **Strict gate.** Only full success yields `Recovered`, and it is the only holder of the
+  >   undo registry every routing mutation needs. A failed recovery therefore cannot
+  >   initialise a tunnel. It is triggered by an orphan that cannot be killed, an unreadable or
+  >   untrusted journal, or any record that cannot be reversed. `DnetService` then refuses
+  >   **every** mutating request with an actionable `InternalError` and keeps answering
+  >   read-only queries. There is no automatic retry; restarting the service retries.
+  > - **Verification.** 10 unprivileged tests:
+  >   - order;
+  >   - clean start;
+  >   - an irreversible record is kept;
+  >   - an unusable journal;
+  >   - an unkillable orphan leaves the journal untouched;
+  >   - error text;
+  >   - an untrusted journal on the real disk;
+  >   - the installed layout;
+  >   - all 12 mutating requests refused;
+  >   - read-only queries still served.
+  >
+  >   One elevated `--ignored` test covers the routes half of SUP-T2 and **passed elevated on
+  >   2026-09-11**.
+  > - **Owner decisions (2026-09-11).** Staying up locked (rather than exiting) is approved: it
+  >   avoids SCM restart loops and keeps IPC available to surface the failure. The `GetState`
+  >   gap is deferred to T112/Phase 9. The fixed core layout is a T114 requirement.
+  > - **Contract gap.** `GetState` (ipc-protocol.md) has nowhere to report a failed recovery.
+  >   `failure.cause` is limited to the seven session `FailureCause` variants. Until the
+  >   contract gains a field (proposed for T112 or the tray in Phase 9), the reason reaches the
+  >   user only through the refusal detail and the service log.
 - [x] T039 **[GATE] Plan Phase 2 exit**: IPC-01 passes — an unprivileged, non-console client issuing `Connect` receives `Unauthorized` and routing state is unchanged. This is SC-019 verified by explicit attempt
   > **PASSED 2026-09-11.** Real named pipe with the production SDDL; client identity captured by
   > `ImpersonateNamedPipeClient` -> `OpenThreadToken` -> `GetTokenInformation(TokenUser)` ->
@@ -441,7 +474,7 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
 
 - [ ] T112 [P] Implement the diagnostic bundle excluding credential material and browsing destinations by default, in `crates/dnetd/src/diagnostics.rs` (FR-035, IPC-07)
 - [ ] T113 [P] Add the statement that obfuscation conceals content and protocol but **not** traffic volume or destination, to README, first-run flow, and About screen (FR-033, Principle VI)
-- [ ] T114 Build the WiX/NSIS installer in `installer/`, registering `dnetd` as a LocalSystem service and bundling `THIRD-PARTY-NOTICES.md` and every dependency licence text. Place the signed `wintun.dll` **beside each core executable** (the patched primary core loads it only from its own directory, digest-verified; ADR-0004 Finding 4), in an Administrators-only directory; run `cargo xtask verify-vendor` on the staged payload. Create `%PROGRAMDATA%\DNet Engine` (and `run`, `state` beneath it) **owned by SYSTEM or Administrators with a protected DACL**, replacing or refusing a directory that already exists with another owner. Any user can pre-create a `%PROGRAMDATA%` subdirectory and, as its owner, regain rights to replace the generated core config (T049) or the undo journal (T037) inside it
+- [ ] T114 Build the WiX/NSIS installer in `installer/`, registering `dnetd` as a LocalSystem service and bundling `THIRD-PARTY-NOTICES.md` and every dependency licence text. Install the cores as `primary-core.exe` and `amneziawg-go.exe` **beside `dnetd.exe`**: start-up recovery (T038) reaps orphans by exactly those full paths, so any other layout silently reaps nothing. Place the signed `wintun.dll` **beside each core executable** (the patched primary core loads it only from its own directory, digest-verified; ADR-0004 Finding 4), in an Administrators-only directory; run `cargo xtask verify-vendor` on the staged payload. Create `%PROGRAMDATA%\DNet Engine` (and `run`, `state` beneath it) **owned by SYSTEM or Administrators with a protected DACL**, replacing or refusing a directory that already exists with another owner. Any user can pre-create a `%PROGRAMDATA%` subdirectory and, as its owner, regain rights to replace the generated core config (T049) or the undo journal (T037) inside it
 - [ ] T115 Verify installer size at or below 60 MB (SC-012); if exceeded, reduce bundled artifacts before relaxing the target
 - [ ] T116 Measure idle RSS at or below 150 MB combined and idle CPU below 1% on a four-core machine (SC-013, SC-014)
 - [ ] T117 Verify no measurable slowdown to a concurrent compile, test suite, and editor while connected (SC-015)

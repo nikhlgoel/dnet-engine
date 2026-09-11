@@ -27,3 +27,6 @@ serde_json = { workspace = true }
 tracing-subscriber = { workspace = true }
 windows-service = { workspace = true }
 windows = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Memory", "Win32_System_RemoteDesktop"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

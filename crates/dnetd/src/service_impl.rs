@@ -14,10 +14,11 @@
 use std::sync::Mutex;
 
 use dnet_ipc::authz::ConsoleSession;
-use dnet_ipc::protocol::{IpcError, Request};
+use dnet_ipc::protocol::{IpcError, Request, RequestClass};
 use dnet_ipc::service::Service;
 
 use crate::domain::DomainState;
+use crate::recovery::{Recovered, RecoveryError};
 
 /// How the service learns who the interactive console user is.
 ///
@@ -28,23 +29,33 @@ pub type ConsoleResolver = Box<dyn Fn() -> Option<ConsoleSession> + Send + Sync>
 pub struct DnetService {
     state: Mutex<DomainState>,
     console: ConsoleResolver,
+    /// The start-up restoration result (T038). Only `Ok` carries the undo registry that
+    /// routing mutations need; on `Err` every mutating request is refused.
+    recovery: Result<Recovered, RecoveryError>,
 }
 
 impl DnetService {
-    /// Build a service over `state`, resolving the console user with `console`.
-    pub fn new(state: DomainState, console: ConsoleResolver) -> Self {
+    /// Build a service over `state`, resolving the console user with `console`, gated by
+    /// the outcome of start-up recovery.
+    pub fn new(
+        state: DomainState,
+        console: ConsoleResolver,
+        recovery: Result<Recovered, RecoveryError>,
+    ) -> Self {
         Self {
             state: Mutex::new(state),
             console,
+            recovery,
         }
     }
 
     /// The production service: a seeded store and the real OS console lookup.
     #[cfg(windows)]
-    pub fn production() -> Self {
+    pub fn production(recovery: Result<Recovered, RecoveryError>) -> Self {
         Self::new(
             DomainState::seeded(),
             Box::new(crate::console::active_console_session),
+            recovery,
         )
     }
 
@@ -64,6 +75,15 @@ impl Service for DnetService {
     }
 
     fn dispatch(&self, request: &Request) -> Result<String, IpcError> {
+        // Strict gate (T038): nothing may change while a previous run's network changes
+        // are still unrestored. Read-only queries still answer, so the user can see why.
+        if request.class() == RequestClass::Mutating {
+            if let Err(e) = &self.recovery {
+                return Err(IpcError::InternalError {
+                    detail: e.to_string(),
+                });
+            }
+        }
         let state = self.state.lock().expect("domain state mutex poisoned");
         match request {
             // Fully served now.
@@ -111,6 +131,7 @@ mod tests {
                     user_sid: "S-1-5-21-test".to_string(),
                 })
             }),
+            Ok(Recovered::clean_for_tests()),
         )
     }
 
@@ -167,5 +188,69 @@ mod tests {
     fn console_resolver_is_consulted() {
         let svc = service();
         assert_eq!(svc.console_session().unwrap().session_id, 1);
+    }
+
+    fn mutating_requests() -> Vec<Request> {
+        let all = vec![
+            Request::Connect {
+                acknowledge_tier2: false,
+            },
+            Request::Disconnect,
+            Request::AddEndpoint,
+            Request::RemoveEndpoint,
+            Request::SetEndpointEnabled,
+            Request::AddRule,
+            Request::RemoveRule,
+            Request::SetProfileParams,
+            Request::EnableBrutal,
+            Request::SetEncryptedDnsHandling,
+            Request::StartProvisioning,
+            Request::CancelProvisioning,
+        ];
+        assert!(all.iter().all(|r| r.class() == RequestClass::Mutating));
+        all
+    }
+
+    fn unrecovered_service() -> DnetService {
+        DnetService::new(
+            DomainState::seeded(),
+            Box::new(|| None),
+            Err(RecoveryError::Unrestored {
+                remaining: 1,
+                first: "access denied".into(),
+            }),
+        )
+    }
+
+    #[test]
+    fn after_a_failed_recovery_every_mutating_request_is_refused_with_the_reason() {
+        let svc = unrecovered_service();
+        for request in mutating_requests() {
+            match svc.dispatch(&request) {
+                Err(IpcError::InternalError { detail }) => {
+                    assert!(detail.contains("will not connect"), "{request:?}: {detail}");
+                    assert!(
+                        detail.contains("could not be undone"),
+                        "{request:?}: {detail}"
+                    );
+                }
+                other => panic!("{request:?} must be refused, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn after_a_failed_recovery_read_only_queries_still_answer() {
+        let svc = unrecovered_service();
+        for request in [
+            Request::GetState,
+            Request::GetSession,
+            Request::ListEndpoints,
+            Request::ListProfiles,
+            Request::ListRules,
+            Request::GetDiagnostics,
+        ] {
+            assert!(svc.dispatch(&request).is_ok(), "{request:?}");
+        }
     }
 }

@@ -73,9 +73,9 @@ fn run() -> anyhow::Result<()> {
     report(ServiceState::Running, ServiceControlAccept::STOP)?;
     tracing::info!("dnetd running as a Windows service");
 
+    let service = crate::build_service();
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async {
-        let service = crate::build_service();
         tokio::select! {
             result = dnet_ipc::server::run_control_listener(service) => {
                 if let Err(e) = result {

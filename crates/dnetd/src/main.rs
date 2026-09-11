@@ -13,6 +13,7 @@
 //! See `specs/001-network-resilience-client/` for the governing specification.
 
 mod domain;
+mod recovery;
 mod service_impl;
 
 #[cfg(windows)]
@@ -46,9 +47,9 @@ fn main() -> anyhow::Result<()> {
 #[cfg(windows)]
 fn run_console() -> anyhow::Result<()> {
     tracing::info!("dnetd starting in console mode");
+    let service = build_service();
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async {
-        let service = build_service();
         tokio::select! {
             result = dnet_ipc::server::run_control_listener(service) => {
                 if let Err(e) = result {
@@ -64,7 +65,11 @@ fn run_console() -> anyhow::Result<()> {
 }
 
 /// Construct the production service. Shared by both entry modes.
+///
+/// Start-up recovery (T038) runs here, first, before the control listener exists and
+/// before anything could create a core or adapter. Its outcome gates the service.
 #[cfg(windows)]
 fn build_service() -> std::sync::Arc<dyn dnet_ipc::service::Service> {
-    std::sync::Arc::new(service_impl::DnetService::production())
+    let recovery = recovery::recover_installation();
+    std::sync::Arc::new(service_impl::DnetService::production(recovery))
 }
