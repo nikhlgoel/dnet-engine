@@ -131,13 +131,51 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
 - [x] T024 [P] [US1] Implement `Endpoint`, `EndpointId`, `EndpointAddress`, `EndpointOrigin`, `CredentialRef` in `crates/dnet-core/src/endpoint.rs` — `CredentialRef` exposes **no accessor returning plaintext** ([data-model.md](./data-model.md) §1)
 - [x] T025 [P] [US4] Implement `EndpointHealth` and its state machine in `crates/dnet-core/src/health.rs`
 - [x] T026 [P] [US1] Implement `ConnectionProfile`, `ProfileKind`, `Carrier`, `Viability`, `CoreBinding` in `crates/dnet-core/src/profile.rs`
-- [ ] T027 [P] [US3] Implement `FailoverTier` in `crates/dnet-core/src/tier.rs`, with the invariant that tier is set from measurement and is never inferred from `ProfileKind`
+- [x] T027 [P] [US3] Implement `FailoverTier` in `crates/dnet-core/src/tier.rs`, with the invariant that tier is set from measurement and is never inferred from `ProfileKind`
+  > **2026-09-12.**
+  >
+  > - **Model.** `FailoverTier::from_measurement` yields `Tier1` only for
+  >   `SurvivalMeasurement::Survived`. `recorded_survival(kind)` holds the HV-07 result for
+  >   each kind at the pinned core versions, and every kind is currently `NotMeasured`.
+  >   `ConnectionProfile::new` takes its tier from that record.
+  > - **Removed.** `ProfileKind::expected_tier` (the inference from kind) and
+  >   `demote_to_tier2` (no runtime tier setter).
+  > - **Owner decision (2026-09-12): measured only.** Resolves the conflict with data-model §2
+  >   and FR-016a, which started AmneziaWG and Hysteria 2 at Tier 1 by design. Until T085:
+  >   - every profile shows Tier 2;
+  >   - FR-016b has no Tier 1 to prefer;
+  >   - `check_tier_consent` requires no downgrade consent, since no Tier 1 is viable;
+  >   - the Tier 2 warning still applies.
+  > - **Verification.** A test pins "no kind claims Tier 1" and is updated by T085 together
+  >   with the evidence. The posture test for Tier 1 preference now uses an explicitly
+  >   measured profile, via a `cfg(test)` constructor.
 - [x] T028 [P] [US3] Implement `NetworkPath`, `PathKind`, `PathQuality`, `PathRole` in `crates/dnet-core/src/path.rs` — a path with `gateway = None` cannot become `Carrying` ([data-model.md](./data-model.md) §3)
   - Fail-closed kill switch: `crates/dnet-core/src/posture.rs` adds `RoutingPosture` (`Tunnelled { tier } | FailClosed` — **no** direct-fallback variant) and `select_posture`, which returns `FailClosed` whenever no path carries or no profile is `Working`, so lost tunnels drop traffic rather than exposing the physical interface ([data-model.md](./data-model.md) §3).
 - [x] T029 [P] [US5] Implement `RoutingRule`, `RuleMatcher`, `RuleAction`, `Reliability` in `crates/dnet-core/src/rule.rs` — make constructing a `Deterministic` application rule **impossible at the type level** ([data-model.md](./data-model.md) §4)
   - DNS-leak protection: added `RuleMatcher::DnsPort` + `RuleAction::Capture` (only constructible together), the built-in `DnsPort → Capture` rule at precedence `0`, and `validate_dns_leak_protection`, so all outbound port-53 traffic is captured into the tunnel and no bypass can outrank it ([data-model.md](./data-model.md) §4).
 - [x] T030 [P] [US1] Implement `ConnectionSession`, `ConnectionEvent`, `FailureCause`, `SessionOutcome` in `crates/dnet-core/src/session.rs` — `FailureCause` has exactly the seven variants and no `Unknown`
-- [ ] T031 [US1] Implement the built-in non-deletable bypass rule set (RFC1918, link-local, multicast, captive-portal probe hosts, active endpoint address) in `crates/dnet-core/src/builtin_rules.rs`
+- [x] T031 [US1] Implement the built-in non-deletable bypass rule set (RFC1918, link-local, multicast, captive-portal probe hosts, active endpoint address) in `crates/dnet-core/src/builtin_rules.rs`
+  > **2026-09-12.**
+  >
+  > - **Module.** The set moved out of `rule.rs` into `builtin_rules.rs`. Order: DNS capture
+  >   (precedence 0), then the active endpoint, then RFC1918, link-local and multicast in
+  >   both families, then the captive-portal probe domains. Built-in rules can only be
+  >   constructed inside `dnet-core` (`RoutingRule::builtin` is `pub(crate)`).
+  > - **Non-deletable.** `validate_builtin_rules_present` runs first on every rule-set
+  >   mutation in `DomainState`, which now has `remove_rule`. Removing any built-in, or
+  >   swapping one for an identical user rule, is refused with `BuiltinRuleMissing`.
+  > - **Probe hosts corrected.** They were `www.msftconnecttest.com`, `www.msftncsi.com`,
+  >   `connectivitycheck.gstatic.com` and `captive.apple.com`. They are now the suffixes
+  >   `msftconnecttest.com` and `msftncsi.com`, per Microsoft Learn KB 4494446: NCSI probes
+  >   these, and restricted networks are told to allow `*.msftconnecttest.com` and
+  >   `*.msftncsi.com`. The Android and Apple hosts are never probed on Windows, so bypassing
+  >   them only sent traffic around the tunnel. Browser-specific portal detectors belong to
+  >   T077, where they can be verified.
+  > - **FakeIP guard.** IPv6 unique-local `fc00::/7` is deliberately not bypassed because it
+  >   contains the FakeIP pool `fc00::/18`. A config contract test asserts that no built-in
+  >   bypass overlaps either FakeIP pool (`IpCidr::overlaps`).
+  > - **Verification.** 13 new or rewritten `dnet-core` tests, 2 `dnetd` store tests, and 2
+  >   config contract tests. The pinned core's own `check` accepts the config.
 
 ### IPC and service skeleton
 
@@ -410,7 +448,7 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
 - [ ] T082 [US3] Implement the failover state machine with hysteresis and oscillation damping in `crates/dnet-core/src/failover.rs` (FR-016, FR-017, SC-007)
 - [ ] T083 [US3] Implement host-route rewrite **before** tunnel rebind on a carrying-path change, asserted by call ordering rather than timing, in `crates/dnet-netstate/src/rebind.rs` (AW-03, AWG-04)
 - [ ] T084 [US3] Implement honest degradation reporting when only one path is available and no move is possible, in `crates/dnet-core/src/degraded.rs` (FR-019, US3-5)
-- [ ] T085 **[GATE] SPIKE-R9 / Plan Phase 6 exit**: HV-07 — an open transfer survives an interface change on **both** Tier 1 profiles at the pinned core versions. HV-08 — the Tier 2 profile breaks **and the UI said so beforehand**. **Any profile failing HV-07 is demoted to `Tier2` in configuration and UI; the label follows the measurement, not the intention** ([research.md](./research.md) §R9)
+- [ ] T085 **[GATE] SPIKE-R9 / Plan Phase 6 exit**: HV-07 — an open transfer survives an interface change on **both** Tier 1 profiles at the pinned core versions. HV-08 — the Tier 2 profile breaks **and the UI said so beforehand**. **Record each kind's HV-07 result, with the core versions, in `dnet_core::tier::recorded_survival`: only `Survived` makes a profile `Tier1`, and a failure leaves it `Tier2` in configuration and UI. The label follows the measurement, not the intention** ([research.md](./research.md) §R9). A later core pin bump resets the affected kinds to `NotMeasured` until HV-07 is re-run
 
 **Checkpoint**: Failover works, and its limits are labelled truthfully.
 

@@ -45,10 +45,10 @@ mod win {
     use dnet_config::amneziawg::{ObfuscationParams, PeerConfig, PrivateKey};
     use dnet_config::primary::{generate_primary_core_config, to_json, PrimaryCoreInput};
     use dnet_config::{write, ActiveEndpointBypass};
+    use dnet_core::builtin_rules::builtin_rules;
     use dnet_core::endpoint::EndpointAddress;
     use dnet_core::ids::ProfileId;
     use dnet_core::profile::{ConnectionProfile, CoreBinding, ProfileKind, ProfileParams};
-    use dnet_core::rule::builtin_rules;
     use dnet_netstate::host_route::{
         bring_up, on_carrying_path_change, tear_down, HostRoute, TunnelBringup,
     };

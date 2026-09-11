@@ -9,15 +9,16 @@
 //!   core, or a REALITY profile claiming UDP).
 //! - **Brutal congestion control can only be enabled on a Hysteria 2 profile, and only
 //!   with an explicit acknowledgement** (FR-006).
-//! - **`tier` follows measurement**: it starts at the kind's expected tier and is
-//!   demoted only by observation (SPIKE-R9), never inferred elsewhere.
+//! - **`tier` follows measurement** (T027): it comes from the recorded HV-07 result for the
+//!   kind at the pinned core versions, and is Tier 2 until one is recorded. It is never
+//!   inferred from the kind.
 
 use std::collections::BTreeMap;
 use std::time::Instant;
 
 use crate::error::DomainError;
 use crate::ids::ProfileId;
-use crate::tier::FailoverTier;
+use crate::tier::{recorded_survival, FailoverTier, SurvivalMeasurement};
 
 /// Which supervised process serves a profile (research.md R1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -37,15 +38,15 @@ pub enum Carrier {
     Tcp,
 }
 
-/// The kind of transport a profile speaks. This alone determines the carrier, the
-/// serving core, and the expected failover tier.
+/// The kind of transport a profile speaks. This alone determines the carrier and the
+/// serving core. It does **not** determine the failover tier, which is measured (T027).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProfileKind {
-    /// Obfuscated WG transport, served by the AmneziaWG process. UDP, Tier 1.
+    /// Obfuscated WG transport, served by the AmneziaWG process. UDP; a Tier 1 candidate.
     AmneziaWg,
-    /// QUIC with Salamander/Gecko, served by the primary core. UDP, Tier 1.
+    /// QUIC with Salamander/Gecko, served by the primary core. UDP; a Tier 1 candidate.
     Hysteria2,
-    /// TLS-camouflaged, served by the primary core. TCP, Tier 2.
+    /// TLS-camouflaged, served by the primary core. TCP; designed as Tier 2 (FR-016a).
     VlessReality,
 }
 
@@ -63,15 +64,6 @@ impl ProfileKind {
         match self {
             ProfileKind::AmneziaWg => CoreBinding::AmneziaWgCore,
             ProfileKind::Hysteria2 | ProfileKind::VlessReality => CoreBinding::PrimaryCore,
-        }
-    }
-
-    /// The failover tier this kind is *expected* to achieve, before measurement.
-    /// The live tier may be demoted by SPIKE-R9 (`ConnectionProfile::demote_to_tier2`).
-    pub fn expected_tier(&self) -> FailoverTier {
-        match self {
-            ProfileKind::AmneziaWg | ProfileKind::Hysteria2 => FailoverTier::Tier1,
-            ProfileKind::VlessReality => FailoverTier::Tier2,
         }
     }
 }
@@ -139,12 +131,34 @@ pub struct ConnectionProfile {
 }
 
 impl ConnectionProfile {
-    /// Create a profile. Its tier starts at the kind's expected tier, its viability is
-    /// `Untested`, and Brutal is off (so BBR is used — data-model §2, R2).
+    /// Create a profile. Its tier is the recorded HV-07 result for its kind (Tier 2 until
+    /// one is recorded), its viability is `Untested`, and Brutal is off (so BBR is used —
+    /// data-model §2, R2).
     pub fn new(id: ProfileId, kind: ProfileKind, params: ProfileParams) -> Self {
+        Self::with_survival(id, kind, params, recorded_survival(kind))
+    }
+
+    /// A profile whose tier comes from the given measurement. Only for tests in this crate:
+    /// production tiers come solely from the recorded results.
+    #[cfg(test)]
+    pub(crate) fn measured(
+        id: ProfileId,
+        kind: ProfileKind,
+        params: ProfileParams,
+        measurement: SurvivalMeasurement,
+    ) -> Self {
+        Self::with_survival(id, kind, params, measurement)
+    }
+
+    fn with_survival(
+        id: ProfileId,
+        kind: ProfileKind,
+        params: ProfileParams,
+        measurement: SurvivalMeasurement,
+    ) -> Self {
         Self {
             id,
-            tier: kind.expected_tier(),
+            tier: FailoverTier::from_measurement(measurement),
             kind,
             params,
             viability: Viability::Untested,
@@ -170,16 +184,10 @@ impl ConnectionProfile {
         self.kind.core_binding()
     }
 
+    /// The measured failover tier. There is no setter: it changes only when a recorded
+    /// HV-07 result changes (T085).
     pub fn tier(&self) -> FailoverTier {
         self.tier
-    }
-
-    /// Demote to Tier 2 after a failed Tier 1 survival measurement (SPIKE-R9, R9).
-    /// There is deliberately no `promote` — tier only ever follows a *failed*
-    /// measurement downward; a profile earns Tier 1 by being constructed as a Tier 1
-    /// kind, not by a runtime claim.
-    pub fn demote_to_tier2(&mut self) {
-        self.tier = FailoverTier::Tier2;
     }
 
     pub fn params(&self) -> &ProfileParams {
@@ -266,20 +274,37 @@ mod tests {
     }
 
     #[test]
-    fn tier_starts_at_the_kinds_expected_tier() {
-        assert_eq!(profile(ProfileKind::AmneziaWg).tier(), FailoverTier::Tier1);
-        assert_eq!(profile(ProfileKind::Hysteria2).tier(), FailoverTier::Tier1);
-        assert_eq!(
-            profile(ProfileKind::VlessReality).tier(),
-            FailoverTier::Tier2
-        );
+    fn a_profile_takes_its_tier_from_the_recorded_measurement_not_its_kind() {
+        for kind in [
+            ProfileKind::AmneziaWg,
+            ProfileKind::Hysteria2,
+            ProfileKind::VlessReality,
+        ] {
+            assert_eq!(
+                profile(kind).tier(),
+                FailoverTier::from_measurement(recorded_survival(kind)),
+                "{kind:?}"
+            );
+        }
     }
 
     #[test]
-    fn a_tier1_profile_can_be_demoted_by_measurement() {
-        let mut p = profile(ProfileKind::AmneziaWg);
-        p.demote_to_tier2();
-        assert_eq!(p.tier(), FailoverTier::Tier2);
+    fn the_same_kind_gets_whatever_tier_was_measured() {
+        let measured = |m| {
+            ConnectionProfile::measured(
+                ProfileId::new("p"),
+                ProfileKind::AmneziaWg,
+                ProfileParams::new(),
+                m,
+            )
+            .tier()
+        };
+        assert_eq!(measured(SurvivalMeasurement::Survived), FailoverTier::Tier1);
+        assert_eq!(measured(SurvivalMeasurement::Broke), FailoverTier::Tier2);
+        assert_eq!(
+            measured(SurvivalMeasurement::NotMeasured),
+            FailoverTier::Tier2
+        );
     }
 
     #[test]

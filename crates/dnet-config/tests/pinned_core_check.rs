@@ -13,10 +13,10 @@ use std::process::Command;
 
 use dnet_config::primary::{generate_primary_core_config, to_json, PrimaryCoreInput};
 use dnet_config::ActiveEndpointBypass;
+use dnet_core::builtin_rules::builtin_rules;
 use dnet_core::endpoint::EndpointAddress;
 use dnet_core::ids::ProfileId;
 use dnet_core::profile::{ConnectionProfile, ProfileKind, ProfileParams};
-use dnet_core::rule::builtin_rules;
 
 fn pinned_core() -> Option<PathBuf> {
     let exe = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

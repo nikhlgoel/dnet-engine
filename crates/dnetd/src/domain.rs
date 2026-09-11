@@ -5,15 +5,15 @@
 //! `dnet-core` types; this store is the application-level state that owns a set of
 //! them and will later be backed by persisted configuration.
 
+use dnet_core::builtin_rules::{builtin_rules, validate_builtin_rules_present};
 use dnet_core::endpoint::Endpoint;
 use dnet_core::error::DomainError;
 use dnet_core::health::HealthState;
 use dnet_core::ids::EndpointId;
 use dnet_core::ids::ProfileId;
+use dnet_core::ids::RuleId;
 use dnet_core::profile::{ConnectionProfile, ProfileKind, ProfileParams};
-use dnet_core::rule::{
-    builtin_rules, validate_dns_leak_protection, validate_rule_set, RoutingRule,
-};
+use dnet_core::rule::{validate_dns_leak_protection, validate_rule_set, RoutingRule};
 use serde_json::{json, Value};
 
 /// Everything the daemon knows about endpoints, profiles, and routing.
@@ -178,6 +178,29 @@ impl DomainState {
     pub fn add_rule(&mut self, rule: RoutingRule) -> Result<(), DomainError> {
         let mut candidate = self.rules.clone();
         candidate.push(rule);
+        self.replace_rules(candidate)
+    }
+
+    /// Remove a rule by id, reporting whether it existed. A built-in rule cannot be removed
+    /// (data-model §4): the resulting set fails validation and nothing changes.
+    pub fn remove_rule(&mut self, id: RuleId) -> Result<bool, DomainError> {
+        let candidate: Vec<RoutingRule> = self
+            .rules
+            .iter()
+            .filter(|r| r.id() != id)
+            .cloned()
+            .collect();
+        if candidate.len() == self.rules.len() {
+            return Ok(false);
+        }
+        self.replace_rules(candidate).map(|()| true)
+    }
+
+    /// Every rule-set mutation goes through here, so no mutation can break an invariant.
+    fn replace_rules(&mut self, candidate: Vec<RoutingRule>) -> Result<(), DomainError> {
+        // Checked first, so deleting a built-in reports exactly that. No endpoint is
+        // active in the store until connect lands (Phases 4-6).
+        validate_builtin_rules_present(&candidate, None)?;
         validate_rule_set(&candidate)?;
         validate_dns_leak_protection(&candidate)?;
         self.rules = candidate;
@@ -347,6 +370,38 @@ mod tests {
         )
         .unwrap();
         assert!(state.add_rule(clash).is_err());
+    }
+
+    #[test]
+    fn no_builtin_rule_can_be_removed() {
+        let mut state = DomainState::seeded();
+        let builtin_ids: Vec<RuleId> = state.rules().iter().map(RoutingRule::id).collect();
+        for id in builtin_ids {
+            assert!(
+                matches!(
+                    state.remove_rule(id),
+                    Err(DomainError::BuiltinRuleMissing(_))
+                ),
+                "built-in {id:?} must not be removable"
+            );
+        }
+        assert_eq!(state.rules().len(), DomainState::seeded().rules().len());
+    }
+
+    #[test]
+    fn a_user_rule_can_be_removed() {
+        let mut state = DomainState::seeded();
+        let rule = RoutingRule::user(
+            RuleMatcher::Domain("x.example".into()),
+            RuleAction::Tunnel,
+            10_000,
+        )
+        .unwrap();
+        let id = rule.id();
+        state.add_rule(rule).unwrap();
+
+        assert_eq!(state.remove_rule(id), Ok(true));
+        assert_eq!(state.remove_rule(id), Ok(false));
     }
 
     #[test]

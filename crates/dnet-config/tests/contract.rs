@@ -2,12 +2,15 @@
 //!
 //! See `specs/001-network-resilience-client/contracts/core-config.md` §1.2.
 
-use dnet_config::primary::{generate_primary_core_config, to_json, PrimaryCoreInput};
+use dnet_config::primary::{
+    generate_primary_core_config, to_json, PrimaryCoreInput, FAKEIP_INET4, FAKEIP_INET6,
+};
 use dnet_config::{ActiveEndpointBypass, ConfigError};
+use dnet_core::builtin_rules::builtin_rules;
 use dnet_core::endpoint::EndpointAddress;
 use dnet_core::ids::ProfileId;
 use dnet_core::profile::{BandwidthPair, ConnectionProfile, ProfileKind, ProfileParams};
-use dnet_core::rule::builtin_rules;
+use dnet_core::rule::{IpCidr, RuleMatcher};
 
 const ADAPTER: &str = "dnet-awg0";
 
@@ -168,11 +171,10 @@ fn cfg_05_builtin_bypass_rules_are_present() {
     let has_rfc1918 = config.route.rules.iter().any(|r| {
         r.ip_cidr.iter().any(|c| c == "192.168.0.0/16") && r.outbound.as_deref() == Some("direct")
     });
-    let has_portal = config
-        .route
-        .rules
-        .iter()
-        .any(|r| r.domain.iter().any(|d| d == "captive.apple.com"));
+    let has_portal = config.route.rules.iter().any(|r| {
+        r.domain_suffix.iter().any(|d| d == "msftconnecttest.com")
+            && r.outbound.as_deref() == Some("direct")
+    });
     // The DNS-capture rule is present and hijacks port 53 into the DNS module.
     let has_dns_capture = config
         .route
@@ -182,6 +184,24 @@ fn cfg_05_builtin_bypass_rules_are_present() {
     assert!(has_rfc1918, "RFC1918 bypass missing");
     assert!(has_portal, "captive-portal bypass missing");
     assert!(has_dns_capture, "DNS-capture route missing");
+}
+
+/// A bypass covering part of a FakeIP pool would send those synthetic addresses around the
+/// tunnel, where they lead nowhere, and silently break domain routing (CC-02, T031).
+#[test]
+fn cfg_05_no_builtin_bypass_overlaps_a_fakeip_pool() {
+    let addr = endpoint();
+    let pools = [FAKEIP_INET4, FAKEIP_INET6].map(|p| IpCidr::parse(p).unwrap());
+    for rule in builtin_rules(Some(&addr)) {
+        if let RuleMatcher::IpCidr(range) = rule.matcher() {
+            for pool in &pools {
+                assert!(
+                    !range.overlaps(pool),
+                    "built-in bypass {range} overlaps {pool}"
+                );
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------- pinned-schema guards (v1.14.0)

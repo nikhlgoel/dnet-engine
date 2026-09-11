@@ -58,4 +58,9 @@ pub enum DomainError {
     /// or bypassed.
     #[error("a DnsPort matcher must use the Capture action")]
     DnsPortRequiresCapture,
+
+    /// A rule set lost a built-in rule. Built-ins keep local resources, portal login, the
+    /// endpoint route, and DNS capture working, so they cannot be deleted (data-model §4).
+    #[error("built-in rule {0} cannot be removed")]
+    BuiltinRuleMissing(String),
 }

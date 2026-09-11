@@ -7,7 +7,6 @@
 
 use std::net::IpAddr;
 
-use crate::endpoint::EndpointAddress;
 use crate::error::DomainError;
 use crate::ids::RuleId;
 
@@ -63,6 +62,24 @@ impl IpCidr {
     pub fn prefix_len(&self) -> u8 {
         self.prefix_len
     }
+
+    /// Whether the two blocks share any address. CIDR blocks either nest or are disjoint,
+    /// so this is containment in either direction; blocks of different families never
+    /// overlap.
+    pub fn overlaps(&self, other: &IpCidr) -> bool {
+        let shared = self.prefix_len.min(other.prefix_len);
+        match (self.addr, other.addr) {
+            (IpAddr::V4(a), IpAddr::V4(b)) => {
+                let mask = u32::MAX.checked_shl(32 - u32::from(shared)).unwrap_or(0);
+                u32::from(a) & mask == u32::from(b) & mask
+            }
+            (IpAddr::V6(a), IpAddr::V6(b)) => {
+                let mask = u128::MAX.checked_shl(128 - u32::from(shared)).unwrap_or(0);
+                u128::from(a) & mask == u128::from(b) & mask
+            }
+            _ => false,
+        }
+    }
 }
 
 impl std::fmt::Display for IpCidr {
@@ -107,6 +124,16 @@ impl RoutingRule {
         precedence: u32,
     ) -> Result<Self, DomainError> {
         Self::build(RuleId::new(), matcher, action, precedence, false)
+    }
+
+    /// Create a built-in rule. Crate-private: only `builtin_rules` makes these, so no
+    /// caller outside `dnet-core` can mark a rule non-deletable.
+    pub(crate) fn builtin(
+        matcher: RuleMatcher,
+        action: RuleAction,
+        precedence: u32,
+    ) -> Result<Self, DomainError> {
+        Self::build(RuleId::new(), matcher, action, precedence, true)
     }
 
     fn build(
@@ -177,89 +204,6 @@ impl RoutingRule {
     }
 }
 
-/// The captive-portal probe hosts that must stay reachable before login (FR-026).
-const CAPTIVE_PORTAL_PROBE_HOSTS: &[&str] = &[
-    "www.msftconnecttest.com",
-    "www.msftncsi.com",
-    "connectivitycheck.gstatic.com",
-    "captive.apple.com",
-];
-
-/// The private / non-routable ranges that stay direct by default (FR-024, SC-018).
-const LOCAL_BYPASS_CIDRS: &[&str] = &[
-    "10.0.0.0/8",
-    "172.16.0.0/12",
-    "192.168.0.0/16",
-    "169.254.0.0/16", // link-local
-    "224.0.0.0/4",    // multicast
-    "fe80::/10",      // IPv6 link-local
-    "ff00::/8",       // IPv6 multicast
-];
-
-/// The DNS-capture rule: all outbound port-53 traffic is forced into the tunnel for
-/// FakeIP resolution, and dropped if the tunnel is down. It takes precedence 0 — the
-/// lowest value, so it wins over every other rule including the local-range bypasses —
-/// so no plaintext DNS query can be routed around the tunnel (DNS-leak prevention).
-fn dns_capture_rule() -> RoutingRule {
-    RoutingRule::build(
-        RuleId::new(),
-        RuleMatcher::DnsPort,
-        RuleAction::Capture,
-        0,
-        true,
-    )
-    .expect("built-in DNS-capture rule is always valid")
-}
-
-/// The built-in, non-deletable rules, lowest precedence first (they win):
-/// 1. **DNS capture** (port 53) — the top-priority anti-leak rule.
-/// 2. `Bypass` for the active endpoint address, mirroring the R4 host route so rule
-///    evaluation and the route table agree.
-/// 3. `Bypass` for local ranges (RFC1918, link-local, multicast) and captive-portal
-///    probe hosts, so local resources and portal login work with no configuration
-///    (FR-024, FR-026, SC-018).
-pub fn builtin_rules(active_endpoint: Option<&EndpointAddress>) -> Vec<RoutingRule> {
-    // Precedence 0 is reserved for DNS capture; everything else starts at 1.
-    let mut rules = vec![dns_capture_rule()];
-    let mut precedence = 1u32;
-    let mut push = |matcher: RuleMatcher, p: &mut u32| {
-        // Built-in matchers are constructed from constants and never empty, so this
-        // cannot fail; `expect` documents that.
-        let rule = RoutingRule::build(RuleId::new(), matcher, RuleAction::Bypass, *p, true)
-            .expect("built-in bypass rule is always valid");
-        rules.push(rule);
-        *p += 1;
-    };
-
-    // The active endpoint must bypass the tunnel, mirroring the R4 host route.
-    if let Some(addr) = active_endpoint {
-        push(endpoint_matcher(addr), &mut precedence);
-    }
-    for cidr in LOCAL_BYPASS_CIDRS {
-        let parsed = IpCidr::parse(cidr).expect("built-in CIDR constant is valid");
-        push(RuleMatcher::IpCidr(parsed), &mut precedence);
-    }
-    for host in CAPTIVE_PORTAL_PROBE_HOSTS {
-        push(RuleMatcher::Domain((*host).to_string()), &mut precedence);
-    }
-    rules
-}
-
-/// The matcher for the active-endpoint bypass. An IP-literal endpoint must bypass by
-/// address (`/32` or `/128`): a domain matcher never matches raw IP traffic, so the
-/// tunnel's own packets to an IP endpoint would slip past a `Domain` rule and loop.
-fn endpoint_matcher(addr: &EndpointAddress) -> RuleMatcher {
-    match addr.host().parse::<IpAddr>() {
-        Ok(ip) => {
-            let len = if ip.is_ipv4() { 32 } else { 128 };
-            let cidr = IpCidr::parse(&format!("{ip}/{len}"))
-                .expect("a parsed IP with a full-length prefix is a valid CIDR");
-            RuleMatcher::IpCidr(cidr)
-        }
-        Err(_) => RuleMatcher::Domain(addr.host().to_string()),
-    }
-}
-
 /// Validate a set of rules: no two may share a precedence value (FR-022). Precedence
 /// collisions are rejected at configuration time, not resolved arbitrarily.
 pub fn validate_rule_set(rules: &[RoutingRule]) -> Result<(), DomainError> {
@@ -290,6 +234,7 @@ pub fn validate_dns_leak_protection(rules: &[RoutingRule]) -> Result<(), DomainE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::builtin_rules::builtin_rules;
 
     #[test]
     fn application_rules_are_always_best_effort() {
@@ -365,73 +310,33 @@ mod tests {
     }
 
     #[test]
-    fn builtins_cover_local_ranges_portal_hosts_and_the_endpoint() {
-        let addr = EndpointAddress::new("vpn.example", 443).unwrap();
-        let rules = builtin_rules(Some(&addr));
-
-        assert!(rules.iter().all(RoutingRule::is_builtin));
-        // Every built-in bypasses, except the single DNS-capture rule.
-        assert!(rules
-            .iter()
-            .all(|r| r.action() == RuleAction::Bypass || r.is_dns_capture()));
-
-        // Endpoint host present.
-        assert!(rules
-            .iter()
-            .any(|r| matches!(r.matcher(), RuleMatcher::Domain(h) if h == "vpn.example")));
-        // A private range present.
-        assert!(rules.iter().any(
-            |r| matches!(r.matcher(), RuleMatcher::IpCidr(c) if c.to_string() == "192.168.0.0/16")
-        ));
-        // A captive-portal probe host present.
-        assert!(rules
-            .iter()
-            .any(|r| matches!(r.matcher(), RuleMatcher::Domain(h) if h == "captive.apple.com")));
-
-        // Precedences are unique, so the built-in set is internally valid.
-        assert_eq!(validate_rule_set(&rules), Ok(()));
+    fn cidr_overlap_is_containment_in_either_direction_within_a_family() {
+        let c = |s: &str| IpCidr::parse(s).unwrap();
+        assert!(c("fc00::/7").overlaps(&c("fc00::/18")));
+        assert!(c("fc00::/18").overlaps(&c("fc00::/7")));
+        assert!(c("198.18.0.0/15").overlaps(&c("198.19.255.255/32")));
+        assert!(!c("198.18.0.0/15").overlaps(&c("198.20.0.0/16")));
+        assert!(!c("192.168.0.0/16").overlaps(&c("198.18.0.0/15")));
+        assert!(!c("fe80::/10").overlaps(&c("fc00::/18")));
+        assert!(c("0.0.0.0/0").overlaps(&c("10.1.2.3/32")));
+        // Different families never overlap.
+        assert!(!c("0.0.0.0/0").overlaps(&c("::/0")));
     }
 
     #[test]
-    fn an_ip_literal_endpoint_bypasses_by_address_not_domain() {
-        let v4 = EndpointAddress::new("203.0.113.9", 51820).unwrap();
-        let rules = builtin_rules(Some(&v4));
-        assert!(rules.iter().any(
-            |r| matches!(r.matcher(), RuleMatcher::IpCidr(c) if c.to_string() == "203.0.113.9/32")
-        ));
-        assert!(!rules
-            .iter()
-            .any(|r| matches!(r.matcher(), RuleMatcher::Domain(h) if h == "203.0.113.9")));
-
-        let v6 = EndpointAddress::new("2001:db8::9", 51820).unwrap();
-        assert!(builtin_rules(Some(&v6)).iter().any(
-            |r| matches!(r.matcher(), RuleMatcher::IpCidr(c) if c.to_string() == "2001:db8::9/128")
-        ));
-    }
-
-    #[test]
-    fn builtins_without_an_endpoint_omit_the_endpoint_rule() {
-        let rules = builtin_rules(None);
-        assert!(rules.iter().all(RoutingRule::is_builtin));
-        assert!(!rules.is_empty());
-    }
-
-    #[test]
-    fn the_dns_capture_rule_is_built_in_and_wins_over_everything() {
-        let addr = EndpointAddress::new("vpn.example", 443).unwrap();
-        let rules = builtin_rules(Some(&addr));
-
-        let capture: Vec<_> = rules.iter().filter(|r| r.is_dns_capture()).collect();
-        assert_eq!(capture.len(), 1, "exactly one DNS-capture rule");
-
-        let dns = capture[0];
-        assert!(dns.is_builtin());
-        assert_eq!(dns.action(), RuleAction::Capture);
-        assert_eq!(dns.reliability(), Reliability::Deterministic);
-        // It holds the strictly-lowest precedence, so it beats every bypass.
-        let min = rules.iter().map(RoutingRule::precedence).min().unwrap();
-        assert_eq!(dns.precedence(), min);
-        assert_eq!(dns.precedence(), 0);
+    fn user_rules_can_never_be_builtin_and_builtins_are_marked() {
+        let builtin = RoutingRule::builtin(
+            RuleMatcher::Domain("x.example".into()),
+            RuleAction::Bypass,
+            3,
+        )
+        .unwrap();
+        assert!(builtin.is_builtin());
+        // The same constructor validation applies to built-ins.
+        assert_eq!(
+            RoutingRule::builtin(RuleMatcher::DnsPort, RuleAction::Bypass, 0),
+            Err(DomainError::DnsPortRequiresCapture)
+        );
     }
 
     #[test]

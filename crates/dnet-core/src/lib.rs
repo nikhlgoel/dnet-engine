@@ -5,6 +5,7 @@
 //!
 //! See `specs/001-network-resilience-client/data-model.md`.
 
+pub mod builtin_rules;
 pub mod credential;
 pub mod endpoint;
 pub mod error;

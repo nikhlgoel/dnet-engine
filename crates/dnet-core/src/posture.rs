@@ -72,6 +72,7 @@ mod tests {
     use crate::ids::{InterfaceId, ProfileId};
     use crate::path::{NetworkPath, PathKind, PathQuality, PathRole};
     use crate::profile::{ConnectionProfile, ProfileKind, ProfileParams};
+    use crate::tier::SurvivalMeasurement;
     use std::net::{IpAddr, Ipv4Addr};
     use std::time::Instant;
 
@@ -150,11 +151,15 @@ mod tests {
 
     #[test]
     fn the_preferred_tier_wins_when_several_profiles_are_viable() {
-        // A Tier 2 and a Tier 1 profile both working: Tier 1 is preferred (FR-016b).
-        let profiles = [
-            working(ProfileKind::VlessReality), // Tier 2
-            working(ProfileKind::AmneziaWg),    // Tier 1
-        ];
+        // A Tier 2 and a measured Tier 1 profile both working: Tier 1 is preferred (FR-016b).
+        let mut measured_tier1 = ConnectionProfile::measured(
+            ProfileId::new("awg"),
+            ProfileKind::AmneziaWg,
+            ProfileParams::new(),
+            SurvivalMeasurement::Survived,
+        );
+        measured_tier1.mark_working(Instant::now());
+        let profiles = [working(ProfileKind::VlessReality), measured_tier1];
         let paths = [path(PathRole::Carrying)];
         assert_eq!(
             select_posture(&profiles, &paths),

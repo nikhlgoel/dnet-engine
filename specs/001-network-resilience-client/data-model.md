@@ -97,8 +97,11 @@ A named way of reaching an endpoint, with the parameters that shape how it appea
 | `provided_by` | `CoreBinding` | `PrimaryCore \| AmneziaWgCore` — which supervised process serves it |
 
 **Invariants**
-- **`tier` follows measurement, not intention.** A profile whose Tier 1 claim fails SPIKE-R9 is
-  demoted to `Tier2` in configuration and in the UI (Principle VI, R9).
+- **`tier` follows measurement, not intention.** A profile is `Tier1` only once HV-07 (SPIKE-R9)
+  has recorded that its kind survives an interface change at the pinned core versions. Until then,
+  and after a failed or invalidated measurement, it is `Tier2` in configuration and in the UI
+  (Principle VI, R9). FR-016a's tier per method is the design target that HV-07 tests, not a label.
+  *(Owner decision 2026-09-12.)*
 - At least one profile with `carrier = Tcp` must exist in any valid profile set — a UDP-only set is
   dead on networks that block UDP (FR-002).
 - `Hysteria2` profiles carry `brutal: Option<BandwidthPair>`. `None` is the default and causes
