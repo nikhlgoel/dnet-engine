@@ -1,5 +1,10 @@
 # SPIKE-R4 / HV-13 — running the live routing-loop gate (T055)
 
+> **Status 2026-09-11 — live run deferred to Phase 8.** No suitable endpoint is available yet.
+> The project owner deferred the live run until the provisioned cloud endpoint exists (Phase 8).
+> Until then, R4 rests on the logic-level tests only; see `tasks.md` T055 for what that does and
+> does not cover. This runbook is unchanged and is what Phase 8 will execute.
+
 **What it proves.** With both cores running, Profile A (AmneziaWG) carries real traffic,
 and the tunnel's own encrypted packets to the endpoint leave **only** through the physical
 adapter — none re-enter the TUN. Failure presents as a successful handshake with zero
@@ -9,6 +14,27 @@ throughput, so the gate counts packets per adapter instead of trusting "it conne
 through the **default gateway**. The Phase 0 harness publishes ports on `127.0.0.1`, and
 loopback traffic never enters a TUN — HV-13 would pass vacuously there. The script refuses
 to run against a loopback or on-link endpoint (exit code 3).
+
+**Not supported: a VM on the client's own LAN.** A LAN endpoint is on-link, so the script rejects
+it as `VACUOUS`. Making it look off-subnet was tried on 2026-09-11 and failed. The attempt gave a
+bridged Ubuntu VM a TEST-NET address on loopback and temporarily made the VM the client's default
+gateway. Two problems stopped it:
+
+- **Wi-Fi bridge isolation.** The hypervisor bridge sat on an Intel Wi-Fi adapter, and forwarded
+  traffic through it was dropped. 802.11 client mode allows only the station's own MAC address
+  on the air, so bridging over Wi-Fi relies on MAC rewriting that drivers and access points handle
+  inconsistently. If the VM runs on the client machine itself, host-to-guest packets can also be
+  switched inside the bridge filter driver, below the layer pktmon counts. The physical-adapter
+  count would then read zero even though the packets arrived.
+- **pktmon instability.** Packet Monitor stopped during the run (`Packet Monitor is not running`).
+  The verdict depends entirely on pktmon's per-adapter counters, so a run without them is
+  worthless.
+
+Do not work around this with a `/32` route to the VM on the client. That is exactly the host route
+the loop guard installs, so the negative control could no longer loop. A static route on the home
+router is also unreliable: the router's ICMP redirects can teach the client a direct on-link path,
+which suppresses re-entry and makes the control `INVALID`. Use an endpoint that is genuinely
+reached through the default gateway, on a different network from the client.
 
 **How it guards against a false PASS.**
 - A **negative control** run withholds the host route. It *must* show re-entry; if it does

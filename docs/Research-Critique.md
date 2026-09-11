@@ -410,6 +410,28 @@ Full evidence and verification are in `docs/adr/0004-vendored-binary-pins.md`, F
 **Lesson for Principle II.** Verifying *what we fetch* is not the same as verifying *what we ship*.
 Build outputs are now inspected, not just inputs.
 
+### 6.6 Phase 3 gate (SPIKE-R4) deferred: **OPEN, waived at risk** *(2026-09-11)*
+
+**What changed.** The Phase 3 gate is the live routing-loop measurement (`tasks.md` T055). The
+project owner deferred it to Phase 8, where it runs against the provisioned cloud endpoint (T098a).
+Later phases may proceed before it passes.
+
+**Why.** The gate needs an endpoint reached through a real default gateway. None exists yet, and a
+cloud VM is not available before provisioning. A LAN VM standing in as a fake off-subnet endpoint
+failed: the Wi-Fi bridge dropped forwarded traffic, and pktmon stopped mid-run. The details are in
+`testing/spike-r4/README.md`.
+
+**What still stands.** The loop-prevention orderings, the no-gateway refusal, the single-source
+bypass rule, and the pinned core's acceptance of the config are all tested at the logic level.
+
+**What does not.** Nothing yet shows that the running cores keep their own encrypted traffic off
+the TUN. That is the failure the gate exists to catch, and it presents as a successful handshake
+with zero throughput.
+
+**Risk accepted.** Work in Phases 4–6 of §5 that depends on the Profile A transport path is
+provisional. If T098a fails, §R4 (and possibly D8's dual-core arrangement) is revisited before that
+work is accepted. Gate-independent work is sequenced first. This entry closes when T098a passes.
+
 ## 7. Remaining Open Items
 
 - **O5** Define the transport-profile update channel and its integrity model — a profile feed that

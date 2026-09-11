@@ -270,6 +270,27 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
 >   built before this change still exercises the same DLL version, so its routing results stand.
 
 - [ ] T055 **[GATE] SPIKE-R4 / Plan Phase 3 exit**: run HV-13 — traffic flows end-to-end on Profile A, and packet counts on the tunnel adapter versus the physical interface show **no re-entry**; plus correct host-route rewrite across a simulated interface change. **Phase 5 onward is blocked until this passes.** Failure mode is a silent loop presenting as successful handshake with zero throughput ([research.md](./research.md) §R4). **Requires the harness + fetched vendor binaries (user environment).**
+  > **Deferred 2026-09-11 to Phase 8 by the project owner (gate waived at risk).** No off-subnet
+  > endpoint is available. A LAN VM cannot stand in for one: the Wi-Fi bridge dropped forwarded
+  > traffic and pktmon stopped mid-run (`testing/spike-r4/README.md`). The live run moves to
+  > **T098a**, against the provisioned endpoint.
+  >
+  > **What the logic-level tests cover.** The safety orderings are asserted by call order: host
+  > route before tunnel, rewrite before rebind, reap before adapter, kill before undo. A missing
+  > gateway fails with `NoUsablePath` and starts no tunnel. The bypass rule and the host route
+  > derive from one source. The pinned core's own `check` accepts the Profile A config. An elevated
+  > `--ignored` test installs and removes a real host route.
+  >
+  > **What they do not cover.** Whether the running cores' encrypted packets actually stay off the
+  > TUN. Windows route selection with the TUN up, the core's `bind_interface` behaviour and
+  > `auto_detect_interface` are only proven by counting packets. The silent-loop failure mode is
+  > therefore still open.
+  >
+  > **Consequence.** This waives the "Phase 5 onward is blocked" rule above. Phases 5–7 may proceed,
+  > but anything built on the Profile A transport path is provisional until T098a passes. If T098a
+  > fails, the §R4 design (and, per the Implementation Strategy, the dual-core decision) is revisited
+  > before that work is accepted. Gate-independent work (T037, T038, T027, T031) goes first.
+  > Recorded in `docs/Research-Critique.md` §6.6.
 
 **Checkpoint**: One profile carries real traffic without looping. The riskiest integration is proven.
 
@@ -362,6 +383,7 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
 - [ ] T096 [US2] Implement post-provisioning credential deletion, defaulting to delete, in `crates/dnet-provision/src/revoke.rs` (PR-05)
 - [ ] T097 [P] [US2] Implement manual endpoint addition bypassing cloud provisioning entirely, in `crates/dnet-provision/src/manual.rs` (FR-010, US2-5)
 - [ ] T098 **[GATE] Plan Phase 1 exit**: one command yields a reachable endpoint that survives idle reclamation; PRV-01…PRV-09 pass
+- [ ] T098a **[GATE] Deferred SPIKE-R4 (T055)**: run `testing/spike-r4/Invoke-SpikeR4.ps1` against the endpoint T098 provisioned, which is off-subnet by construction. Exit criteria are T055's own: `PASS` with a looping negative control. `INVALID`, `INCONCLUSIVE` or `VACUOUS` do not satisfy it. On `FAIL`, stop and revisit §R4 before any Phase 5–7 work that depends on the Profile A transport path is accepted
 
 **Checkpoint**: US2 is complete except its UI, which lands in Phase 9.
 
@@ -439,6 +461,10 @@ Phase 1 (Setup)
 **Hard blocks**: T020 blocks all transport work. T039 blocks all privileged operations. **T055 (SPIKE-R4) blocks Phases 5–7 entirely.** T021 (SPIKE-O6) determines whether T074–T076 exist at all. T085 (SPIKE-R9) determines final tier labelling.
 
 **Phase 8 is independent of Phases 5–7** and can proceed in parallel once T055 passes.
+
+> **Amended 2026-09-11 (owner waiver, `docs/Research-Critique.md` §6.6).** The live T055 run is
+> deferred to **T098a** in Phase 8, so Phases 5–7 are no longer hard-blocked. Work in them that
+> depends on the Profile A transport path is provisional until T098a passes.
 
 ## Parallel Execution Opportunities
 
