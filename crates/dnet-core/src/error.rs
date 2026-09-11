@@ -31,7 +31,8 @@ pub enum DomainError {
     #[error("Brutal congestion control is only available on a Hysteria 2 profile")]
     BrutalRequiresHysteria2,
 
-    /// Brutal congestion control was requested without the required acknowledgement.
+    /// Brutal congestion control was requested without an acknowledgement of the current
+    /// shared-capacity warning revision.
     #[error("Brutal congestion control requires explicit acknowledgement of its shared-AP impact")]
     BrutalNotAcknowledged,
 

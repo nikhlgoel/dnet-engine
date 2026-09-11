@@ -336,6 +336,7 @@ mod win {
             endpoint_bypass: &bypass,
             rules: &rules,
             amneziawg_adapter: Some(ADAPTER),
+            primary_transport: None,
         })?;
         let config_path = write::write_restricted(
             &args.run_dir.join("config"),

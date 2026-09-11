@@ -30,6 +30,9 @@ or endpoint change, applied by restarting or by the core's runtime control API w
 | CC-07 | When Profile A is active, the active outbound is `direct` with `bind_interface` set to the AmneziaWG adapter | R4 |
 | CC-08 | Generated config contains no credential material in cleartext beyond what the core requires at runtime, and the file's ACL restricts it to SYSTEM and Administrators | FR-035 |
 | CC-09 | Generation is deterministic — identical domain state yields byte-identical output | Makes config a testable pure function |
+| CC-10 | Hysteria 2 outbounds always carry an obfuscation layer (`salamander` or `gecko`) with a non-empty password distinct from the auth password, and TLS verified by a public CA or a pinned public key — never `insecure` | Without the layer the handshake is recognisable QUIC; the core would accept it (T056) |
+| CC-11 | VLESS+REALITY outbounds always enable uTLS and REALITY together; `server_name` is the configured, validated target domain | The pinned core refuses REALITY without uTLS; the target is configuration, not a constant (Research-Critique §4.3, T058) |
+| CC-12 | Brutal is emitted only under an acknowledgement of the **current** warning revision (extends CC-04) | A warning that changed after the user accepted it has not been accepted (T057) |
 
 ### 1.2 Contract tests
 
@@ -42,6 +45,11 @@ or endpoint change, applied by restarting or by the core's runtime control API w
 | CFG-05 | Built-in bypass rules are present and survive an attempt to remove them. |
 | CFG-06 | Generation is deterministic across 100 runs of identical input. |
 | CFG-07 | No generated artifact, log line, or error message contains the vendor name of the primary core. |
+| CFG-08 | A Hysteria 2 config carries `obfs` with type and password and verified TLS. Gecko emits bounded packet sizes (256 ≤ min ≤ max ≤ 1400) and Salamander emits none. Empty or reused passwords fail generation. |
+| CFG-09 | A VLESS+REALITY config's `server_name` equals the configured target domain for two different targets, with uTLS and REALITY enabled. Malformed credentials fail generation without echoing the value. |
+| CFG-10 | A Hysteria 2 or VLESS+REALITY profile generated without its transport settings, or with another kind's, fails with `MissingTransport`. |
+| CFG-11 | No credential appears in the `Debug` form of a generated config. |
+| — | The pinned core's offline `check` accepts generated configs for all three profiles (`tests/pinned_core_check.rs`). |
 
 ---
 

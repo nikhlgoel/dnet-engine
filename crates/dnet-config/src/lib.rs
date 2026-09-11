@@ -19,13 +19,21 @@
 
 pub mod amneziawg;
 pub mod bind;
+pub mod brutal;
 pub mod endpoint_bypass;
 pub mod error;
+mod hostname;
+pub mod hysteria2;
 pub mod primary;
+pub mod reality;
+pub mod secret;
+pub mod tls;
 pub mod uapi;
 pub mod uapi_pipe;
 pub mod write;
 
 pub use endpoint_bypass::ActiveEndpointBypass;
 pub use error::ConfigError;
-pub use primary::{generate_primary_core_config, to_json, PrimaryCoreConfig, PrimaryCoreInput};
+pub use primary::{
+    generate_primary_core_config, to_json, PrimaryCoreConfig, PrimaryCoreInput, PrimaryTransport,
+};

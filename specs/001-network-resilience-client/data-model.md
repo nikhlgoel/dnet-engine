@@ -104,9 +104,12 @@ A named way of reaching an endpoint, with the parameters that shape how it appea
   *(Owner decision 2026-09-12.)*
 - At least one profile with `carrier = Tcp` must exist in any valid profile set — a UDP-only set is
   dead on networks that block UDP (FR-002).
-- `Hysteria2` profiles carry `brutal: Option<BandwidthPair>`. `None` is the default and causes
-  `dnet-config` to **omit** the bandwidth section entirely, yielding BBR (R2). `Some` requires a
-  recorded user acknowledgement of the shared-capacity warning (FR-006).
+- `Hysteria2` profiles carry `brutal: Option<BrutalOptIn>`. `None` is the default and causes
+  `dnet-config` to **omit** the bandwidth section entirely, yielding BBR (R2). `Some` holds the
+  bandwidth together with a recorded `BrutalAcknowledgement { warning_revision,
+  acknowledged_at_unix }` of the shared-capacity warning (FR-006). An acknowledgement counts only
+  while its revision equals `BRUTAL_WARNING_REVISION`; bumping the revision stops existing opt-ins
+  from generating Brutal until the user accepts the new warning *(T057, 2026-09-12)*.
 - `AmneziaWg` profiles have `provided_by = AmneziaWgCore`; all others `PrimaryCore` (R1).
 
 ### 2.1 FailoverTier

@@ -397,9 +397,47 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
 
 **Independent test**: HV-01, HV-02, HV-03, HV-04, HV-09, HV-12.
 
-- [ ] T056 [P] [US1] Implement the Hysteria 2 profile generator in `crates/dnet-config/src/hysteria2.rs` — **omit the `bandwidth` section entirely** unless Brutal is explicitly enabled, yielding BBR (CC-03, [research.md](./research.md) §R2)
-- [ ] T057 [P] [US1] Implement Brutal opt-in in `crates/dnet-config/src/brutal.rs` — requires a recorded user acknowledgement and both `up` and `down`; partial configuration fails generation (CC-04, FR-006)
-- [ ] T058 [P] [US1] Implement the VLESS+REALITY profile generator in `crates/dnet-config/src/reality.rs`, with the borrowed TLS target domain as first-class configuration, not a constant ([docs/Research-Critique.md](../../docs/Research-Critique.md) §4.3)
+- [x] T056 [P] [US1] Implement the Hysteria 2 profile generator in `crates/dnet-config/src/hysteria2.rs` — **omit the `bandwidth` section entirely** unless Brutal is explicitly enabled, yielding BBR (CC-03, [research.md](./research.md) §R2)
+  > **Done 2026-09-12.** The schema was checked against the pinned core source at `0b89958`.
+  > - **Obfuscation is mandatory.** Salamander or Gecko, with a non-empty password different from
+  >   the auth password (CC-10). The core would accept an unobfuscated outbound; the type makes one
+  >   unrepresentable.
+  > - **TLS is verified** by a public CA or a pinned SPKI SHA-256. No `insecure` key exists.
+  > - **Defaults:** BBR with an explicit `bbr_profile`, and Chrome QUIC parroting on.
+  > - **Credentials** are held in `secret::Secret`: written to the config file, redacted from
+  >   `Debug`, `Display` and errors (CFG-11).
+  > - **For T093:** with parroting on, the endpoint certificate must be **ECDSA or RSA, never
+  >   Ed25519** (pinned core documentation).
+  > - **Pinned core `check`** accepts Salamander with a pinned key, Gecko with a public CA, and
+  >   Brutal, each for an IP and a hostname endpoint. As a control, it refuses an empty obfuscation
+  >   password.
+- [x] T057 [P] [US1] Implement Brutal opt-in in `crates/dnet-config/src/brutal.rs` — requires a recorded user acknowledgement and both `up` and `down`; partial configuration fails generation (CC-04, FR-006)
+  > **Done 2026-09-12.** The acknowledgement is now a record, not a `bool`:
+  > `BrutalAcknowledgement { warning_revision, acknowledged_at_unix }`, kept with the bandwidth in
+  > `BrutalOptIn`.
+  > - **At enable time,** the domain refuses a record for any revision except
+  >   `BRUTAL_WARNING_REVISION`.
+  > - **At generation time,** the check runs again, so bumping the revision (T105's warning text)
+  >   stops a stored opt-in from producing Brutal.
+  > - **A zero on either side** fails generation.
+  > - **Order:** the acknowledgement is checked before the bandwidth.
+- [x] T058 [P] [US1] Implement the VLESS+REALITY profile generator in `crates/dnet-config/src/reality.rs`, with the borrowed TLS target domain as first-class configuration, not a constant ([docs/Research-Critique.md](../../docs/Research-Critique.md) §4.3)
+  > **Done 2026-09-12.**
+  > - **Target domain.** `TargetDomain::parse` becomes the ClientHello `server_name`. It refuses:
+  >   - IP literals;
+  >   - single-label and non-LDH names;
+  >   - names under a built-in bypass suffix.
+  >
+  >   It lower-cases the name.
+  > - **uTLS and REALITY are always emitted together.** The pinned core refuses REALITY without
+  >   uTLS, which was confirmed by a negative control.
+  > - **Fingerprints** are limited to mainstream browsers.
+  > - **Validated values:** the public key must be exactly 32 bytes of canonical unpadded URL-safe
+  >   base64; the short id must be 1–8 bytes of hex; the user id must be a canonical UUID.
+  > - **Flow** is `xtls-rprx-vision` or none.
+  > - **Pinned core `check`** accepts both flows for an IP and a hostname endpoint. It refuses a
+  >   non-hex short id.
+  > - **Credentials** are redacted from `Debug` and from errors.
 - [ ] T059 [US1] Implement active profile probing in `crates/dnet-core/src/probe.rs` — races configured profiles and selects the first that carries **usable throughput**, not merely a completed handshake (FR-004, HV-12)
 - [ ] T060 [US1] Implement mid-session block detection and automatic re-probe in `crates/dnet-core/src/reprobe.rs` (FR-005, SC-004)
 - [ ] T061 [US1] Implement Tier 1 preference when multiple profiles are viable, and Tier 2 consent gating, in `crates/dnet-core/src/selection.rs` (FR-016b, IPC-04)
@@ -422,6 +460,10 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
   >   **T066 must not start until they are approved.**
 - [ ] T066 [US1] Implement signed profile feed ingestion in `crates/dnet-core/src/feed.rs` per the ADR from T065
 - [ ] T067 [O7] Verify whether the pinned primary-core version implements the newer obfuscation layer (Gecko) or only Salamander; record in `docs/adr/0003-obfuscation-layers.md` and tune Profile B accordingly (open item O7)
+  > **Partial finding 2026-09-12 (T056).** The pinned core accepts `obfs.type = "gecko"`, with
+  > `min_packet_size` and `max_packet_size` (`option/hysteria2.go`, `constant/hysteria2.go` at
+  > `0b89958`), and its `check` accepts a generated Gecko config. The generator supports both
+  > layers. Still open: ADR-0003, choosing the default layer, and tuning.
 - [ ] T068 **[GATE] Plan Phase 4 exit**: HV-01, HV-02, HV-03, HV-04, HV-09, HV-12 pass. HV-03 must show the obfuscated profile connecting **and** the unobfuscated control failing
 
 **Checkpoint**: US1 and US4 are independently demonstrable. This is a shippable slice.

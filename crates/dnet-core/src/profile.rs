@@ -69,10 +69,56 @@ impl ProfileKind {
 }
 
 /// An up/down bandwidth pair, in megabits per second, for Brutal congestion control.
+///
+/// A zero on either side is a partial configuration. It is refused when configuration is
+/// generated (CC-04, `dnet-config::brutal`), which is the gate every path to the core passes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BandwidthPair {
     pub up_mbps: u32,
     pub down_mbps: u32,
+}
+
+/// Revision of the shared-capacity warning the user must acknowledge before Brutal is enabled
+/// (FR-006, T105). **Bump it whenever the warning's substance changes**: every existing
+/// acknowledgement then stops counting, and Brutal is not generated until the user accepts
+/// the new text.
+pub const BRUTAL_WARNING_REVISION: u32 = 1;
+
+/// A recorded acknowledgement of the Brutal shared-capacity warning (FR-006).
+///
+/// A record, not a flag: it names the warning revision that was shown and when it was
+/// accepted, so an acknowledgement of an older warning can be told apart from one of the
+/// current warning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BrutalAcknowledgement {
+    /// The `BRUTAL_WARNING_REVISION` the user was shown.
+    pub warning_revision: u32,
+    /// When the user accepted it, in seconds since the Unix epoch.
+    pub acknowledged_at_unix: u64,
+}
+
+impl BrutalAcknowledgement {
+    /// Whether this acknowledges the warning currently in force.
+    pub fn is_current(&self) -> bool {
+        self.warning_revision == BRUTAL_WARNING_REVISION
+    }
+}
+
+/// Brutal congestion control, enabled together with the acknowledgement that permitted it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BrutalOptIn {
+    bandwidth: BandwidthPair,
+    acknowledgement: BrutalAcknowledgement,
+}
+
+impl BrutalOptIn {
+    pub fn bandwidth(&self) -> &BandwidthPair {
+        &self.bandwidth
+    }
+
+    pub fn acknowledgement(&self) -> &BrutalAcknowledgement {
+        &self.acknowledgement
+    }
 }
 
 /// Whether a profile is known to work on the current network.
@@ -127,7 +173,7 @@ pub struct ConnectionProfile {
     tier: FailoverTier,
     params: ProfileParams,
     viability: Viability,
-    brutal: Option<BandwidthPair>,
+    brutal: Option<BrutalOptIn>,
 }
 
 impl ConnectionProfile {
@@ -209,28 +255,32 @@ impl ConnectionProfile {
         };
     }
 
-    /// The Brutal bandwidth pair, if enabled. `None` means BBR (the default), which
-    /// `dnet-config` realises by omitting the bandwidth section entirely (R2).
-    pub fn brutal(&self) -> Option<&BandwidthPair> {
+    /// The Brutal opt-in, if enabled. `None` means BBR (the default), which `dnet-config`
+    /// realises by omitting the bandwidth section entirely (R2).
+    pub fn brutal(&self) -> Option<&BrutalOptIn> {
         self.brutal.as_ref()
     }
 
     /// Enable Brutal congestion control.
     ///
-    /// Refused unless this is a Hysteria 2 profile and the caller passes an explicit
-    /// acknowledgement of the shared-access-point impact (FR-006).
+    /// Refused unless this is a Hysteria 2 profile and the acknowledgement is of the warning
+    /// currently in force (FR-006). The acknowledgement is kept with the bandwidth, so
+    /// generation can re-check it if the warning revision changes later.
     pub fn enable_brutal(
         &mut self,
         bandwidth: BandwidthPair,
-        acknowledged: bool,
+        acknowledgement: BrutalAcknowledgement,
     ) -> Result<(), DomainError> {
         if self.kind != ProfileKind::Hysteria2 {
             return Err(DomainError::BrutalRequiresHysteria2);
         }
-        if !acknowledged {
+        if !acknowledgement.is_current() {
             return Err(DomainError::BrutalNotAcknowledged);
         }
-        self.brutal = Some(bandwidth);
+        self.brutal = Some(BrutalOptIn {
+            bandwidth,
+            acknowledgement,
+        });
         Ok(())
     }
 
@@ -312,16 +362,24 @@ mod tests {
         assert!(profile(ProfileKind::Hysteria2).brutal().is_none());
     }
 
+    const BW: BandwidthPair = BandwidthPair {
+        up_mbps: 50,
+        down_mbps: 200,
+    };
+
+    fn current_ack() -> BrutalAcknowledgement {
+        BrutalAcknowledgement {
+            warning_revision: BRUTAL_WARNING_REVISION,
+            acknowledged_at_unix: 1_757_635_200,
+        }
+    }
+
     #[test]
     fn brutal_requires_a_hysteria2_profile() {
-        let bw = BandwidthPair {
-            up_mbps: 50,
-            down_mbps: 200,
-        };
         for kind in [ProfileKind::AmneziaWg, ProfileKind::VlessReality] {
             let mut p = profile(kind);
             assert_eq!(
-                p.enable_brutal(bw, true),
+                p.enable_brutal(BW, current_ack()),
                 Err(DomainError::BrutalRequiresHysteria2)
             );
             assert!(p.brutal().is_none());
@@ -329,19 +387,37 @@ mod tests {
     }
 
     #[test]
-    fn brutal_requires_acknowledgement() {
+    fn brutal_records_the_acknowledgement_with_the_bandwidth() {
         let mut p = profile(ProfileKind::Hysteria2);
-        let bw = BandwidthPair {
-            up_mbps: 50,
-            down_mbps: 200,
-        };
-        assert_eq!(
-            p.enable_brutal(bw, false),
-            Err(DomainError::BrutalNotAcknowledged)
-        );
+        assert_eq!(p.enable_brutal(BW, current_ack()), Ok(()));
+        let opt_in = p.brutal().expect("enabled");
+        assert_eq!(opt_in.bandwidth(), &BW);
+        assert_eq!(opt_in.acknowledgement(), &current_ack());
+    }
+
+    /// An acknowledgement of a different warning text is not an acknowledgement of this one.
+    #[test]
+    fn brutal_refuses_an_acknowledgement_of_another_warning_revision() {
+        let mut p = profile(ProfileKind::Hysteria2);
+        for revision in [0, BRUTAL_WARNING_REVISION + 1] {
+            let ack = BrutalAcknowledgement {
+                warning_revision: revision,
+                ..current_ack()
+            };
+            assert_eq!(
+                p.enable_brutal(BW, ack),
+                Err(DomainError::BrutalNotAcknowledged)
+            );
+            assert!(p.brutal().is_none());
+        }
+    }
+
+    #[test]
+    fn disabling_brutal_returns_to_bbr() {
+        let mut p = profile(ProfileKind::Hysteria2);
+        p.enable_brutal(BW, current_ack()).unwrap();
+        p.disable_brutal();
         assert!(p.brutal().is_none());
-        assert_eq!(p.enable_brutal(bw, true), Ok(()));
-        assert_eq!(p.brutal(), Some(&bw));
     }
 
     #[test]

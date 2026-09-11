@@ -20,6 +20,8 @@ use dnet_core::rule::{RoutingRule, RuleAction, RuleMatcher};
 use crate::bind::DirectBoundOutbound;
 use crate::endpoint_bypass::ActiveEndpointBypass;
 use crate::error::ConfigError;
+use crate::hysteria2::{hysteria2_outbound, Hysteria2Outbound, Hysteria2Transport};
+use crate::reality::{reality_outbound, RealityTransport, VlessOutbound};
 
 /// FakeIP pools (CC-02, research.md R3). Documented defaults.
 pub const FAKEIP_INET4: &str = "198.18.0.0/15";
@@ -54,6 +56,17 @@ pub struct PrimaryCoreInput<'a> {
     /// The AmneziaWG adapter name. **Required** when the active profile is AmneziaWG,
     /// so its outbound can be bound to that adapter and nothing else (CC-07).
     pub amneziawg_adapter: Option<&'a str>,
+    /// Transport settings and credentials for the profiles the primary core carries itself.
+    /// **Required**, and of the matching kind, when the active profile is Hysteria 2 or
+    /// VLESS+REALITY. Unused for AmneziaWG.
+    pub primary_transport: Option<PrimaryTransport<'a>>,
+}
+
+/// Settings and credentials for a profile the primary core carries itself.
+#[derive(Debug, Clone, Copy)]
+pub enum PrimaryTransport<'a> {
+    Hysteria2(&'a Hysteria2Transport),
+    VlessReality(&'a RealityTransport),
 }
 
 /// The generated primary-core configuration.
@@ -154,30 +167,6 @@ pub struct DirectOutbound {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Hysteria2Outbound {
-    #[serde(rename = "type")]
-    pub kind: &'static str,
-    pub tag: String,
-    pub server: String,
-    pub server_port: u16,
-    /// Present only when Brutal is enabled; absence yields BBR (CC-03). `up_mbps` and
-    /// `down_mbps` are always emitted together (CC-04).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub up_mbps: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub down_mbps: Option<u32>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct VlessOutbound {
-    #[serde(rename = "type")]
-    pub kind: &'static str,
-    pub tag: String,
-    pub server: String,
-    pub server_port: u16,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Route {
     pub rules: Vec<RouteRule>,
     #[serde(rename = "final")]
@@ -224,51 +213,44 @@ pub fn generate_primary_core_config(
         },
     ];
 
-    let proxy = match profile.kind() {
-        ProfileKind::AmneziaWg => {
-            let adapter = input
-                .amneziawg_adapter
-                .ok_or(ConfigError::MissingAmneziaWgAdapter)?;
-            servers.push(DnsServer::Udp {
-                tag: TUNNEL_DNS.to_string(),
-                server: profile
-                    .params()
-                    .get("dns")
-                    .unwrap_or(DEFAULT_TUNNEL_DNS_SERVER)
-                    .to_string(),
-                server_port: 53,
-                bind_interface: adapter.to_string(),
-            });
-            Outbound::DirectBound(DirectBoundOutbound::to_amneziawg_adapter(
-                PROXY_TAG, adapter, TUNNEL_DNS,
-            ))
-        }
-        ProfileKind::Hysteria2 => {
-            let (up_mbps, down_mbps) = match profile.brutal() {
-                None => (None, None),
-                // A zero on either side is a half-configured Brutal — refuse it rather
-                // than silently half-enable (CC-04).
-                Some(bp) if bp.up_mbps == 0 || bp.down_mbps == 0 => {
-                    return Err(ConfigError::PartialBrutalBandwidth)
+    let proxy =
+        match profile.kind() {
+            ProfileKind::AmneziaWg => {
+                let adapter = input
+                    .amneziawg_adapter
+                    .ok_or(ConfigError::MissingAmneziaWgAdapter)?;
+                servers.push(DnsServer::Udp {
+                    tag: TUNNEL_DNS.to_string(),
+                    server: profile
+                        .params()
+                        .get("dns")
+                        .unwrap_or(DEFAULT_TUNNEL_DNS_SERVER)
+                        .to_string(),
+                    server_port: 53,
+                    bind_interface: adapter.to_string(),
+                });
+                Outbound::DirectBound(DirectBoundOutbound::to_amneziawg_adapter(
+                    PROXY_TAG, adapter, TUNNEL_DNS,
+                ))
+            }
+            ProfileKind::Hysteria2 => match input.primary_transport {
+                Some(PrimaryTransport::Hysteria2(transport)) => {
+                    Outbound::Hysteria2(hysteria2_outbound(
+                        PROXY_TAG,
+                        input.endpoint_bypass,
+                        transport,
+                        profile.brutal(),
+                    )?)
                 }
-                Some(bp) => (Some(bp.up_mbps), Some(bp.down_mbps)),
-            };
-            Outbound::Hysteria2(Hysteria2Outbound {
-                kind: "hysteria2",
-                tag: PROXY_TAG.to_string(),
-                server: input.endpoint_bypass.host().to_string(),
-                server_port: input.endpoint_bypass.port(),
-                up_mbps,
-                down_mbps,
-            })
-        }
-        ProfileKind::VlessReality => Outbound::Vless(VlessOutbound {
-            kind: "vless",
-            tag: PROXY_TAG.to_string(),
-            server: input.endpoint_bypass.host().to_string(),
-            server_port: input.endpoint_bypass.port(),
-        }),
-    };
+                _ => return Err(ConfigError::MissingTransport("Hysteria 2")),
+            },
+            ProfileKind::VlessReality => match input.primary_transport {
+                Some(PrimaryTransport::VlessReality(transport)) => Outbound::Vless(
+                    reality_outbound(PROXY_TAG, input.endpoint_bypass, transport)?,
+                ),
+                _ => return Err(ConfigError::MissingTransport("VLESS+REALITY")),
+            },
+        };
 
     Ok(PrimaryCoreConfig {
         log: Log {
@@ -400,6 +382,10 @@ fn dns_rules(rules: &[RoutingRule], tunnel_resolver: Option<&str>) -> Vec<DnsRul
 }
 
 /// Serialize a generated config to pretty JSON. Deterministic for identical input.
+///
+/// **The output contains credentials** (CC-08): write it only to the restricted config file
+/// (`write::write_restricted`), never to a log or diagnostic. Log the config's `Debug` form
+/// instead, which redacts them.
 pub fn to_json(config: &PrimaryCoreConfig) -> String {
     serde_json::to_string_pretty(config).expect("PrimaryCoreConfig always serializes")
 }

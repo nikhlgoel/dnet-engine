@@ -175,6 +175,7 @@ dependencies = [
 name = "dnet-config"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "dnet-core",
  "dnet-netstate",
  "serde",
@@ -183,6 +184,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "uuid",
  "windows 0.58.0",
 ]
 
