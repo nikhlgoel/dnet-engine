@@ -13,5 +13,14 @@ dnet-core = { workspace = true }
 dnet-config = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
-windows = { workspace = true, features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock"] }
+windows = { workspace = true, features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock"] }
 tracing = { workspace = true }
+
+[dev-dependencies]
+# For the SPIKE-R4 runner (examples/spike_r4.rs) only.
+dnet-supervisor = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "net", "io-util"] }
+tracing-subscriber = { workspace = true }

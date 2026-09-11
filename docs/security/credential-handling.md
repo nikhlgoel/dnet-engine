@@ -80,7 +80,8 @@ the sentinel catches what you did not.
 
 ## 5. AmneziaWG UAPI
 
-Peer keys are written to `\\.\pipe\ProtectedPrefix\Administrators\WireGuard\awg0` as text, and
+Peer keys are written to `\\.\pipe\ProtectedPrefix\Administrators\AmneziaWG\dnet-awg0` as text
+(path verified against the pinned core; earlier drafts said `WireGuard\awg0`), and
 **never to disk or logs** (AW-05).
 
 The pipe's ACL restricts it to Administrators, which `dnetd` satisfies as LocalSystem and the tray

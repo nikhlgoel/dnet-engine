@@ -67,6 +67,22 @@ pub struct ObfuscationParams {
     pub h4: u32,
 }
 
+impl ObfuscationParams {
+    /// Reject header values the pinned core would refuse: `h1`..`h4` must not overlap
+    /// (verified against the core's `mergeWithDevice` at the pinned commit).
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        let headers = [self.h1, self.h2, self.h3, self.h4];
+        for i in 0..headers.len() {
+            for j in (i + 1)..headers.len() {
+                if headers[i] == headers[j] {
+                    return Err(ConfigError::OverlappingHeaders);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Build the single UAPI `set_device` request that configures the private key, the
 /// obfuscation parameters, and the peer — all together (AW-04). There is no separate
 /// "configure peer" path, so a peer can never be configured without obfuscation.
@@ -78,6 +94,10 @@ pub fn build_set_device(
     if peer.public_key.trim().is_empty() || peer.endpoint.trim().is_empty() {
         return Err(ConfigError::IncompletePeer);
     }
+    if peer.endpoint.parse::<std::net::SocketAddr>().is_err() {
+        return Err(ConfigError::InvalidPeerEndpoint);
+    }
+    obfuscation.validate()?;
 
     let mut req = UapiRequest::new();
     // Device-level: the private key (secret) and the obfuscation parameters. These come
@@ -106,6 +126,33 @@ pub fn build_set_device(
     Ok(req)
 }
 
+/// Re-point an **existing** peer at `endpoint`, forcing its socket to re-select a source
+/// address after a carrying-path change (AW-03's "rebind").
+///
+/// `update_only=true` makes the core refuse to create a new peer, so this can never
+/// introduce a peer without its obfuscation parameters: the device-level obfuscation set
+/// by `build_set_device` remains in effect (AW-04 still holds).
+pub fn build_rebind(peer_public_key: &str, endpoint: &str) -> Result<UapiRequest, ConfigError> {
+    if peer_public_key.trim().is_empty() {
+        return Err(ConfigError::IncompletePeer);
+    }
+    if endpoint.parse::<std::net::SocketAddr>().is_err() {
+        return Err(ConfigError::InvalidPeerEndpoint);
+    }
+    let mut req = UapiRequest::new();
+    req.push("public_key", peer_public_key)
+        .push("update_only", "true")
+        .push("endpoint", endpoint);
+    Ok(req)
+}
+
+/// Remove every peer, stopping traffic toward the endpoint (tunnel stop).
+pub fn build_remove_peers() -> UapiRequest {
+    let mut req = UapiRequest::new();
+    req.push("replace_peers", "true");
+    req
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,7 +174,7 @@ mod tests {
     fn peer() -> PeerConfig {
         PeerConfig {
             public_key: "PEERPUB".into(),
-            endpoint: "edge.example:51820".into(),
+            endpoint: "203.0.113.9:51820".into(),
             allowed_ips: vec!["0.0.0.0/0".into()],
             persistent_keepalive: Some(25),
         }
@@ -148,6 +195,37 @@ mod tests {
         assert_eq!(
             build_set_device(&PrivateKey::new("SECRET"), &obf(), &p),
             Err(ConfigError::IncompletePeer)
+        );
+    }
+
+    #[test]
+    fn a_hostname_endpoint_is_rejected() {
+        let mut p = peer();
+        p.endpoint = "edge.example:51820".into();
+        assert_eq!(
+            build_set_device(&PrivateKey::new("SECRET"), &obf(), &p),
+            Err(ConfigError::InvalidPeerEndpoint)
+        );
+    }
+
+    #[test]
+    fn overlapping_headers_are_rejected() {
+        let mut o = obf();
+        o.h3 = o.h1;
+        assert_eq!(
+            build_set_device(&PrivateKey::new("SECRET"), &o, &peer()),
+            Err(ConfigError::OverlappingHeaders)
+        );
+    }
+
+    #[test]
+    fn rebind_only_updates_an_existing_peer() {
+        let req = build_rebind("PEERPUB", "203.0.113.9:51820").unwrap();
+        assert!(req.redacted().contains("update_only=true"));
+        assert!(!req.has_key("private_key") && !req.has_key("allowed_ip"));
+        assert_eq!(
+            build_rebind("PEERPUB", "edge.example:51820"),
+            Err(ConfigError::InvalidPeerEndpoint)
         );
     }
 

@@ -88,6 +88,50 @@ impl UapiRequest {
     }
 }
 
+impl UapiRequest {
+    /// The complete `set` operation as sent on the pipe: `set=1`, the lines, and the
+    /// terminating blank line (framing verified against the pinned core's `IpcHandle`).
+    pub fn to_set_operation(&self) -> String {
+        format!("set=1\n{}", self.to_wire())
+    }
+}
+
+/// A UAPI failure. Never carries request content, so it is always safe to log.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum UapiError {
+    /// The pipe did not appear (the core never started listening) within the timeout.
+    #[error("UAPI pipe did not become available within the timeout")]
+    PipeUnavailable,
+    /// Connecting, writing, or reading the pipe failed.
+    #[error("UAPI pipe I/O failed: {0}")]
+    Io(String),
+    /// The core answered but rejected the operation with a non-zero `errno`.
+    #[error("UAPI operation rejected by the core (errno={0})")]
+    Rejected(i64),
+    /// The response was not a well-formed `errno=N` block.
+    #[error("malformed UAPI response")]
+    Malformed,
+    /// No complete response arrived within the timeout.
+    #[error("UAPI response timed out")]
+    Timeout,
+}
+
+/// Parse a `set` response. The core replies `errno=0` on success and `errno=N` (non-zero)
+/// on failure, followed by a blank line.
+pub fn parse_set_response(response: &str) -> Result<(), UapiError> {
+    let errno = response
+        .lines()
+        .find_map(|l| l.strip_prefix("errno="))
+        .ok_or(UapiError::Malformed)?
+        .trim()
+        .parse::<i64>()
+        .map_err(|_| UapiError::Malformed)?;
+    match errno {
+        0 => Ok(()),
+        n => Err(UapiError::Rejected(n)),
+    }
+}
+
 /// `Debug` is the redacted form, so a request logged with `{:?}` never leaks a secret.
 impl fmt::Debug for UapiRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -111,6 +155,24 @@ mod tests {
         assert!(!format!("{req:?}").contains("DEADBEEFSECRETKEY"));
         // Non-secret values remain visible.
         assert!(req.redacted().contains("public_key=PEERPUBLIC"));
+    }
+
+    #[test]
+    fn set_operation_is_framed_with_set_and_a_blank_line() {
+        let mut req = UapiRequest::new();
+        req.push("replace_peers", "true");
+        assert_eq!(req.to_set_operation(), "set=1\nreplace_peers=true\n\n");
+    }
+
+    #[test]
+    fn responses_parse_to_success_or_a_distinct_rejection() {
+        assert_eq!(parse_set_response("errno=0\n\n"), Ok(()));
+        assert_eq!(
+            parse_set_response("errno=-22\n\n"),
+            Err(UapiError::Rejected(-22))
+        );
+        assert_eq!(parse_set_response("garbage\n\n"), Err(UapiError::Malformed));
+        assert_eq!(parse_set_response("errno=x\n\n"), Err(UapiError::Malformed));
     }
 
     #[test]

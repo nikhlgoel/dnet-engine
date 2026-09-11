@@ -384,6 +384,28 @@ mod tests {
         assert!(core.tags.contains("with_clash_api"));
     }
 
+    /// The harness endpoint builds its AmneziaWG server from source. Both ends must run
+    /// the identical protocol revision, so the endpoint's pin must equal the client's.
+    #[test]
+    fn harness_endpoint_pins_the_same_amneziawg_commit_as_the_client() {
+        let client = GO_SOURCES
+            .iter()
+            .find(|s| s.dest == "amneziawg-go")
+            .unwrap();
+        let dockerfile = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testing/harness/endpoint/Dockerfile");
+        let text = std::fs::read_to_string(&dockerfile).expect("harness endpoint Dockerfile");
+        let pinned = text
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("ARG AMNEZIAWG_GO_COMMIT="))
+            .expect("endpoint Dockerfile declares ARG AMNEZIAWG_GO_COMMIT");
+        assert_eq!(
+            pinned.trim(),
+            client.commit,
+            "harness endpoint and client AmneziaWG pins have drifted"
+        );
+    }
+
     #[test]
     fn wintun_is_pinned_and_not_built_from_source() {
         assert_eq!(WINTUN.sha256.len(), 64);

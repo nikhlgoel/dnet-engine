@@ -115,7 +115,8 @@ without this.
 ## R5 — Configuring AmneziaWG at runtime
 
 **Decision.** `dnetd` configures `amneziawg-go` over its **UAPI named pipe** at
-`\\.\pipe\ProtectedPrefix\Administrators\WireGuard\awg0`, writing text `key=value` lines. Obfuscation
+`\\.\pipe\ProtectedPrefix\Administrators\AmneziaWG\<adapter>` (corrected 2026-09-11 from
+`WireGuard\awg0` after verifying the pinned core's source), writing text `key=value` lines. Obfuscation
 parameters (the header-magic and junk-packet settings) are set through the same channel.
 
 **Rationale.** This is the process's native control interface on Windows and requires no file

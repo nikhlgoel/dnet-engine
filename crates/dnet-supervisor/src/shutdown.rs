@@ -12,11 +12,12 @@ use crate::runtime::CoreRuntime;
 /// Tear everything down: kill both cores, then replay all undo records. Best-effort —
 /// a failure to kill one core does not skip undo replay, since leaving routing state
 /// mutated is the worse outcome (fail toward restoration).
-pub fn shutdown_all<R: CoreRuntime>(rt: &R) -> Result<(), SupervisorError> {
-    let primary = rt.kill_core(CoreBinding::PrimaryCore);
-    let amnezia = rt.kill_core(CoreBinding::AmneziaWgCore);
+pub async fn shutdown_all<R: CoreRuntime>(rt: &R) -> Result<(), SupervisorError> {
+    // The primary core first: it holds the TUN and its routes, which capture traffic.
+    let primary = rt.kill_core(CoreBinding::PrimaryCore).await;
+    let amnezia = rt.kill_core(CoreBinding::AmneziaWgCore).await;
     // Undo replay always runs, even if a kill failed.
-    rt.replay_undo()?;
+    rt.replay_undo().await?;
     primary?;
     amnezia?;
     Ok(())

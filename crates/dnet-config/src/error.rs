@@ -18,4 +18,16 @@ pub enum ConfigError {
     /// valid AmneziaWG peer.
     #[error("AmneziaWG peer requires a non-empty public key and endpoint")]
     IncompletePeer,
+
+    /// The peer endpoint was not an `IP:port` literal. On Windows the core resolves a
+    /// hostname through the OS resolver; once the TUN is up that lookup returns a FakeIP
+    /// address and the tunnel would dial into itself. The host resolves the endpoint
+    /// before bring-up and passes the literal.
+    #[error("AmneziaWG peer endpoint must be an IP:port literal, resolved before bring-up")]
+    InvalidPeerEndpoint,
+
+    /// Two of the `h1`..`h4` header values were equal. The pinned core rejects
+    /// overlapping headers, so this is caught before the UAPI transaction.
+    #[error("AmneziaWG h1..h4 header values must not overlap")]
+    OverlappingHeaders,
 }

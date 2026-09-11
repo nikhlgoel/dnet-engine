@@ -111,3 +111,6 @@ $RECYCLE.BIN/
 .idea/
 *.swp
 *~
+
+# ---------- SPIKE-R4 live-gate output (packet captures, run logs) ----------
+testing/spike-r4/results/

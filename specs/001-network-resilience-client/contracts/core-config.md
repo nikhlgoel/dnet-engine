@@ -48,7 +48,17 @@ or endpoint change, applied by restarting or by the core's runtime control API w
 ## 2. AmneziaWG core configuration
 
 Configured at runtime over UAPI at
-`\\.\pipe\ProtectedPrefix\Administrators\WireGuard\awg0` as text `key=value` lines (R5).
+`\\.\pipe\ProtectedPrefix\Administrators\AmneziaWG\<adapter>` as text `key=value` lines (R5).
+
+> **Corrected 2026-09-11.** Earlier text gave the leaf directory as `WireGuard\awg0`. The pinned
+> core (`amneziawg-go` `b5928efb`, `ipc/uapi_windows.go`) listens under `AmneziaWG\`, with the
+> adapter name as the leaf; `dnetd` uses the adapter `dnet-awg0`. A client built from the old
+> path could never connect. Verified against source, and asserted by
+> `dnet-config::uapi_pipe::tests::pipe_path_matches_the_pinned_core`.
+>
+> **Peer endpoints are IP literals.** On Windows the core resolves a hostname `endpoint` through
+> the OS resolver; with the TUN up that returns a FakeIP address and the tunnel dials itself.
+> `dnetd` resolves the endpoint before bring-up; the builder rejects hostnames.
 
 ### 2.1 Required invariants
 

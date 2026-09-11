@@ -13,11 +13,15 @@ dnet-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["net", "io-util", "fs", "rt"] }
+tokio = { workspace = true, features = ["net", "io-util", "fs", "rt", "time"] }
 tracing = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "time", "net", "io-util"] }
 # The AWG contract tests assert the host-route/tunnel ordering, which lives in
 # dnet-netstate. This is a dev-only dependency edge (dnet-netstate depends on
 # dnet-config normally); Cargo permits a dev-dependency cycle.

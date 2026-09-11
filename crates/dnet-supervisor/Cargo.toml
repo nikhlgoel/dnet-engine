@@ -10,9 +10,13 @@ authors.workspace = true
 
 [dependencies]
 dnet-core = { workspace = true }
+dnet-config = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["process", "rt", "time", "io-util", "sync", "macros"] }
 tracing = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = ["Win32_Foundation", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

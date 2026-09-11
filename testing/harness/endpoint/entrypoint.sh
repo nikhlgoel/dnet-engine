@@ -14,6 +14,13 @@ echo "[endpoint] transit interface: ${TRANSIT_IFACE:-eth0}"
 echo "[endpoint] starting HTTP origin on :8080"
 python3 /opt/origin.py &
 
+# Profile A server (T018 partial, SPIKE-R4). Needs /dev/net/tun and NET_ADMIN.
+if [ -c /dev/net/tun ]; then
+  /opt/awg-server.sh
+else
+  echo "[endpoint] /dev/net/tun absent: Profile A server NOT started"
+fi
+
 echo "[endpoint] ready"
 touch "$STATE/endpoint-ready"
 tail -f /dev/null

@@ -1,0 +1,7 @@
+# Files executed inside Linux containers must keep LF line endings. With
+# core.autocrlf=true (the Windows default), a fresh checkout would otherwise rewrite
+# them to CRLF and bash would fail on `$'\r': command not found` inside the harness.
+*.sh          text eol=lf
+*.py          text eol=lf
+Dockerfile    text eol=lf
+*.yml         text eol=lf

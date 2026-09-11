@@ -233,10 +233,7 @@ pub fn builtin_rules(active_endpoint: Option<&EndpointAddress>) -> Vec<RoutingRu
 
     // The active endpoint must bypass the tunnel, mirroring the R4 host route.
     if let Some(addr) = active_endpoint {
-        push(
-            RuleMatcher::Domain(addr.host().to_string()),
-            &mut precedence,
-        );
+        push(endpoint_matcher(addr), &mut precedence);
     }
     for cidr in LOCAL_BYPASS_CIDRS {
         let parsed = IpCidr::parse(cidr).expect("built-in CIDR constant is valid");
@@ -246,6 +243,21 @@ pub fn builtin_rules(active_endpoint: Option<&EndpointAddress>) -> Vec<RoutingRu
         push(RuleMatcher::Domain((*host).to_string()), &mut precedence);
     }
     rules
+}
+
+/// The matcher for the active-endpoint bypass. An IP-literal endpoint must bypass by
+/// address (`/32` or `/128`): a domain matcher never matches raw IP traffic, so the
+/// tunnel's own packets to an IP endpoint would slip past a `Domain` rule and loop.
+fn endpoint_matcher(addr: &EndpointAddress) -> RuleMatcher {
+    match addr.host().parse::<IpAddr>() {
+        Ok(ip) => {
+            let len = if ip.is_ipv4() { 32 } else { 128 };
+            let cidr = IpCidr::parse(&format!("{ip}/{len}"))
+                .expect("a parsed IP with a full-length prefix is a valid CIDR");
+            RuleMatcher::IpCidr(cidr)
+        }
+        Err(_) => RuleMatcher::Domain(addr.host().to_string()),
+    }
 }
 
 /// Validate a set of rules: no two may share a precedence value (FR-022). Precedence
@@ -378,6 +390,23 @@ mod tests {
 
         // Precedences are unique, so the built-in set is internally valid.
         assert_eq!(validate_rule_set(&rules), Ok(()));
+    }
+
+    #[test]
+    fn an_ip_literal_endpoint_bypasses_by_address_not_domain() {
+        let v4 = EndpointAddress::new("203.0.113.9", 51820).unwrap();
+        let rules = builtin_rules(Some(&v4));
+        assert!(rules.iter().any(
+            |r| matches!(r.matcher(), RuleMatcher::IpCidr(c) if c.to_string() == "203.0.113.9/32")
+        ));
+        assert!(!rules
+            .iter()
+            .any(|r| matches!(r.matcher(), RuleMatcher::Domain(h) if h == "203.0.113.9")));
+
+        let v6 = EndpointAddress::new("2001:db8::9", 51820).unwrap();
+        assert!(builtin_rules(Some(&v6)).iter().any(
+            |r| matches!(r.matcher(), RuleMatcher::IpCidr(c) if c.to_string() == "2001:db8::9/128")
+        ));
     }
 
     #[test]

@@ -59,6 +59,9 @@ services:
     hostname: endpoint
     cap_add:
       - NET_ADMIN
+    # The Profile A AmneziaWG server creates a TUN interface (SPIKE-R4, T018 partial).
+    devices:
+      - /dev/net/tun:/dev/net/tun
     networks:
       transit:
         ipv4_address: 172.32.0.20

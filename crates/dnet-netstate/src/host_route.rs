@@ -56,41 +56,51 @@ impl HostRoute {
 }
 
 /// The route/adapter/tunnel operations whose ordering prevents the R4 loop. Implemented
-/// for real by the OS installer; a recording fake asserts the order in tests.
+/// for real by `win_bringup::WindowsTunnelBringup`; a recording fake asserts the order in
+/// tests.
+///
+/// Async because starting, stopping, and rebinding the tunnel are UAPI round-trips. The
+/// trait is only ever used through generics (never `dyn`), so the auto-trait-bound
+/// limitation the `async_fn_in_trait` lint warns about does not apply.
+#[allow(async_fn_in_trait)]
 pub trait TunnelBringup {
-    fn install_host_route(&self, route: &HostRoute) -> Result<(), NetstateError>;
-    fn remove_host_route(&self, route: &HostRoute) -> Result<(), NetstateError>;
-    fn rewrite_host_route(&self, from: &HostRoute, to: &HostRoute) -> Result<(), NetstateError>;
-    fn start_tunnel(&self) -> Result<(), NetstateError>;
-    fn stop_tunnel(&self) -> Result<(), NetstateError>;
-    fn rebind_tunnel(&self, gateway: IpAddr) -> Result<(), NetstateError>;
+    async fn install_host_route(&self, route: &HostRoute) -> Result<(), NetstateError>;
+    async fn remove_host_route(&self, route: &HostRoute) -> Result<(), NetstateError>;
+    async fn rewrite_host_route(
+        &self,
+        from: &HostRoute,
+        to: &HostRoute,
+    ) -> Result<(), NetstateError>;
+    async fn start_tunnel(&self) -> Result<(), NetstateError>;
+    async fn stop_tunnel(&self) -> Result<(), NetstateError>;
+    async fn rebind_tunnel(&self, gateway: IpAddr) -> Result<(), NetstateError>;
 }
 
 /// Bring the tunnel up: install the host route **first**, then start the tunnel (AW-02).
 /// If the route install fails, the tunnel is never started.
-pub fn bring_up<T: TunnelBringup>(ops: &T, route: &HostRoute) -> Result<(), NetstateError> {
-    ops.install_host_route(route)?;
-    ops.start_tunnel()
+pub async fn bring_up<T: TunnelBringup>(ops: &T, route: &HostRoute) -> Result<(), NetstateError> {
+    ops.install_host_route(route).await?;
+    ops.start_tunnel().await
 }
 
 /// Tear the tunnel down: stop the tunnel, then remove the host route (AW-03). The route
 /// removal runs even if the stop reported an error, so an abnormal stop still leaves no
 /// residual host route.
-pub fn tear_down<T: TunnelBringup>(ops: &T, route: &HostRoute) -> Result<(), NetstateError> {
-    let stopped = ops.stop_tunnel();
-    ops.remove_host_route(route)?;
+pub async fn tear_down<T: TunnelBringup>(ops: &T, route: &HostRoute) -> Result<(), NetstateError> {
+    let stopped = ops.stop_tunnel().await;
+    ops.remove_host_route(route).await?;
     stopped
 }
 
 /// Handle a carrying-path change: rewrite the host route to the new gateway **before**
 /// telling the tunnel to rebind (AW-03). A stale gateway route during rebind loops.
-pub fn on_carrying_path_change<T: TunnelBringup>(
+pub async fn on_carrying_path_change<T: TunnelBringup>(
     ops: &T,
     current: &HostRoute,
     new_gateway: IpAddr,
 ) -> Result<HostRoute, NetstateError> {
     let updated = current.via(new_gateway);
-    ops.rewrite_host_route(current, &updated)?;
-    ops.rebind_tunnel(new_gateway)?;
+    ops.rewrite_host_route(current, &updated).await?;
+    ops.rebind_tunnel(new_gateway).await?;
     Ok(updated)
 }

@@ -23,6 +23,8 @@ pub mod endpoint_bypass;
 pub mod error;
 pub mod primary;
 pub mod uapi;
+pub mod uapi_pipe;
+pub mod write;
 
 pub use endpoint_bypass::ActiveEndpointBypass;
 pub use error::ConfigError;
