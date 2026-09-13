@@ -12,8 +12,13 @@
 //!
 //! See `specs/001-network-resilience-client/` for the governing specification.
 
+// Reached only through the Windows service entry points today; the Linux entry point
+// will use them too. Their unit tests run on every platform.
+#[cfg_attr(not(windows), allow(dead_code))]
 mod domain;
+#[cfg_attr(not(windows), allow(dead_code))]
 mod recovery;
+#[cfg_attr(not(windows), allow(dead_code))]
 mod service_impl;
 
 #[cfg(windows)]

@@ -7,7 +7,9 @@
 //! exists — there is no window in which it carries a broader ACL. Each file is then
 //! written to a temporary name, renamed into place, and given an explicit protected DACL.
 
-use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::path::Path;
+use std::path::PathBuf;
 
 /// Protected, inheritable: SYSTEM and Administrators full control; nothing inherited
 /// from the parent, and child objects receive the same two ACEs.

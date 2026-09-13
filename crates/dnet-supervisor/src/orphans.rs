@@ -5,7 +5,9 @@
 //! enough: an unrelated program that happens to share a name must not be killed. The
 //! service's own process is always excluded.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(windows)]
+use std::path::PathBuf;
 
 /// Whether two image paths name the same file: case-insensitive, separator-normalised,
 /// and ignoring the `\\?\` verbatim prefix — the forms Windows reports image paths in.

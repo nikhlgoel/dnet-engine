@@ -190,6 +190,11 @@ fn on_event(record: &EventRecord, locator: &SchemaLocator, obs: &Observed, self_
 }
 
 fn main() {
+    // ETW and GetProcessTimes exist only on Windows; off Windows this example only type-checks.
+    if !cfg!(windows) {
+        eprintln!("spike_cost measures ETW and runs only on Windows");
+        std::process::exit(2);
+    }
     let code = run();
     std::process::exit(code);
 }
@@ -523,7 +528,14 @@ fn connect_remote(addr: SocketAddr) -> std::io::Result<u16> {
     Ok(s.local_addr()?.port())
 }
 
+/// Off Windows `main` exits before any measurement, so this is never reached.
+#[cfg(not(windows))]
+fn process_cpu_time() -> Duration {
+    unreachable!("spike_cost exits before measuring off Windows")
+}
+
 /// Total CPU time (kernel + user) this process has consumed.
+#[cfg(windows)]
 fn process_cpu_time() -> Duration {
     use std::mem::zeroed;
     use windows::Win32::Foundation::FILETIME;
