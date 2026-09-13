@@ -37,15 +37,15 @@ pub fn run(repo_root: &Path) -> Result<()> {
     let mut failures = Vec::new();
 
     check_no_wintun_source(repo_root, &mut failures)?;
-    check_signed_dll(repo_root, &mut failures)?;
-    check_no_embedded_images(repo_root, &mut failures)?;
+    let dll = check_signed_dll(repo_root, &mut failures)?;
+    let scanned = check_no_embedded_images(repo_root, &mut failures)?;
     check_licence_texts(repo_root, &mut failures)?;
 
     if failures.is_empty() {
         println!("verify-vendor: OK");
         println!("  - no Wintun source present anywhere in the tree");
-        println!("  - vendor/wintun/wintun.dll matches the pinned digest and is validly signed");
-        println!("  - no vendored core executable embeds a DLL, driver, or other PE image");
+        println!("  - {}", dll.summary());
+        println!("  - {}", embedded_summary(scanned));
         println!("  - licence texts present for every bundled dependency");
         return Ok(());
     }
@@ -66,13 +66,17 @@ pub fn run(repo_root: &Path) -> Result<()> {
 /// Obligation 2's no-embedded-copies rule. A byte-identical copy of the official DLL, or
 /// the packet-diversion driver, inside a core executable is named. Any other embedded PE
 /// image is reported too: a different build of the same DLL would match no digest.
-fn check_no_embedded_images(repo_root: &Path, failures: &mut Vec<String>) -> Result<()> {
+///
+/// Returns how many core executables were present and scanned.
+fn check_no_embedded_images(repo_root: &Path, failures: &mut Vec<String>) -> Result<usize> {
     let forbidden = forbidden_embedded_images();
+    let mut scanned = 0;
     for rel in CORE_EXECUTABLES {
         let exe = repo_root.join(rel);
         if !exe.exists() {
             continue;
         }
+        scanned += 1;
         let bytes = std::fs::read(&exe).with_context(|| format!("failed to read {rel}"))?;
         for image in find_embedded_images(&bytes, &forbidden) {
             failures.push(match image.identified {
@@ -87,7 +91,17 @@ fn check_no_embedded_images(repo_root: &Path, failures: &mut Vec<String>) -> Res
             });
         }
     }
-    Ok(())
+    Ok(scanned)
+}
+
+fn embedded_summary(scanned: usize) -> String {
+    match scanned {
+        0 => "no vendored core executable present: embedded-image scan NOT run".into(),
+        n => format!(
+            "{n} of {} vendored core executable(s) scanned; none embeds a DLL, driver, or other PE image",
+            CORE_EXECUTABLES.len()
+        ),
+    }
 }
 
 /// Walk the whole repository, not just `vendor/`. Someone vendoring Wintun source
@@ -128,17 +142,46 @@ fn check_no_wintun_source(repo_root: &Path, failures: &mut Vec<String>) -> Resul
     Ok(())
 }
 
+/// What the Wintun DLL check was able to establish. The OK summary reports exactly this,
+/// never more: a check that did not run is not described as passed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DllCheck {
+    /// No DLL in the tree, which is normal before `fetch-vendor`.
+    Absent,
+    /// Digest matches the pin; the Authenticode status was not checked on this host.
+    DigestOnly,
+    /// Digest matches the pin and Authenticode reports `Valid`.
+    DigestAndSignature,
+}
+
+impl DllCheck {
+    fn summary(self) -> &'static str {
+        match self {
+            DllCheck::Absent => {
+                "vendor/wintun/wintun.dll not present: digest and signature NOT checked"
+            }
+            DllCheck::DigestOnly => {
+                "vendor/wintun/wintun.dll matches the pinned digest \
+                 (Authenticode not checkable on this host)"
+            }
+            DllCheck::DigestAndSignature => {
+                "vendor/wintun/wintun.dll matches the pinned digest and is validly signed"
+            }
+        }
+    }
+}
+
 /// The DLL is fetched by `fetch-vendor`, so absence in a clean checkout is normal
 /// and reported as a hint rather than a failure. A DLL that IS present but is not
 /// validly signed is a hard failure.
-fn check_signed_dll(repo_root: &Path, failures: &mut Vec<String>) -> Result<()> {
+fn check_signed_dll(repo_root: &Path, failures: &mut Vec<String>) -> Result<DllCheck> {
     let dll = repo_root.join("vendor/wintun/wintun.dll");
     if !dll.exists() {
         println!(
             "verify-vendor: note - {} not present; run `cargo xtask fetch-vendor` before packaging",
             dll.display()
         );
-        return Ok(());
+        return Ok(DllCheck::Absent);
     }
 
     let pin = wintun_dll("amd64");
@@ -151,29 +194,43 @@ fn check_signed_dll(repo_root: &Path, failures: &mut Vec<String>) -> Result<()> 
     }
 
     match authenticode_status(&dll)? {
-        Some(status) if status.eq_ignore_ascii_case("Valid") => Ok(()),
-        Some(status) => {
+        Signature::NotCheckable => Ok(DllCheck::DigestOnly),
+        Signature::Status(status) if status.eq_ignore_ascii_case("Valid") => {
+            Ok(DllCheck::DigestAndSignature)
+        }
+        Signature::Status(status) => {
             failures.push(format!(
                 "vendor/wintun/wintun.dll Authenticode status is `{status}`, expected `Valid`. \
                  Only the vendor's signed binary may be bundled."
             ));
-            Ok(())
+            Ok(DllCheck::DigestOnly)
         }
-        None => {
+        Signature::Unknown => {
             failures.push(
                 "could not determine the Authenticode status of vendor/wintun/wintun.dll".into(),
             );
-            Ok(())
+            Ok(DllCheck::DigestOnly)
         }
     }
 }
 
-fn authenticode_status(path: &Path) -> Result<Option<String>> {
-    // Signature verification is Windows-only. On other hosts the check is skipped
-    // with a warning rather than silently passing.
+/// Outcome of asking the host for a file's Authenticode status.
+enum Signature {
+    /// This host has no Authenticode verifier. The pinned digest still binds the file to
+    /// the vendor's signed release, but the signature itself was not examined.
+    NotCheckable,
+    /// The verifier ran but produced no status.
+    Unknown,
+    /// The status string the verifier reported (`Valid`, `NotSigned`, `HashMismatch`, ...).
+    Status(String),
+}
+
+fn authenticode_status(path: &Path) -> Result<Signature> {
+    // Signature verification uses PowerShell's Get-AuthenticodeSignature, so it runs on
+    // Windows only. Elsewhere it is reported as not checked, never as valid.
     if !cfg!(windows) {
         println!("verify-vendor: warning - not running on Windows; Authenticode check skipped");
-        return Ok(Some("Valid".into()));
+        return Ok(Signature::NotCheckable);
     }
 
     let out = Command::new("powershell")
@@ -190,13 +247,13 @@ fn authenticode_status(path: &Path) -> Result<Option<String>> {
         .context("failed to invoke powershell for Authenticode verification")?;
 
     if !out.status.success() {
-        return Ok(None);
+        return Ok(Signature::Unknown);
     }
     let status = String::from_utf8_lossy(&out.stdout).trim().to_string();
     Ok(if status.is_empty() {
-        None
+        Signature::Unknown
     } else {
-        Some(status)
+        Signature::Status(status)
     })
 }
 
@@ -241,4 +298,37 @@ fn walk(root: &Path) -> Result<Vec<PathBuf>> {
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The summary never claims a check that did not run.
+    #[test]
+    fn summary_claims_only_what_was_checked() {
+        assert!(DllCheck::Absent.summary().contains("NOT checked"));
+        assert!(!DllCheck::Absent.summary().contains("validly signed"));
+        assert!(!DllCheck::DigestOnly.summary().contains("validly signed"));
+        assert!(DllCheck::DigestAndSignature
+            .summary()
+            .contains("validly signed"));
+    }
+
+    #[test]
+    fn embedded_summary_says_when_nothing_was_scanned() {
+        assert!(embedded_summary(0).contains("NOT run"));
+        assert!(embedded_summary(2).starts_with("2 of 2"));
+    }
+
+    #[test]
+    fn absent_dll_is_reported_as_unchecked_not_failed() {
+        let root = std::env::temp_dir().join(format!("verify-vendor-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut failures = Vec::new();
+        let outcome = check_signed_dll(&root, &mut failures).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(outcome, DllCheck::Absent);
+        assert!(failures.is_empty());
+    }
 }
