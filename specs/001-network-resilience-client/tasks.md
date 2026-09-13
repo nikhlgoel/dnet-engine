@@ -456,9 +456,64 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
   > - **Endpoint-tied parameters.** Parameters the endpoint must also know (AmneziaWG `s1`/`s2`/
   >   `h1`–`h4`, Hysteria 2 obfuscation, the REALITY target) are staged for re-provisioning. They
   >   are never applied by the client alone.
-  > - **Owner decisions D1–D4** (hosting, fetching while disconnected, root custody, scope) are open.
-  >   **T066 must not start until they are approved.**
-- [ ] T066 [US1] Implement signed profile feed ingestion in `crates/dnet-core/src/feed.rs` per the ADR from T065
+  > - **Owner decisions D1–D4 approved 2026-09-12**, as recommended:
+  >   - D1: files are GitHub Release assets;
+  >   - D2: fetching over the physical network while disconnected only on explicit user request;
+  >   - D3: root keys 2 of 3, held offline;
+  >   - D4: parameters only in v1.
+  >
+  >   ADR-0002 is Accepted.
+- [x] T066 [US1] Implement signed profile feed ingestion in `crates/dnet-core/src/feed.rs` per the ADR from T065
+  > **Done 2026-09-12: the verification layer.** Pure, no I/O, under D1–D4.
+  > - **Envelope.** DSSE v1 with the PAE; canonical padded standard base64; a 262,144-byte cap
+  >   with `read_capped` stopping at cap + 1; 1–8 signatures.
+  > - **Signatures.** Strict Ed25519 (`ed25519-dalek` 2.2.0). Distinct keys count once toward a
+  >   threshold, and the payload is parsed only after the threshold is met.
+  > - **Trust anchor.** `FeedTrust` holds exactly 3 roots with threshold 2 (D3), refuses weak or
+  >   repeated roots, and carries the compiled `MIN_KEYS_VERSION` floor.
+  > - **Verification order.** Keys and feed documents follow ADR-0002 §4 exactly:
+  >   - rollback and equivocation by version and digest, independent of the clock;
+  >   - mix-and-match refused by `keys_version`;
+  >   - expiry and signing-key windows with 24 h skew;
+  >   - rule R evicts feeds from revoked keys, including one at `u64::MAX`;
+  >   - `restore` rebuilds state from stored bytes with no time checks;
+  >   - `FeedStatus` reports BundledDefaults, Current or Stale.
+  > - **Schema.** The closed v1 schema (D4) with the §5.4 bounds, catalogue references, and
+  >   `merged_over` rechecking the cross-field rules against the values in effect.
+  > - **D1/D2 in `feed::fetch`.** Covers the `profile-feed` release-tag URLs, the two-host
+  >   allowlist, and `fetch_route`: the physical network is used only for a `UserRequested` fetch
+  >   while `FailClosed`, and a scheduled fetch is never allowed then.
+  > - **Shared validators.** Gecko bounds, hostname and target-domain rules, and the BBR and uTLS
+  >   enums moved to dnet-core, and the generators now use them. The AmneziaWG bounds stay
+  >   feed-only because the harness uses `u32` headers above 2³¹−1.
+  > - **Tests.** FEED-01…15 plus role, window, trust-anchor and merge tests. The KAT was
+  >   cross-checked with OpenSSL.
+  > - **Bug found and fixed.** FEED-09 caught serde ignoring unknown fields on an internally tagged
+  >   unit variant (Salamander).
+  >
+  > **Not yet wired.** Nothing in `dnetd` calls this yet; T066a–T066d below do.
+- [ ] T066a [US1] Persist and restore feed state in `dnetd`.
+  - Keys and feed envelopes go to `%PROGRAMDATA%\DNet Engine\state\`, using the undo journal's
+    durable write and SYSTEM/Administrators DACL check.
+  - `restore` runs at start.
+  - Before committing a `FeedOutcome::Accepted`, generate a trial config for every bundled profile
+    against CC-01…CC-09 and AW-04 (ADR-0002 §4 feed step 8).
+  - Raise a `ConnectionEvent` on rule-R eviction and on staleness.
+  - Map client parameters into the generators. Stage endpoint parameters for re-provisioning;
+    never apply them alone (§6).
+- [ ] T066b [US1] Implement feed fetching in `dnetd`, per `dnet_core::feed::fetch`.
+  - HTTPS via rustls; every URL checked with `is_allowed_url` **after parsing**; at most 2
+    redirects; 30 s timeout; `read_capped`; no cookies or identifiers.
+  - Start-up plus a 6 h schedule with jitter, through the tunnel only.
+  - The physical network only through a `UserRequested` IPC request while fail-closed (D2).
+  - Offline import as a `Mutating` IPC request carrying envelope bytes.
+- [ ] T066c [US1] Implement `cargo xtask feed-keygen` and `feed-sign`.
+  - Signing runs the payload through `dnet_core::feed` parsing before signing.
+  - Must reproduce the FEED-15 known-answer vector.
+  - Private keys are never written inside the repository.
+- [ ] T066d **[OWNER]** Root key ceremony (D3): generate 3 root keys offline on separate media,
+  compile their public keys and `MIN_KEYS_VERSION` into `dnetd`, publish the first keys document
+  and feed to the `profile-feed` release. Blocks shipping T066a–T066b.
 - [ ] T067 [O7] Verify whether the pinned primary-core version implements the newer obfuscation layer (Gecko) or only Salamander; record in `docs/adr/0003-obfuscation-layers.md` and tune Profile B accordingly (open item O7)
   > **Partial finding 2026-09-12 (T056).** The pinned core accepts `obfs.type = "gecko"`, with
   > `min_packet_size` and `max_packet_size` (`option/hysteria2.go`, `constant/hysteria2.go` at
@@ -528,6 +583,15 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
 - [ ] T091 [US2] Implement capacity-exhaustion handling returning alternative regions with their added RTT, as a retryable outcome rather than an error, in `crates/dnet-provision/src/capacity.rs` (PR-02 stage, US2-2)
 - [ ] T092 [US2] Implement idempotent cleanup, reporting unremovable resources with identifying detail, in `crates/dnet-provision/src/cleanup.rs` (PR-08, PR-09, PR-11, SC-011)
 - [ ] T093 [US2] Implement server bootstrap installing both server-side cores pinned to the client's bundled versions, generating private keys **on the server**, in `crates/dnet-provision/src/bootstrap.rs` (PR-12, PR-13, PR-14)
+  > **Constraint (binding, owner decision 2026-09-12): the Hysteria 2 endpoint certificate MUST use
+  > an ECDSA or RSA key, never Ed25519.**
+  > - **Why.** The client generator (T056) keeps Chrome QUIC handshake mimicry on by default. Chrome
+  >   does not advertise Ed25519 signatures, so the pinned core's documentation says the handshake
+  >   fails against an Ed25519 certificate.
+  > - **Scope.** Applies to self-signed certificates (pinned by SPKI SHA-256) and to CA-issued
+  >   certificates alike.
+  > - **Enforcement.** Bootstrap refuses to finish if the generated key is Ed25519.
+  > - **Test.** A PRV test asserts the certificate's key algorithm.
 - [ ] T094 [US2] Implement idle-reclamation keepalive installation, failing the job if absent, in `crates/dnet-provision/src/keepalive.rs` (PR-15 stage, PRV-09, [research.md](./research.md) §R10)
 - [ ] T095 [US2] Implement reachability verification gating `Endpoint` creation — a job failing here yields no endpoint, in `crates/dnet-provision/src/verify.rs` (PR-10)
 - [ ] T096 [US2] Implement post-provisioning credential deletion, defaulting to delete, in `crates/dnet-provision/src/revoke.rs` (PR-05)

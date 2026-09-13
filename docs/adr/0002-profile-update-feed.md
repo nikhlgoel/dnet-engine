@@ -1,7 +1,7 @@
 # ADR-0002: Signed profile update feed
 
-**Status**: Proposed. §3–§6 are normative for T066. Decisions D1–D4 (§10) need owner approval
-before T066 starts.
+**Status**: **Accepted.** D1–D4 (§10) approved as recommended by the project owner on
+2026-09-12. §3–§6 are normative for T066.
 **Date**: 2026-09-12
 **Task**: T065 (open item O5)
 **Decides**: FR-007, FR-008
@@ -367,6 +367,15 @@ on the resulting value. That value is the proposed field merged over the value i
   - `profile-feed.v1.dsse.json`.
 
   They are always published together (§8).
+- **Location (D1, fixed in T066).**
+  - The files are assets of a **dedicated release, tag `profile-feed`**, on the project
+    repository. They are replaced in place, so feed publication never waits on an application
+    release.
+  - URL: `https://github.com/nikhlgoel/dnet-engine/releases/download/profile-feed/<asset>`.
+  - A download is served by `github.com` and redirected once to
+    `release-assets.githubusercontent.com` (observed 2026-09-12). Those two hosts are the
+    **entire** allowlist, reached over HTTPS on the default port, with at most 2 redirects.
+  - The constants live in `dnet_core::feed::fetch`.
 - **Integrity comes only from the signatures.** Every host, mirror, and offline copy is equally
   untrusted. TLS is used for confidentiality, not for authenticity.
 - **Only `dnetd` fetches and verifies.** The tray never interprets a feed.
@@ -417,9 +426,9 @@ on the resulting value. That value is the proposed field merged over the value i
 | JWS over canonical JSON | Canonicalisation is a known source of verification bypasses. DSSE signs bytes. |
 | OpenPGP | Large parser attack surface for a signature over one file |
 
-### 10. Decisions required
+### 10. Decisions *(all approved as recommended, 2026-09-12)*
 
-| # | Decision | Recommendation |
+| # | Decision | Approved |
 |---|---|---|
 | D1 | Where the files are hosted | **GitHub Release assets on the project repository.** Static, with no server we operate. FR-015 concerns user traffic, not a signed metadata file. Offline import always remains available. |
 | D2 | Fetching over the physical network while disconnected | **Only when the user asks** (§7). Automatic direct fetches would add a standing exception to fail-closed. Never fetching would make the feed useless exactly when it is needed. |
@@ -459,6 +468,22 @@ on the resulting value. That value is the proposed field merged over the value i
 
 - **Profile catalogue.** `data-model.md` gains a feed-state entity and the bundled profile catalogue
   (ids and kinds) in T066.
+
+### Implementation record (T066, 2026-09-12)
+
+- **Crate.** `ed25519-dalek` **2.2.0**, using `VerifyingKey::verify_strict` and `is_weak`. 3.0.0
+  requires Rust 1.85, above the workspace MSRV of 1.83. `sha2` 0.10 computes digests, and `base64`
+  0.22 handles canonical standard encoding.
+- **Where things live.**
+  - `dnet_core::feed` holds the verification layer.
+  - `dnet_core::catalogue` holds the bundled ids; `dnetd` seeds its profiles from it.
+  - `dnet_core::transport_params` and `dnet_core::hostname` hold the bounds and validators that
+    the generators and the feed now share.
+- **Known-answer vector (FEED-15)** was cross-checked with OpenSSL 3.5.7.
+- **A serde gap found by FEED-09.** An internally tagged *unit* variant ignores unknown fields even
+  under `deny_unknown_fields`. `{"type":"salamander","min_packet_size":512}` was therefore
+  accepted until Salamander became an empty struct variant. Any future closed schema must use
+  struct variants.
 
 ## References
 

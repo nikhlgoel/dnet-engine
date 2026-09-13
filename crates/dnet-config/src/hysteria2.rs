@@ -22,37 +22,15 @@
 use serde::Serialize;
 
 use dnet_core::profile::BrutalOptIn;
+use dnet_core::transport_params::gecko_packet_sizes_valid;
+/// Shared with the profile feed, so feed values and generated values use one definition.
+pub use dnet_core::transport_params::{BbrProfile, GECKO_PACKET_SIZE_MAX, GECKO_PACKET_SIZE_MIN};
 
 use crate::brutal::brutal_bandwidth;
 use crate::endpoint_bypass::ActiveEndpointBypass;
 use crate::error::ConfigError;
 use crate::secret::Secret;
 use crate::tls::{OutboundTls, ServerTrust};
-
-/// Smallest Gecko on-wire packet size accepted (ADR-0002 §5.4).
-pub const GECKO_PACKET_SIZE_MIN: u16 = 256;
-/// Largest Gecko on-wire packet size accepted: below the common path MTU once IP and UDP
-/// headers are added (ADR-0002 §5.4).
-pub const GECKO_PACKET_SIZE_MAX: u16 = 1400;
-
-/// The BBR tuning profile used when Brutal is off.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum BbrProfile {
-    #[default]
-    Standard,
-    Conservative,
-    Aggressive,
-}
-
-impl BbrProfile {
-    fn as_str(self) -> &'static str {
-        match self {
-            BbrProfile::Standard => "standard",
-            BbrProfile::Conservative => "conservative",
-            BbrProfile::Aggressive => "aggressive",
-        }
-    }
-}
 
 /// Parameters the client may change alone (ADR-0002 §5.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,11 +184,7 @@ fn obfs_section(obfs: Hysteria2Obfs, password: &Secret) -> Result<ObfsSection, C
             min_packet_size,
             max_packet_size,
         } => {
-            let bounds = GECKO_PACKET_SIZE_MIN..=GECKO_PACKET_SIZE_MAX;
-            if !bounds.contains(&min_packet_size)
-                || !bounds.contains(&max_packet_size)
-                || min_packet_size > max_packet_size
-            {
+            if !gecko_packet_sizes_valid(min_packet_size, max_packet_size) {
                 return Err(ConfigError::InvalidGeckoPacketSize);
             }
             ("gecko", Some(min_packet_size), Some(max_packet_size))

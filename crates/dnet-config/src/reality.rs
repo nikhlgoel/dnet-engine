@@ -23,11 +23,12 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use serde::Serialize;
 
-use dnet_core::builtin_rules::CAPTIVE_PORTAL_PROBE_SUFFIXES;
+use dnet_core::hostname::validate_target_domain;
+/// Shared with the profile feed, so feed values and generated values use one definition.
+pub use dnet_core::transport_params::UtlsFingerprint;
 
 use crate::endpoint_bypass::ActiveEndpointBypass;
 use crate::error::ConfigError;
-use crate::hostname::is_dns_hostname;
 use crate::secret::Secret;
 use crate::tls::OutboundTls;
 
@@ -35,32 +36,6 @@ use crate::tls::OutboundTls;
 const SHORT_ID_MAX_BYTES: usize = 8;
 /// Canonical text form of a UUID: 8-4-4-4-12 hex digits.
 const UUID_TEXT_LEN: usize = 36;
-
-/// The browser ClientHello uTLS imitates. Limited to mainstream browsers (ADR-0002 §5.4): a
-/// rare fingerprint is itself distinctive.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum UtlsFingerprint {
-    #[default]
-    Chrome,
-    Firefox,
-    Edge,
-    Safari,
-    Ios,
-    Android,
-}
-
-impl UtlsFingerprint {
-    fn as_str(self) -> &'static str {
-        match self {
-            UtlsFingerprint::Chrome => "chrome",
-            UtlsFingerprint::Firefox => "firefox",
-            UtlsFingerprint::Edge => "edge",
-            UtlsFingerprint::Safari => "safari",
-            UtlsFingerprint::Ios => "ios",
-            UtlsFingerprint::Android => "android",
-        }
-    }
-}
 
 /// The VLESS sub-protocol. The endpoint's user entry must name the same one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,19 +63,9 @@ impl TargetDomain {
     /// Accept a multi-label DNS hostname that is not an IP literal, and not a name the
     /// built-in rules bypass around the tunnel (T031, ADR-0002 §5.4).
     pub fn parse(name: &str) -> Result<Self, ConfigError> {
-        let name = name.to_ascii_lowercase();
-        if !is_dns_hostname(&name) {
-            return Err(ConfigError::InvalidTargetDomain("not a DNS hostname"));
-        }
-        let bypassed = CAPTIVE_PORTAL_PROBE_SUFFIXES
-            .iter()
-            .any(|suffix| name == *suffix || name.ends_with(&format!(".{suffix}")));
-        if bypassed {
-            return Err(ConfigError::InvalidTargetDomain(
-                "covered by a built-in bypass rule",
-            ));
-        }
-        Ok(Self(name))
+        validate_target_domain(name)
+            .map(Self)
+            .map_err(ConfigError::InvalidTargetDomain)
     }
 
     pub fn as_str(&self) -> &str {

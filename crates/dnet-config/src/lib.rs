@@ -22,7 +22,6 @@ pub mod bind;
 pub mod brutal;
 pub mod endpoint_bypass;
 pub mod error;
-mod hostname;
 pub mod hysteria2;
 pub mod primary;
 pub mod reality;

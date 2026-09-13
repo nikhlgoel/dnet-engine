@@ -119,6 +119,41 @@ A named way of reaching an endpoint, with the parameters that shape how it appea
 | `Tier1` | Established connections survive an interface change | Preferred when multiple profiles are viable (FR-016b) |
 | `Tier2` | Access only; established connections break and re-establish | User warned before selection (FR-016b) |
 
+### 2.2 Bundled profile catalogue *(T066)*
+
+The profile ids and kinds a build defines (`dnet_core::catalogue::BUNDLED_PROFILES`):
+
+| Id | Kind |
+|---|---|
+| `awg-default` | `AmneziaWg` |
+| `hy2-default` | `Hysteria2` |
+| `reality-default` | `VlessReality` |
+
+**Invariants**
+- `dnetd` seeds its profiles from the catalogue.
+- The profile feed may address only these ids, each with its catalogue kind (ADR-0002 §5.3).
+- A new id arrives in an application release, never in a feed.
+
+### 2.3 FeedState *(T066, ADR-0002)*
+
+| Field | Type | Rules |
+|---|---|---|
+| `keys` | `Option<AcceptedKeys>` | Root-signed (2 of 3). Holds the envelope bytes and the parsed `KeysDocument`. |
+| `feed` | `Option<AppliedFeed>` | Signed by delegated keys. Holds the envelope bytes and the parsed `FeedDocument`. |
+| status | `FeedStatus` (derived) | `BundledDefaults \| Current \| Stale` |
+
+**Invariants**
+- **Only envelope bytes are persisted.** Parsed state is always rebuilt by `restore`, which checks
+  signatures and schema but not time.
+- **Version order never goes backwards.** `keys_version` is monotonic. A feed's
+  `(keys_version, sequence)` is strictly increasing. An equal version with a different digest is
+  equivocation and is refused.
+- **A feed requires an accepted keys document** and must name its `keys_version`.
+- **Rule R.** Accepting a new keys document drops an applied feed that no longer meets the signing
+  threshold under it. The bundled parameters then apply.
+- **An expired applied feed stays in effect** as `Stale`, because stale parameters leak nothing.
+  An expired document is never newly accepted.
+
 ---
 
 ## 3. NetworkPath

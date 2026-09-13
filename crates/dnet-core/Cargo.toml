@@ -9,7 +9,12 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+base64 = { workspace = true }
+# Profile feed signatures (ADR-0002 §2). 2.x: 3.0 requires Rust 1.85, above the workspace MSRV.
+ed25519-dalek = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }

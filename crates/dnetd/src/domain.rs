@@ -6,6 +6,7 @@
 //! them and will later be backed by persisted configuration.
 
 use dnet_core::builtin_rules::{builtin_rules, validate_builtin_rules_present};
+use dnet_core::catalogue::BUNDLED_PROFILES;
 use dnet_core::endpoint::Endpoint;
 use dnet_core::error::DomainError;
 use dnet_core::health::HealthState;
@@ -27,23 +28,14 @@ impl DomainState {
     /// A fresh store seeded with the three default profiles and the built-in bypass
     /// rules, and no endpoints (the user adds their own).
     pub fn seeded() -> Self {
-        let profiles = vec![
-            ConnectionProfile::new(
-                ProfileId::new("awg-default"),
-                ProfileKind::AmneziaWg,
-                ProfileParams::new(),
-            ),
-            ConnectionProfile::new(
-                ProfileId::new("hy2-default"),
-                ProfileKind::Hysteria2,
-                ProfileParams::new(),
-            ),
-            ConnectionProfile::new(
-                ProfileId::new("reality-default"),
-                ProfileKind::VlessReality,
-                ProfileParams::new(),
-            ),
-        ];
+        // From the bundled catalogue, which is also the set of ids the profile feed may
+        // address (ADR-0002 §5.3).
+        let profiles = BUNDLED_PROFILES
+            .iter()
+            .map(|entry| {
+                ConnectionProfile::new(ProfileId::new(entry.id), entry.kind, ProfileParams::new())
+            })
+            .collect();
         Self {
             endpoints: Vec::new(),
             profiles,

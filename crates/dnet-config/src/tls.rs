@@ -14,8 +14,8 @@ use base64::Engine;
 use serde::Serialize;
 
 use crate::error::ConfigError;
-use crate::hostname::is_dns_hostname;
 use crate::reality::{RealitySection, UtlsSection};
+use dnet_core::hostname::is_dns_hostname;
 
 /// How the client decides the endpoint's certificate is genuine.
 #[derive(Debug, Clone, PartialEq, Eq)]
