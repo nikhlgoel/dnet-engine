@@ -24,7 +24,7 @@ When documents disagree, this is the order of precedence:
 | Document | Status |
 |---|---|
 | [`DNet-Engine-Research.md`](DNet-Engine-Research.md) | Original blueprint. **Unverified** — its citation list does not support its claims. Context, not truth |
-| [`DNet-engine-research-v2.md`](DNet-engine-research-v2.md) | Updated record of the architectural pivots. Reviewed and consistent with the Constitution |
+| [`DNet-engine-research-v2.md`](DNet-engine-research-v2.md) | Updated record of the architectural pivots. Consistent with the Constitution, except its Tier 1 wording, which is corrected inline |
 | [`Research-Critique.md`](Research-Critique.md) | The critique that produced decisions D1–D10 and findings C1–C14. **Supersedes both** where they disagree |
 | `Steps.docx` | Original Spec Kit and harness workflow guide |
 

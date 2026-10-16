@@ -4,7 +4,7 @@
 
 **Input**: Feature specification from `/specs/001-network-resilience-client/spec.md`
 
-**Authority**: `.specify/memory/constitution.md` v1.1.0 and `docs/Research-Critique.md`
+**Authority**: `.specify/memory/constitution.md` v1.3.0 and `docs/Research-Critique.md`
 
 ## Summary
 
@@ -80,7 +80,7 @@ profiles. Rule sets up to ~10,000 entries. Roughly 8 Rust crates plus one Tauri 
 | Obligation | How the plan enforces it |
 |---|---|
 | **The primary transport core's name MUST NOT appear in DNet Engine's product name, branding, or marketing.** | The core is referenced in code and configuration only as `primary_core` / `PrimaryCore`. No crate, binary, module, UI string, installer component, or marketing asset carries its name. Attribution appears in `THIRD-PARTY-NOTICES.md` and the About screen only. A CI check (`xtask lint-branding`) greps UI strings, installer manifests, and the README for the vendor name and fails the build outside the allowlisted attribution files. |
-| **Wintun MUST be bundled as the vendor-signed prebuilt DLL only, never built from source.** | `vendor/wintun/` contains only the vendor's signed DLL and its permissive licence text. `xtask verify-vendor` asserts the Authenticode signature and rejects the presence of any Wintun source file. No Wintun source is fetched, vendored, or compiled at any point. |
+| **Wintun MUST be bundled as the vendor-signed prebuilt DLL only, never built from source.** | `vendor/wintun/` contains only the vendor's signed DLL and its licence text (proprietary, with a redistribution exception; ADR-0004 Finding 1). `xtask verify-vendor` asserts the Authenticode signature and rejects the presence of any Wintun source file. No Wintun source is fetched, vendored, or compiled at any point. |
 
 **Result: no violations. Complexity Tracking table is empty and omitted.**
 
@@ -161,10 +161,14 @@ behaviour inside the Phase 0 harness, not a review opinion.
 | 6 | `dnet-netstate` failover | No TCP reset on Tier 1 profiles when the harness kills the carrying interface | 3, 5 |
 | 7 | `dnet-tray`, first-run wizard | A non-technical user reaches a working tunnel unaided | 1, 2, 4, 5 |
 
+> **Amended 2026-09-11.** The live Phase 3 gate (SPIKE-R4, T055) was deferred by the project owner to
+> T098a in Phase 8, so later phases are no longer hard-blocked. Work that depends on the Profile A
+> transport path is provisional until T098a passes (`docs/Research-Critique.md` §6.6).
+
 **Open items from `docs/Research-Critique.md` §7 and where they land:**
-- **O5** (update-feed integrity) — blocks FR-007/FR-008 only. Scheduled inside Phase 4.
-- **O6** (ETW cost and coverage) — blocks FR-023 only. Spike in Phase 0, decision recorded before Phase 5.
-- **O7** (Gecko support in the pinned core) — blocks Phase 4 profile tuning only.
+- **O5** (update-feed integrity) — **closed 2026-09-12** by ADR-0002. Verification is built (T066); wiring is T066a–d.
+- **O6** (ETW cost and coverage) — **closed 2026-09-11**: SPIKE-O6 passed and FR-023 stays in scope (ADR-0001).
+- **O7** (Gecko support in the pinned core) — partly answered 2026-09-12: the pinned core accepts Gecko. The default layer and tuning remain open (T067).
 
 ## Complexity Tracking
 

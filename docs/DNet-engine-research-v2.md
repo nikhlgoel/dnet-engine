@@ -72,7 +72,7 @@ The platform implements distinct obfuscation protocols to bypass stateful firewa
 
 Version 1 focuses purely on **Seamless Failover**. If a user walks out of range of the hostel Wi-Fi, the system transitions to 5G mobile data based on two tiers:
 
-* **Tier 1 (UDP \- AmneziaWG/Hysteria):** Guaranteed connection survival. Connections seamlessly roam to the new interface without dropping established sockets.  
+* **Tier 1 (UDP \- AmneziaWG/Hysteria):** Design target: connections should roam to the new interface without dropping established sockets. *(Corrected 2026-10-16: this was written as a guarantee. By owner decision of 2026-09-12 a profile is Tier 1 only after HV-07 records survival at the pinned core versions, so every profile currently shows Tier 2. See `specs/001-network-resilience-client/data-model.md` §2.)*  
 * **Tier 2 (TCP \- VLESS):** Access-only. TCP fallbacks will drop active connections upon an interface switch, requiring a reconnection. The UI explicitly labels the active tier to manage user expectations.
 
 *(Note: Multi-Segment Download Acceleration and Sparse File disk writes have been entirely deferred to post-v1 to focus strictly on network access and resiliency).*

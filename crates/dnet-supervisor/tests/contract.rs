@@ -126,12 +126,12 @@ async fn sup_t2_undo_replay_runs_even_if_a_kill_fails() {
 
 // ---------------------------------------------------------------- SUP-T3
 
-/// Orphans are reaped before anything is spawned, and the adapter exists before the
-/// primary core (which binds to it) is spawned.
+/// Profile A: orphans are reaped before anything is spawned, and the adapter exists before
+/// the primary core (which binds to it) is spawned.
 #[tokio::test]
 async fn sup_t3_orphans_are_reaped_before_anything_is_spawned() {
     let rt = RecordingRuntime::default();
-    start_cores(&rt).await.unwrap();
+    start_cores(&rt, CoreBinding::AmneziaWgCore).await.unwrap();
     assert_eq!(
         rt.actions(),
         [
@@ -143,6 +143,16 @@ async fn sup_t3_orphans_are_reaped_before_anything_is_spawned() {
     );
     assert!(rt.position("reap_orphans") < rt.position("spawn_core:AmneziaWgCore"));
     assert!(rt.position("await_adapter") < rt.position("spawn_core:PrimaryCore"));
+}
+
+/// Hysteria 2 and VLESS+REALITY are served by the primary core alone. Starting the AmneziaWG
+/// core for them would leave an unused adapter and process, and awaiting an adapter that
+/// nothing will ever create would fail every connect.
+#[tokio::test]
+async fn sup_t3_a_primary_core_profile_never_starts_the_amneziawg_core() {
+    let rt = RecordingRuntime::default();
+    start_cores(&rt, CoreBinding::PrimaryCore).await.unwrap();
+    assert_eq!(rt.actions(), ["reap_orphans", "spawn_core:PrimaryCore"]);
 }
 
 // ---------------------------------------------------------------- SUP-T4

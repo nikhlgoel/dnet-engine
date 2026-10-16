@@ -1,11 +1,13 @@
 <#
 .SYNOPSIS
-    SPIKE-R4 / HV-13 (T055): Profile A carries traffic end-to-end with NO routing re-entry.
+    SPIKE-R4 / HV-13 (T055): one profile carries traffic end-to-end with NO routing re-entry.
 
 .DESCRIPTION
-    Runs the real Profile A bring-up twice against a harness endpoint reached through the
-    physical default gateway, counting UDP packets to endpoint:51820 per network adapter
-    with pktmon:
+    Runs the real bring-up of the chosen -Transport (A = AmneziaWG, the default; Hy2 =
+    Hysteria 2) twice against a harness endpoint reached through the physical default
+    gateway, counting UDP packets to the endpoint's profile port per network adapter with
+    pktmon. The loop guard the control withholds is the endpoint host route for A and the
+    core's `auto_detect_interface` for Hy2:
 
       PASS    - production sequence. Expected: transfer succeeds, packets to the endpoint
                 appear ONLY on the physical adapter, ZERO on the tunnel adapters.
@@ -16,8 +18,10 @@
     Verdict (exit code): 0 PASS | 1 FAIL | 2 setup error | 3 VACUOUS topology |
                          4 INVALID control | 5 INCONCLUSIVE instrument
 
-    Must run in an elevated PowerShell. Never modifies routing outside the run; verifies
-    restoration afterwards.
+    Must run as LocalSystem, not merely elevated (BUG-007): the AmneziaWG core creates its
+    control pipe with SYSTEM as owner, which an Administrator shell cannot assign. Build the
+    runner first as yourself, then launch this script as SYSTEM with -SkipBuild. See README.md
+    section 2. Never modifies routing outside the run; verifies restoration afterwards.
 
 .PARAMETER EndpointIp
     Public IP of the host running the harness endpoint. Must NOT be loopback or on-link.
@@ -32,7 +36,11 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)] [string] $EndpointIp,
-    [string] $ParamsFile = (Join-Path $PSScriptRoot '..\harness\.state\awg-client.json'),
+    # Which transport to measure: A (AmneziaWG, the default) or Hy2 (Hysteria 2). Not named
+    # -Profile: that would collide with PowerShell's automatic $PROFILE variable.
+    [ValidateSet('A', 'Hy2')] [string] $Transport = 'A',
+    # Default: awg-client.json for A, hy2-client.json for Hy2, from the harness state directory.
+    [string] $ParamsFile,
     [long]   $Bytes = 20000000,
     [string] $AltGateway,
     [switch] $SkipBuild
@@ -58,18 +66,26 @@ if (-not $me.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Stop-Spike 'Run this from an elevated PowerShell (Run as Administrator).' 2
 }
 
+$isHy2 = $Transport -eq 'Hy2'
 $staged = @{
-    Awg     = Join-Path $Vendor 'amneziawg-go\amneziawg-go.exe'
     Driver  = Join-Path $Vendor 'wintun\wintun.dll'
     Primary = Join-Path $Vendor 'primary-core\primary-core.exe'
 }
+# Hysteria 2 runs the primary core alone; only AmneziaWG needs its own core.
+if (-not $isHy2) { $staged.Awg = Join-Path $Vendor 'amneziawg-go\amneziawg-go.exe' }
 foreach ($f in $staged.Values) {
     if (-not (Test-Path $f)) { Stop-Spike "Missing $f. Run: cargo run -p xtask -- fetch-vendor" 2 }
 }
+$paramsName = if ($isHy2) { 'hy2-client.json' } else { 'awg-client.json' }
+if (-not $ParamsFile) { $ParamsFile = Join-Path $PSScriptRoot "..\harness\.state\$paramsName" }
 if (-not (Test-Path $ParamsFile)) {
-    Stop-Spike "Missing $ParamsFile. Copy awg-client.json from the endpoint host (see README)." 2
+    Stop-Spike "Missing $ParamsFile. Copy $paramsName from the endpoint host (see README)." 2
 }
 $ParamsFile = (Resolve-Path $ParamsFile).Path
+# Hysteria 2 is reached on the port its server reports; AmneziaWG keeps its fixed port.
+if ($isHy2) { $Port = [int](Get-Content $ParamsFile -Raw | ConvertFrom-Json).server_port }
+# The loop guard the control withholds, named for the summary.
+$guardName = if ($isHy2) { 'auto_detect_interface' } else { 'endpoint host route' }
 
 # Vacuity guard: loopback/on-link endpoints never enter the TUN, so a loop cannot form.
 $addr = [System.Net.IPAddress]::Parse($EndpointIp)
@@ -152,21 +168,26 @@ function Invoke-Mode([string]$Mode) {
     $tag = $Mode.ToLowerInvariant()
     $run = Join-Path $Results $tag
     $awgDir = Join-Path $run 'awg'; $priDir = Join-Path $run 'primary'
-    New-Item -ItemType Directory -Force $awgDir, $priDir | Out-Null
+    New-Item -ItemType Directory -Force $priDir | Out-Null
     # Private per-run copies: orphan reaping matches these exact paths. The adapter
     # driver DLL is the signed prebuilt, copied unmodified beside EACH core that loads it.
     # Both cores load it from their own directory; neither carries an embedded copy
     # (ADR-0004 Finding 4), and the primary core refuses a DLL that fails its digest pin.
-    Copy-Item $staged.Awg $awgDir
-    Copy-Item $staged.Driver $awgDir
+    # Hysteria 2 stages the primary core only: no AmneziaWG core runs for it.
+    if (-not $isHy2) {
+        New-Item -ItemType Directory -Force $awgDir | Out-Null
+        Copy-Item $staged.Awg $awgDir
+        Copy-Item $staged.Driver $awgDir
+    }
     Copy-Item $staged.Primary $priDir
     Copy-Item $staged.Driver $priDir
 
     $report = Join-Path $run 'runner-report.json'
-    $runnerArgs = @('--mode', $tag, '--params', $ParamsFile, '--endpoint', $EndpointIp,
-        '--awg-exe', (Join-Path $awgDir 'amneziawg-go.exe'),
+    $runnerArgs = @('--mode', $tag, '--profile', $(if ($isHy2) { 'hy2' } else { 'a' }),
+        '--params', $ParamsFile, '--endpoint', $EndpointIp,
         '--primary-exe', (Join-Path $priDir 'primary-core.exe'),
         '--run-dir', $run, '--report', $report, '--bytes', "$Bytes")
+    if (-not $isHy2) { $runnerArgs += @('--awg-exe', (Join-Path $awgDir 'amneziawg-go.exe')) }
     if ($AltGateway -and $tag -eq 'pass') { $runnerArgs += @('--alt-gateway', $AltGateway) }
     $quoted = $runnerArgs | ForEach-Object { '"' + $_ + '"' }
 
@@ -235,10 +256,10 @@ if ($pass.Error -or $control.Error) {
 } elseif (-not ($pass.Physical.Hit -and $pass.Tunnel.Hit -and $control.Tunnel.Hit)) {
     $verdict = 'INCONCLUSIVE'
     $reasons += 'pktmon output did not expose the physical and tunnel adapters; inspect counters.txt / components.txt'
-} elseif (-not ($control.Tunnel.Sum -gt 0 -and -not $control.Runner.host_route_installed)) {
+} elseif (-not ($control.Tunnel.Sum -gt 0 -and -not $control.Runner.loop_guard_in_force)) {
     $verdict = 'INVALID'
-    $reasons += "control withheld the host route but showed no re-entry (tunnel packets=$($control.Tunnel.Sum)); the measurement cannot detect a loop"
-} elseif ((& $runnerOk $pass) -and $pass.Runner.transfer.ok -and $pass.Runner.host_route_installed `
+    $reasons += "control withheld the loop guard ($guardName) but showed no re-entry (tunnel packets=$($control.Tunnel.Sum)); the measurement cannot detect a loop"
+} elseif ((& $runnerOk $pass) -and $pass.Runner.transfer.ok -and $pass.Runner.loop_guard_in_force `
         -and $pass.Physical.Sum -gt 0 -and $pass.Tunnel.Sum -eq 0 -and $residue.Count -eq 0) {
     $verdict = 'PASS'
 } else {
@@ -246,7 +267,7 @@ if ($pass.Error -or $control.Error) {
     if (-not $pass.Runner.transfer.ok) { $reasons += "transfer failed: $($pass.Runner.transfer.error)" }
     if ($pass.Tunnel.Sum -gt 0) { $reasons += "RE-ENTRY: $($pass.Tunnel.Sum) endpoint packets on a tunnel adapter" }
     if ($pass.Physical.Sum -eq 0) { $reasons += 'no endpoint packets on the physical adapter' }
-    if (-not $pass.Runner.host_route_installed) { $reasons += 'host route was not installed' }
+    if (-not $pass.Runner.loop_guard_in_force) { $reasons += "the loop guard ($guardName) was not in force" }
     if ($pass.Runner.error) { $reasons += "runner: $($pass.Runner.error)" }
     $reasons += $residue
 }
@@ -256,13 +277,13 @@ $pathChange = if ($AltGateway) {
 } else { 'SKIPPED (no -AltGateway: single physical path)' }
 
 $summary = @"
-# SPIKE-R4 / HV-13 result: $verdict
+# SPIKE-R4 / HV-13 result: $verdict (transport: $Transport)
 
-| | PASS run | CONTROL run (host route withheld) |
+| | PASS run | CONTROL run ($guardName withheld) |
 |---|---|---|
 | transfer ok | $($pass.Runner.transfer.ok) | $($control.Runner.transfer.ok) |
 | throughput (Mbit/s) | $([math]::Round([double]$pass.Runner.transfer.mbps, 2)) | $([math]::Round([double]$control.Runner.transfer.mbps, 2)) |
-| host route installed | $($pass.Runner.host_route_installed) | $($control.Runner.host_route_installed) |
+| loop guard in force | $($pass.Runner.loop_guard_in_force) | $($control.Runner.loop_guard_in_force) |
 | endpoint:$Port packets, physical | $($pass.Physical.Sum) | $($control.Physical.Sum) |
 | endpoint:$Port packets, tunnel adapters | **$($pass.Tunnel.Sum)** | **$($control.Tunnel.Sum)** |
 | teardown ok | $($pass.Runner.teardown_ok) | $($control.Runner.teardown_ok) |

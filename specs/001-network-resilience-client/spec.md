@@ -479,7 +479,8 @@ solution space this specification is written against.
   damping thresholds, and log retention. These are tuned during implementation against the simulated
   network rather than specified here.
 - "Seamless" failover in SC-005 is measured as traffic resuming, which is a weaker claim than
-  established connections surviving. See Q3 below — this needs resolution before planning.
+  established connections surviving. FR-016a and FR-016b resolve this with two documented failover
+  tiers, and the tier shown is set by measurement.
 
 **Dependencies.**
 
@@ -496,11 +497,12 @@ solution space this specification is written against.
 - Protocol-level claims inherited from the original research are **verified and closed** (open item
   O2, see `docs/Research-Critique.md` §6.2). One claim was refuted and is reflected above.
 
-**Remaining open items** (tracked in `docs/Research-Critique.md` §7; none blocks planning):
-O5 — integrity model for the connection-method update feed, blocking FR-007/FR-008 only.
-O6 — cost and coverage of connect-time application identification, blocking FR-023 only.
-O7 — whether the pinned transport core version implements the newer of the two obfuscation layers,
-blocking method tuning only.
+**Open items** (tracked in `docs/Research-Critique.md` §7):
+O5 — **closed 2026-09-12.** The connection-method update feed is signed and carries parameters only
+(ADR-0002).
+O6 — **closed 2026-09-11.** SPIKE-O6 passed, so FR-023 stays in scope (ADR-0001).
+O7 — partly answered 2026-09-12: the pinned core accepts the newer obfuscation layer (Gecko). The
+choice of default layer and the tuning remain open (T067), blocking method tuning only.
 
 ---
 

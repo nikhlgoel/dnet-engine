@@ -1,0 +1,3 @@
+[alias]
+# `cargo xtask <task>` runs the build tooling in crates/xtask. CI and the docs use this form.
+xtask = "run --package xtask --"

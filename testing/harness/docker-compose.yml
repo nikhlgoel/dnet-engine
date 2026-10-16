@@ -40,8 +40,12 @@ services:
       - "51820:51820/udp"   # Profile A - AmneziaWG
       - "44443:44443/udp"   # Profile B - Hysteria 2
       - "8443:8443/tcp"     # Profile C - VLESS+REALITY
-      - "8080:8080/tcp"     # plain HTTP origin, for baseline comparison
-      - "9090:9090/tcp"     # harness control + ground-truth reporting
+      # The next two are only ever used from this host, so they are published on loopback. The
+      # control port runs a report script and must never be reachable from a network. The profile
+      # ports above stay on all interfaces because the off-LAN SPIKE-R4 run needs them; the cloud
+      # firewall rule in testing/spike-r4/README.md is what limits them to the client.
+      - "127.0.0.1:8080:8080/tcp"   # plain HTTP origin, for baseline comparison
+      - "127.0.0.1:9090:9090/tcp"   # harness control + ground-truth reporting
     volumes:
       - ./conditions:/opt/conditions:ro
       - ./.state:/opt/state

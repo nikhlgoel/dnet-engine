@@ -83,8 +83,12 @@ property, not a build convenience.
 | Attack-surface reduction | Minimal build tags exclude ~16 unused protocols from the primary core |
 | No extraction | Wintun taken only from the official distribution, never from another product |
 
-**Open item O5**: the transport-profile update feed can push routing changes, so it is a
-supply-chain surface in its own right and **must be signed**. Blocks FR-007/FR-008.
+**Profile update feed (O5, closed 2026-09-12)**: the feed can change transport parameters, so it is
+a supply-chain surface in its own right and is signed: Ed25519 in DSSE envelopes, with 2-of-3
+offline root keys delegating short-lived signing keys. Its schema is closed and carries parameters
+only, never routing rules, DNS, endpoints or credentials
+([ADR-0002](../adr/0002-profile-update-feed.md)). The verification layer exists (T066); fetching,
+persistence and the root key ceremony (T066a–d) must land before the feed ships.
 
 ---
 
@@ -113,7 +117,7 @@ decisions based on these claims.
 | Local networks bypassed | Printers and intranet stay reachable without user configuration |
 | Diagnostics exclude destinations | Browsing history is not collected by default |
 | Credential deleted after provisioning | Defaults to yes |
-| Tier 1 profile preferred | Stronger failover chosen unless the user consents otherwise |
+| A measured Tier 1 profile preferred | Stronger failover is chosen unless the user consents otherwise. Tier is set by measurement (HV-07, T085) and none is measured yet, so every profile currently shows Tier 2 |
 | No hardcoded endpoints or keys | Nothing shipped is a shared secret |
 
 ---

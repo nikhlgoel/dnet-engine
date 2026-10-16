@@ -1,6 +1,6 @@
 # Tech Stack
 
-**Status**: Authoritative for v1 · **Governed by**: [`.specify/memory/constitution.md`](../../.specify/memory/constitution.md) v1.2.0
+**Status**: Authoritative for v1 · **Governed by**: [`.specify/memory/constitution.md`](../../.specify/memory/constitution.md) v1.3.0
 
 Deviating from anything here requires a recorded ADR. "It would be cleaner another way" is not a reason.
 
@@ -51,8 +51,8 @@ makes the 80% coverage floor achievable in a system that is otherwise integratio
 
 | Profile | Transport | Carrier | Failover tier | Served by |
 |---|---|---|---|---|
-| **A** | AmneziaWG | UDP | Tier 1 — connections survive | Secondary core |
-| **B** | Hysteria 2 (Salamander, optionally Gecko) | UDP | Tier 1 — QUIC migration | Primary core |
+| **A** | AmneziaWG | UDP | Tier 1 candidate; shown as Tier 2 until HV-07 measures survival | Secondary core |
+| **B** | Hysteria 2 (Salamander, optionally Gecko) | UDP | Tier 1 candidate (QUIC migration); shown as Tier 2 until HV-07 measures survival | Primary core |
 | **C** | VLESS + REALITY | **TCP/TLS** | Tier 2 — access only | Primary core |
 
 A TCP-carrier profile is **mandatory**: a UDP-only product is dead on networks that block UDP.
@@ -84,7 +84,7 @@ Fetched at build time, never committed. Licence texts and `BUILD-PROVENANCE.md` 
 
 | Artifact | Source | Size |
 |---|---|---|
-| Primary core | Built from pinned commit, tags `with_quic,with_utls,with_clash_api,with_gvisor` | 41.63 MB |
+| Primary core | Built from pinned commit, tags `with_quic,with_utls,with_clash_api,with_gvisor,with_external_windivert`, DLL loader patched (ADR-0004 Finding 4) | 41.63 MB (measured before that remediation; re-measure at T115) |
 | `amneziawg-go` | Built from pinned commit, default tags | 3.36 MB |
 | Wintun | Signed prebuilt DLL, SHA-256 verified | 0.41 MB |
 

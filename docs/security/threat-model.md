@@ -26,7 +26,7 @@ Method: STRIDE against the trust boundaries in
 | **TB3** | Client ⇄ endpoint | Obfuscated transport over a hostile network |
 | **TB4** | Client ⇄ cloud provider API | HTTPS with a scoped credential |
 | **TB5** | Build ⇄ upstream sources | Pinned fetch and verified build |
-| **TB6** | Client ⇄ profile update feed | **Unresolved — open item O5** |
+| **TB6** | Client ⇄ profile update feed | Signed feed; design accepted (ADR-0002, O5 closed 2026-09-12); **ingestion not yet wired — T066a–d** |
 
 ---
 
@@ -90,10 +90,12 @@ alternative is our own unaudited crypto implementation with a far worse expected
 
 | ID | STRIDE | Threat | Mitigation | Residual |
 |---|---|---|---|---|
-| T6.1 | Tampering | Malicious feed pushes routing that exfiltrates traffic | **UNRESOLVED — open item O5.** Must be signed before FR-007/FR-008 ship | **BLOCKING** |
+| T6.1 | Tampering | Malicious feed pushes parameters that weaken obfuscation, or routing that exfiltrates traffic | Signed feed per ADR-0002: Ed25519 in DSSE envelopes, 2-of-3 offline root keys delegating short-lived signing keys, and rollback, freeze and equivocation defences. The closed schema carries parameters only, so a compromised signing key can weaken obfuscation but cannot add routing, DNS, endpoint or credential changes. Parameters the endpoint must also know are staged for re-provisioning, never applied alone | Low once T066a–d and the root key ceremony land. **BLOCKING until then: the feed must not ship** |
 
-**T6.1 is the most dangerous unresolved threat in the system.** A feed able to change routing rules
-is equivalent to remote code execution for traffic. The feature does not ship until O5 is closed.
+**T6.1 was the most dangerous threat in the system, and its design is now closed.** A feed able to
+change routing rules would be equivalent to remote code execution for traffic, so ADR-0002 gives the
+feed no way to carry them. The feature still does not ship until fetching, persistence and the root
+key ceremony (T066a–d) exist.
 
 ---
 

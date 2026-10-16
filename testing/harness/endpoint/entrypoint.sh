@@ -21,6 +21,15 @@ else
   echo "[endpoint] /dev/net/tun absent: Profile A server NOT started"
 fi
 
+# Profile B (Hysteria 2) and Profile C (VLESS+REALITY) servers. They need no TUN device, only
+# the primary core binary.
+if [ -x /usr/local/bin/primary-core ]; then
+  /opt/hy2-server.sh
+  /opt/reality-server.sh
+else
+  echo "[endpoint] primary-core absent: Profile B and C servers NOT started"
+fi
+
 echo "[endpoint] ready"
 touch "$STATE/endpoint-ready"
 tail -f /dev/null

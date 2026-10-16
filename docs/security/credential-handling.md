@@ -100,7 +100,7 @@ avoid — so a partial write is a security failure, not merely a configuration b
 | Cloud credential suspected compromised | Revoke in the provider console (one step, documented at first use). No product action needed |
 | Endpoint key compromised | Re-run bootstrap; keys regenerate server-side |
 | Endpoint address blocklisted | Not a compromise — health rotation moves to another endpoint |
-| A profile's obfuscation is fingerprinted | Not a key compromise — update the profile via the feed (blocked on O5) |
+| A profile's obfuscation is fingerprinted | Not a key compromise — update the profile via the feed (design accepted in ADR-0002; ingestion not yet wired, T066a–d) |
 
 ---
 
