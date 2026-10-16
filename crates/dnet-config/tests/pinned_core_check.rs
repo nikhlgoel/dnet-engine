@@ -35,7 +35,8 @@ use dnet_core::profile::{
 fn pinned_core() -> Option<PathBuf> {
     let exe = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../vendor/primary-core/primary-core.exe");
-    exe.is_file().then_some(exe)
+    // The vendored binary is a Windows executable; on any other host it cannot run, so skip.
+    (cfg!(windows) && exe.is_file()).then_some(exe)
 }
 
 /// Generate for `profile` against `endpoint` and assert the pinned core accepts the result.
@@ -214,6 +215,86 @@ fn reality_configs_are_accepted_by_the_pinned_core() {
                 endpoint,
                 443,
                 Some(PrimaryTransport::VlessReality(&transport)),
+            );
+        }
+    }
+}
+
+/// A probe configuration (loopback SOCKS in, one profile out, no TUN) must also be accepted by
+/// the pinned core, for an IP and for a hostname endpoint.
+#[test]
+fn probe_configs_are_accepted_by_the_pinned_core() {
+    use dnet_config::probe::{generate_probe_config, to_json as probe_json, ProbeInput, SocksAuth};
+
+    let Some(core) = pinned_core() else {
+        eprintln!("SKIPPED: vendor/primary-core not fetched (cargo run -p xtask -- fetch-vendor)");
+        return;
+    };
+    let hy2_transport = hysteria2(
+        Hysteria2Obfs::Salamander,
+        ServerTrust::PinnedPublicKey {
+            server_name: "edge.example.net".into(),
+            spki_sha256: [7; 32],
+        },
+    );
+    let reality_transport = RealityTransport {
+        settings: RealitySettings {
+            client: RealityClientParams {
+                utls_fingerprint: UtlsFingerprint::Chrome,
+            },
+            endpoint: RealityEndpointParams {
+                target_domain: TargetDomain::parse("www.example.com").unwrap(),
+                public_key: RealityPublicKey::parse("jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0")
+                    .unwrap(),
+                flow: VlessFlow::Vision,
+            },
+        },
+        credentials: RealityCredentials {
+            uuid: Secret::new("bf000d23-0752-40b4-affe-68f7707a9661"),
+            short_id: Secret::new("0123456789abcdef"),
+        },
+    };
+
+    for (label, kind, transport) in [
+        (
+            "Hysteria 2",
+            ProfileKind::Hysteria2,
+            PrimaryTransport::Hysteria2(&hy2_transport),
+        ),
+        (
+            "VLESS+REALITY",
+            ProfileKind::VlessReality,
+            PrimaryTransport::VlessReality(&reality_transport),
+        ),
+    ] {
+        let profile = ConnectionProfile::new(ProfileId::new("p"), kind, ProfileParams::new());
+        for endpoint in ["203.0.113.9", "edge.example.net"] {
+            let addr = EndpointAddress::new(endpoint, 8443).unwrap();
+            let config = generate_probe_config(ProbeInput {
+                socks_auth: &SocksAuth {
+                    username: "probe-user".into(),
+                    password: Secret::new("probe-pass"),
+                },
+                profile: &profile,
+                endpoint: &ActiveEndpointBypass::new(&addr),
+                transport: Some(transport),
+                socks_port: 51234,
+            })
+            .unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("probe.json");
+            std::fs::write(&path, probe_json(&config)).unwrap();
+            let out = Command::new(&core)
+                .args(["check", "-c"])
+                .arg(&path)
+                .arg("--disable-color")
+                .output()
+                .expect("running the pinned core");
+            assert!(
+                out.status.success(),
+                "pinned core rejected the {label} probe config (endpoint {endpoint}):\n{}\n{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
             );
         }
     }

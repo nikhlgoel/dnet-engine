@@ -9,6 +9,7 @@ members = [
     "crates/dnet-etw",
     "crates/dnet-netstate",
     "crates/dnet-provision",
+    "crates/dnet-probe",
     "crates/xtask",
 ]
 
@@ -29,6 +30,7 @@ dnet-config = { path = "crates/dnet-config" }
 dnet-etw = { path = "crates/dnet-etw" }
 dnet-netstate = { path = "crates/dnet-netstate" }
 dnet-provision = { path = "crates/dnet-provision" }
+dnet-probe = { path = "crates/dnet-probe" }
 
 # Async runtime
 tokio = { version = "1.42", default-features = false }

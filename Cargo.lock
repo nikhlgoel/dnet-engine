@@ -296,6 +296,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "dnet-probe"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dnet-config",
+ "dnet-core",
+ "dnet-supervisor",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "dnet-provision"
 version = "0.1.0"
 dependencies = [

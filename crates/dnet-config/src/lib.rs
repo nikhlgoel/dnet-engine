@@ -24,6 +24,7 @@ pub mod endpoint_bypass;
 pub mod error;
 pub mod hysteria2;
 pub mod primary;
+pub mod probe;
 pub mod reality;
 pub mod secret;
 pub mod tls;

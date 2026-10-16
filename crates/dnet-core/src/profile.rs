@@ -59,6 +59,12 @@ impl ProfileKind {
         }
     }
 
+    /// Whether a probe can try this kind through a loopback proxy. AmneziaWG is a layer 3 tunnel
+    /// that needs an adapter of its own, so it can only be tried by actually bringing it up.
+    pub fn proxy_probeable(&self) -> bool {
+        !matches!(self, ProfileKind::AmneziaWg)
+    }
+
     /// Which supervised process serves this kind.
     pub fn core_binding(&self) -> CoreBinding {
         match self {
@@ -244,6 +250,12 @@ impl ConnectionProfile {
         &self.viability
     }
 
+    /// Forget what was measured on an earlier network: a new connection attempt starts from
+    /// `Untested`, because a profile that was blocked on one network may work on the next.
+    pub fn reset_viability(&mut self) {
+        self.viability = Viability::Untested;
+    }
+
     pub fn mark_working(&mut self, measured_at: Instant) {
         self.viability = Viability::Working { measured_at };
     }
@@ -418,6 +430,24 @@ mod tests {
         p.enable_brutal(BW, current_ack()).unwrap();
         p.disable_brutal();
         assert!(p.brutal().is_none());
+    }
+
+    #[test]
+    fn only_amneziawg_cannot_be_probed_through_a_proxy() {
+        assert!(!ProfileKind::AmneziaWg.proxy_probeable());
+        assert!(ProfileKind::Hysteria2.proxy_probeable());
+        assert!(ProfileKind::VlessReality.proxy_probeable());
+    }
+
+    #[test]
+    fn resetting_viability_returns_a_profile_to_untested() {
+        let mut p = profile(ProfileKind::Hysteria2);
+        p.mark_blocked(Instant::now(), "reset by peer");
+        p.reset_viability();
+        assert_eq!(p.viability(), &Viability::Untested);
+        p.mark_working(Instant::now());
+        p.reset_viability();
+        assert_eq!(p.viability(), &Viability::Untested);
     }
 
     #[test]

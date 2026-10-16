@@ -1,12 +1,14 @@
 # DNet Engine — Research Critique & Decision Record
 
-**Status:** Specification phase. No implementation started.
+**Status:** Decision and verification record, written in the specification phase. Implementation is
+now under way; current delivery status lives in `specs/001-network-resilience-client/tasks.md`.
+Reconciled with that status on 2026-10-16 (§6.7).
 **Date:** 2026-09-10
 **Reviews:** `docs/DNet-Engine-Research.md` (unverified source blueprint), `docs/Steps.docx` (Spec Kit + Docker test-rig guide)
 
 This document records (1) a critical review of the source research, (2) the decisions taken to
 resolve its open questions, and (3) the corrections applied to those decisions. It is the input to
-`.specify/memory/constitution.md` and the forthcoming `/speckit.specify` run.
+`.specify/memory/constitution.md` and the Spec Kit run that produced `specs/001-network-resilience-client/`.
 
 ---
 
@@ -130,8 +132,8 @@ Assume UDP faces aggressive throttling, random drops, or outright blocking. Ship
 
 | Profile | Transport | Defeats | Failover tier | Notes |
 |---|---|---|---|---|
-| **A** | AmneziaWG | WireGuard header signature, fixed-MTU distribution | Tier 1 (roams) | UDP. Magic-byte randomization plus junk-packet bursts. **Provided by a second supervised process, `amneziawg-go` — not by sing-box. See §6.2 / C14.** |
-| **B** | Hysteria 2 (Salamander, optionally Gecko) | QUIC payload and handshake shape | Tier 1 (QUIC migration) | UDP. **Brutal CC is opt-in only, not default (C5); BBR is the default** — achieved by omitting the `bandwidth` section (§6.2). |
+| **A** | AmneziaWG | WireGuard header signature, fixed-MTU distribution | Tier 1 *design target* (roams); label follows HV-07 measurement, T027/T085 | UDP. Magic-byte randomization plus junk-packet bursts. **Provided by a second supervised process, `amneziawg-go` — not by sing-box. See §6.2 / C14.** |
+| **B** | Hysteria 2 (Salamander, optionally Gecko) | QUIC payload and handshake shape | Tier 1 *design target* (QUIC migration); label follows HV-07 measurement, T027/T085 | UDP. **Brutal CC is opt-in only, not default (C5); BBR is the default** — achieved by omitting the `bandwidth` section (§6.2). |
 | **C** | **VLESS + REALITY** | Total UDP blocking | **Tier 2 (access only)** | **TCP/TLS.** Resolves C9. Established connections break on interface change. Carries a known uTLS fingerprinting risk (§6.2). |
 
 **Corrections on Profile C:** REALITY borrows a real third-party TLS handshake, so it requires a
@@ -430,7 +432,29 @@ with zero throughput.
 
 **Risk accepted.** Work in Phases 4–6 of §5 that depends on the Profile A transport path is
 provisional. If T098a fails, §R4 (and possibly D8's dual-core arrangement) is revisited before that
-work is accepted. Gate-independent work is sequenced first. This entry closes when T098a passes.
+work is accepted. Gate-independent work is sequenced first. This entry closes when T098a passes. See also BUG-007: the one recorded run (2026-09-11) failed earlier, because the AmneziaWG core cannot create its UAPI pipe from an Administrator shell, so the live run must be made as LocalSystem (`docs/bugs/bug-007-spike-r4-uapi-pipe-owner.md`).
+
+### 6.7 Documentation reconciled with delivery status *(2026-10-16)*
+
+A read-through found statements that had fallen behind the code and `tasks.md`. Documentation only;
+no requirement, decision or code changed. Corrected:
+
+- This document's own header no longer says "no implementation started".
+- The threat model, security design and credential handling no longer call the update feed
+  unresolved or blocked on O5. The design is accepted (ADR-0002); wiring is T066a–d, and the feed
+  still must not ship before the root key ceremony (T066d).
+- Tier 1 is described as a **design target** wherever the docs had it as a guarantee (§4.3 table,
+  `DNet-engine-research-v2.md`, `tech-stack.md`, `security-design.md`). By the 2026-09-12 owner
+  decision it is set by measurement, and every profile shows Tier 2 until T085.
+- `plan.md` and `tech-stack.md` cite constitution v1.3.0; `plan.md` no longer calls the Wintun
+  licence permissive (ADR-0004 Finding 1); `tech-stack.md` lists the `with_external_windivert` tag.
+- O6 and O7 in §7, `plan.md` and `spec.md` carry their current status, and `spec.md` no longer
+  points at a question (Q3) that does not exist.
+
+Changed later the same day, each as its own decision: the CI coverage step now also covers
+`dnet-config` and `dnet-probe` (measured at 95% across the four crates), and `.cargo/config.toml`
+defines the `cargo xtask` alias that CI and the docs already assumed. Still **not** changed: the
+`harness` CI job stays disabled, and no CI run has been inspected.
 
 ## 7. Remaining Open Items
 
@@ -439,10 +463,15 @@ work is accepted. Gate-independent work is sequenced first. This entry closes wh
   update feature, not the rest of v1.*
   **CLOSED 2026-09-12.** `docs/adr/0002-profile-update-feed.md` is Accepted, with owner decisions
   D1–D4 approved. The feed is signed, carries parameters only, and has no routing content.
-  Ingestion is T066.
+  The verification layer is built (T066); fetching, persistence and the root key ceremony are
+  T066a–d.
 - **O6** Confirm ETW connect-time PID correlation is achievable at acceptable CPU cost. The event
   schema is now verified (6.2); what remains is the **cost and coverage** measurement. Prototype in
   Phase 0 before committing to D5's per-process path. *Blocking the per-process routing feature only.*
+  **CLOSED 2026-09-11.** SPIKE-O6 passed: remote coverage 100%, cost 0.000%. FR-023 is retained.
+  See `docs/adr/0001-etw-attribution.md` and BUG-006.
 - **O7 (NEW)** Confirm the pinned sing-box version's Hysteria 2 implementation supports Gecko, not
   only Salamander. Gecko is comparatively recent; the core may lag the protocol specification.
   *Blocking Phase 4 profile tuning, not Phase 3.*
+  **Partly answered 2026-09-12 (T056).** The pinned core accepts Gecko, and its own `check` accepts
+  a generated Gecko config. Still open (T067): ADR-0003 choosing the default layer, and tuning.

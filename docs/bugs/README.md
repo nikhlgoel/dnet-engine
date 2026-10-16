@@ -43,6 +43,8 @@ What stops it recurring: a test, a check, a documented constraint.
 | [BUG-004](bug-004-harness-interface-naming.md) | Container interface name assumed, then detected from shared state | Medium | Fixed |
 | [BUG-005](bug-005-powershell-argument-and-stderr.md) | Two PowerShell traps produced false failures | Medium | Fixed |
 | [BUG-006](bug-006-spike-o6-instrument-verdict.md) | SPIKE-O6 instrument printed a verdict it could not support | **High** | Fixed (instrument v2) |
+| [BUG-007](bug-007-spike-r4-uapi-pipe-owner.md) | SPIKE-R4 cannot start the AmneziaWG core from an Administrator shell | **High** | Open |
+| [BUG-008](bug-008-probe-core-network-changed.md) | A healthy profile was reported blocked half the time, right after its probe core started | **High** | Fixed (bounded retry; mechanism inferred) |
 
 ## Pattern
 
@@ -53,6 +55,10 @@ caught by running the test suite, because the suite was green throughout. All fi
 **BUG-006 is the inverse:** a *failing* result that proved nothing. The gate could only
 answer PASS or FAIL, so an instrument defect came out as a verdict that nearly cut FR-023.
 Gates must be able to return INVALID.
+
+**BUG-007 is a third kind:** the gate failed loudly and honestly, but its cause stayed in a
+gitignored log, so the written reasons for deferring it pointed elsewhere. When a gate fails, put the
+cause where the next reader will look.
 
 That is the reasoning behind Constitution Principle III's exit gate — a harness that passes
 everything proves nothing — and behind the negative test on `lint-branding`. Where a check exists to

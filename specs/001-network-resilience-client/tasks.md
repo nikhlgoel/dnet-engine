@@ -83,7 +83,7 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
 - [x] T015 [P] Implement condition H6 (captive portal intercepting until login satisfied) in `testing/harness/conditions/portal.sh`
 - [x] T016 [P] Implement conditions H7 (interface down/up) and H8 (drop traffic to a specific endpoint address) in `testing/harness/conditions/path.sh`
 - [x] T017 Implement `testing/harness/harness.ps1` with `status`, `apply <ID>`, `clear`, and `report` subcommands, applying conditions **at runtime mid-session** without restarting the client (HN-01)
-- [ ] T018 Provision the mock endpoint in `testing/harness/endpoint/` running both server-side cores pinned to the same versions the client bundles, plus a plain HTTP origin — **partial 2026-09-11:** the Profile A (AmneziaWG) server is in, built from the client's pinned commit, with an origin on TEST-NET-3 reachable only through the tunnel; the primary-core server side (Profiles B/C) remains for Phase 5
+- [ ] T018 Provision the mock endpoint in `testing/harness/endpoint/` running both server-side cores pinned to the same versions the client bundles, plus a plain HTTP origin — **partial 2026-09-11:** the Profile A (AmneziaWG) server is in, built from the client's pinned commit, with an origin on TEST-NET-3 reachable only through the tunnel; the Profile C (VLESS+REALITY) server is also in now (`reality-server.sh`, with a loopback TLS 1.3 target because the harness has no route to a real site). **2026-10-16:** the Profile B (Hysteria 2) server is in (`hy2-server.sh`, the primary core built from the client's pinned commit). Its image builds and the server runs in the container; the client core on Windows carried 5 MB through the published port and the simulated UTM, and wrong-password and wrong-pin controls carried nothing. The TUN path (T055) is still unrun
 - [x] T019 Implement ground-truth reporting in `testing/harness/report.ps1` — emits packets dropped and by which rule, so a test can distinguish "obfuscation worked" from "the rule never fired" (HN-03)
 - [x] T020 **[GATE] Phase 0 exit**: demonstrate H1–H9 on demand, HN-01…HN-06 hold, and HV-03 runs with a **deliberately unobfuscated control that fails**. A harness where everything passes proves nothing ([contracts/harness.md](./contracts/harness.md) §5)
 
@@ -370,6 +370,8 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
   > traffic and pktmon stopped mid-run (`testing/spike-r4/README.md`). The live run moves to
   > **T098a**, against the provisioned endpoint.
   >
+  > **See BUG-007 (2026-10-16):** the one recorded run failed before routing, because the AmneziaWG core cannot create its UAPI pipe from an Administrator shell; run the spike as LocalSystem (`docs/bugs/bug-007-spike-r4-uapi-pipe-owner.md`).
+  >
   > **What the logic-level tests cover.** The safety orderings are asserted by call order: host
   > route before tunnel, rewrite before rebind, reap before adapter, kill before undo. A missing
   > gateway fails with `NoUsablePath` and starts no tunnel. The bypass rule and the host route
@@ -438,12 +440,32 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
   > - **Pinned core `check`** accepts both flows for an IP and a hostname endpoint. It refuses a
   >   non-hex short id.
   > - **Credentials** are redacted from `Debug` and from errors.
-- [ ] T059 [US1] Implement active profile probing in `crates/dnet-core/src/probe.rs` — races configured profiles and selects the first that carries **usable throughput**, not merely a completed handshake (FR-004, HV-12)
-- [ ] T060 [US1] Implement mid-session block detection and automatic re-probe in `crates/dnet-core/src/reprobe.rs` (FR-005, SC-004)
-- [ ] T061 [US1] Implement Tier 1 preference when multiple profiles are viable, and Tier 2 consent gating, in `crates/dnet-core/src/selection.rs` (FR-016b, IPC-04)
-- [ ] T062 [P] [US4] Implement endpoint health probing and EWMA RTT scoring in `crates/dnet-core/src/endpoint_health.rs`
-- [ ] T063 [US4] Implement automatic endpoint migration on unreachability, emitting a `ConnectionEvent` so the user is informed rather than silently migrated, in `crates/dnet-core/src/migrate.rs` (FR-012)
-- [ ] T064 [US1] Implement distinguishable failure reporting for all seven `FailureCause` variants in `crates/dnetd/src/failure.rs` (FR-039, SC-020)
+> **Decision layer done 2026-10-16 (T059–T064): pure logic only.** All six are pure functions
+> over measurements, with no I/O and no clock; nothing in `dnetd` calls them yet. The thing that
+> measures (runs a probe through a profile, checks an endpoint outside a profile) and the thing
+> that acts on the decisions are the Connect orchestration, proposed as T123–T127. Decisions made
+> while building them, each reviewable:
+> - **Usable** means at least 64 KiB moved at 256 kbit/s or better; a handshake alone is `NoTraffic`.
+> - **Race:** the first usable profile wins, but a usable Tier 2 waits up to 3 s for a pending
+>   Tier 1. No profile is Tier 1 today, so in practice the first usable one wins at once.
+>   Profiles are probed in parallel with a 15 s deadline (SC-003).
+> - **Block:** 3 live checks failing in a row; any pass resets the count; reported once.
+> - **Re-probe order:** best tier first, then given order; known-blocked profiles wait out a
+>   doubling delay (60 s, capped at 900 s). Nothing left means `AllProfilesBlocked`.
+> - **Endpoint ranking:** Healthy, then Degraded, then Unknown (known-working beats
+>   unmeasured), then lower smoothed RTT, ties in given order. A degraded active endpoint is kept.
+> - **Failure classification order:** privilege, configuration (including "no endpoint"), a failed
+>   core, no path, captive portal, no endpoint reachable, all profiles blocked. Endpoint versus
+>   profile is told apart by a reachability check made outside any profile.
+> - **T064 moved** from `crates/dnetd/src/failure.rs` to `crates/dnet-core/src/failure.rs`, so it
+>   is under the coverage floor and the tray can reuse the wording.
+
+- [x] T059 [US1] Implement active profile probing in `crates/dnet-core/src/probe.rs` — races configured profiles and selects the first that carries **usable throughput**, not merely a completed handshake (FR-004, HV-12) *(decision layer; 17 tests)*
+- [x] T060 [US1] Implement mid-session block detection and automatic re-probe in `crates/dnet-core/src/reprobe.rs` (FR-005, SC-004) *(decision layer; the live checks are not wired)*
+- [x] T061 [US1] Implement Tier 1 preference when multiple profiles are viable, and Tier 2 consent gating, in `crates/dnet-core/src/selection.rs` (FR-016b, IPC-04) *(`dnet-ipc`'s `check_tier_consent` is not yet routed through it)*
+- [x] T062 [P] [US4] Implement endpoint health probing and EWMA RTT scoring in `crates/dnet-core/src/endpoint_health.rs` *(scoring existed in `health.rs`; this adds the ranking. The probing itself is not wired)*
+- [x] T063 [US4] Implement automatic endpoint migration on unreachability, emitting a `ConnectionEvent` so the user is informed rather than silently migrated, in `crates/dnet-core/src/migrate.rs` (FR-012)
+- [x] T064 [US1] Implement distinguishable failure reporting for all seven `FailureCause` variants in `crates/dnet-core/src/failure.rs` (FR-039, SC-020) *(moved from `dnetd`; classification and wording)*
 - [x] T065 [O5] Design and document the profile update feed integrity model in `docs/adr/0002-profile-update-feed.md` — a feed that can push routing changes is a supply-chain surface and must be signed (FR-007, FR-008, open item O5)
   > **Done 2026-09-12; ADR status Proposed.**
   > - **Mechanism.** Ed25519 in DSSE v1 envelopes. Root keys (2 of 3) are compiled into `dnetd` and
@@ -520,6 +542,30 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
   > `0b89958`), and its `check` accepts a generated Gecko config. The generator supports both
   > layers. Still open: ADR-0003, choosing the default layer, and tuning.
 - [ ] T068 **[GATE] Plan Phase 4 exit**: HV-01, HV-02, HV-03, HV-04, HV-09, HV-12 pass. HV-03 must show the obfuscated profile connecting **and** the unobfuscated control failing
+
+> **Partial evidence 2026-10-16 (not the gate).** `testing/harness/Invoke-Race.ps1` races the real
+> Hysteria 2 and VLESS+REALITY profiles through loopback SOCKS probes (`dnet-probe`), against the
+> Docker harness, with no elevation. All six scenarios matched:
+>
+> | Scenario | Result |
+> |---|---|
+> | no condition | one of the two selected |
+> | H2, all UDP dropped | REALITY (TCP) selected, Hysteria 2 failed (**HV-02**) |
+> | H4, one profile's port dropped | the other selected, in both directions (**HV-01**, two profiles) |
+> | H4 on both ports | nothing usable after 8.3 s |
+> | H9, 150 kbit ceiling | both handshakes complete, both measured about 130 kbit/s, both judged too slow, nothing selected (**HV-12**) |
+>
+> **What this does not cover:** HV-03 (needs AmneziaWG, which cannot be probed through a proxy, and
+> the unobfuscated control); HV-04 (a block applied while connected, needs the daemon); HV-09 (an
+> endpoint blocklist, needs endpoint migration wired in); and everything that crosses the TUN, since
+> a probe has none. The decision logic is `dnet-core` (T059–T064); wiring it into `dnetd` is
+> T123–T127. Found on the way: BUG-008, a healthy profile reported blocked half the time.
+>
+> **Reviewed before publishing.** A security review and a Rust review of the prober found no
+> critical issue; their findings (race cancellation leaking core processes, dead probes holding the
+> race to its deadline, truncated transfers counted as usable, an unauthenticated loopback proxy,
+> predictable credential file names) were all fixed in `fix(probe): harden the prober after
+> security and code review`, with tests, and the matrix above was re-run afterwards.
 
 **Checkpoint**: US1 and US4 are independently demonstrable. This is a shippable slice.
 
@@ -640,6 +686,30 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
 - [ ] T120 Audit that zero tests target a live managed network (SC-021, Principle III)
 - [ ] T121 [P] Write `README.md` positioning the product as a self-hosted network resilience and tunnel client, never as a firewall bypass, with the acceptable-use warning (FR-032, Constitution Legal posture)
 - [ ] T122 Final `cargo xtask lint-branding` and `verify-vendor` audit across the release artifact
+
+### Connect orchestration (added 2026-10-16; proposed, not in the original plan)
+
+T059–T064 decide; nothing yet measures or acts. These tasks join them. They are numbered after the
+polish phase only because the original list ended there; by dependency they belong with Phase 5.
+
+- [x] T123 [US1] Implement the connection state machine in `crates/dnet-core/src/engine.rs`: `Engine::step(input, now) -> Vec<Action>` over `Idle`, `Probing`, `Starting`, `Connected`, `Recovering`, `Failed`. Pure; 52 tests *(not wired into `dnetd`)*
+  > **Decisions, each reviewable.**
+  > - A new connect forgets every earlier viability: a profile blocked on one network may work on the next.
+  > - A race includes only profiles that can be probed through a proxy. AmneziaWG needs its own adapter, so it is started directly: when asked for by name, or as the last resort once the raced profiles have failed.
+  > - A block stops the tunnel **before** recovery starts, so the posture is fail-closed while another profile is found.
+  > - A profile that loses a race because a winner was chosen is **untested**, not blocked; it stays a candidate for recovery. Silent profiles are blocked only when nobody won.
+  > - A profile the user names is tried alone; if it fails the connect fails with a message saying so, and no other profile (AmneziaWG included) is substituted.
+  > - AmneziaWG is offered only once every raceable profile is blocked.
+  > - Before a profile is blamed for failed live checks, the environment (no path, portal, privilege) and the endpoint are ruled out. A dead endpoint is moved in every phase that uses one (starting, racing, recovering, connected).
+  > - A connect forgets earlier reach reports; the daemon reports reach after `Connect`.
+  > - **Open:** late results from cancelled races or tunnels are gated by phase only (plus "winner was in this race"). T126 must drop cancelled tasks' results; attempt ids are the planned guard.
+  > - A failure to bring the chosen tunnel up is reported, not retried on another profile: the cause may be local (privilege, a crashing core), not a block.
+  > - A degraded active endpoint is kept; only the probe that makes it unreachable triggers a move.
+  > - There is no "acknowledged Tier 2" input: a connect races only the profiles it names or all of them, and the race prefers Tier 1, so the consent case `selection::select` guards cannot arise. Tier 2 is warned about (`WarnTier2`), not refused.
+- [ ] T124 Add the config store and secret store the orchestrator reads profiles, endpoints and credentials from (`dnet-config`, `dnetd`); credentials never in plain files
+- [ ] T125 Define the IPC payloads for connect, disconnect, status and the event stream, carrying `ConnectionEvent` with its `because` (`dnet-ipc`, IPC-04, IPC-06)
+- [ ] T126 Implement the Connect orchestrator in `crates/dnetd`: feed `Engine` its inputs (race results from `dnet-probe`, live checks, endpoint probes, environment, reach) and perform its actions through the supervisor, route and posture seams
+- [ ] T127 Implement `dnetctl` (connect, disconnect, status, events) so the whole path can be driven and tested before the tray exists
 
 ---
 

@@ -62,4 +62,14 @@ pub enum ConfigError {
     /// A credential was missing or malformed. Names the credential, **never its value**.
     #[error("credential is missing or malformed: {0}")]
     InvalidCredential(&'static str),
+
+    /// A probe was asked to listen on port 0, which would let the OS choose one the caller
+    /// cannot know.
+    #[error("the probe's SOCKS port must be non-zero")]
+    InvalidProbePort,
+
+    /// AmneziaWG cannot be probed through a local proxy: it is a layer 3 tunnel that needs an
+    /// adapter of its own, and there is no proxy interface to measure through.
+    #[error("an AmneziaWG profile cannot be probed through a proxy; it needs its own adapter")]
+    ProbeNeedsOwnAdapter,
 }
