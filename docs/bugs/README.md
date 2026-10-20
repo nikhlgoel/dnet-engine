@@ -43,7 +43,7 @@ What stops it recurring: a test, a check, a documented constraint.
 | [BUG-004](bug-004-harness-interface-naming.md) | Container interface name assumed, then detected from shared state | Medium | Fixed |
 | [BUG-005](bug-005-powershell-argument-and-stderr.md) | Two PowerShell traps produced false failures | Medium | Fixed |
 | [BUG-006](bug-006-spike-o6-instrument-verdict.md) | SPIKE-O6 instrument printed a verdict it could not support | **High** | Fixed (instrument v2) |
-| [BUG-007](bug-007-spike-r4-uapi-pipe-owner.md) | SPIKE-R4 cannot start the AmneziaWG core from an Administrator shell | **High** | Open |
+| [BUG-007](bug-007-spike-r4-uapi-pipe-owner.md) | SPIKE-R4 cannot start the AmneziaWG core from an Administrator shell | **High** | Worked around |
 | [BUG-008](bug-008-probe-core-network-changed.md) | A healthy profile was reported blocked half the time, right after its probe core started | **High** | Fixed (bounded retry; mechanism inferred) |
 
 ## Pattern

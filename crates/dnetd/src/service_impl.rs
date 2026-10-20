@@ -16,6 +16,7 @@ use std::sync::Mutex;
 use dnet_ipc::authz::ConsoleSession;
 use dnet_ipc::protocol::{IpcError, Request, RequestClass};
 use dnet_ipc::service::Service;
+use dnet_ipc::wire::{EventBus, Subscription};
 
 use crate::domain::DomainState;
 use crate::recovery::{Recovered, RecoveryError};
@@ -32,6 +33,8 @@ pub struct DnetService {
     /// The start-up restoration result (T038). Only `Ok` carries the undo registry that
     /// routing mutations need; on `Err` every mutating request is refused.
     recovery: Result<Recovered, RecoveryError>,
+    /// Where connection events are published (T126) and subscribers read them.
+    events: EventBus,
 }
 
 impl DnetService {
@@ -46,7 +49,14 @@ impl DnetService {
             state: Mutex::new(state),
             console,
             recovery,
+            events: EventBus::new(),
         }
+    }
+
+    /// The bus the connection orchestrator publishes to.
+    #[allow(dead_code)] // Used by the orchestrator (T126).
+    pub fn events(&self) -> &EventBus {
+        &self.events
     }
 
     /// The production service: a seeded store and the real OS console lookup.
@@ -107,11 +117,15 @@ impl Service for DnetService {
             | Request::StartProvisioning
             | Request::CancelProvisioning => Self::not_available("this configuration change"),
 
-            // Streaming is handled by the connection loop, not one-shot dispatch.
+            // Streaming is handled by the connection loop (`Service::subscribe`), not one-shot dispatch.
             Request::Subscribe => Err(IpcError::InvalidRequest {
                 detail: "Subscribe is a streaming request, not a one-shot dispatch".to_string(),
             }),
         }
+    }
+
+    fn subscribe(&self) -> Result<Subscription, IpcError> {
+        self.events.subscribe()
     }
 }
 
@@ -157,6 +171,8 @@ mod tests {
         let svc = service();
         match svc.dispatch(&Request::Connect {
             acknowledge_tier2: false,
+            profile: None,
+            endpoint: None,
         }) {
             Err(IpcError::InternalError { detail }) => {
                 assert!(!detail.trim().is_empty());
@@ -185,6 +201,29 @@ mod tests {
     }
 
     #[test]
+    fn a_subscription_sees_what_the_orchestrator_publishes() {
+        use dnet_core::session::ConnectionEvent;
+        let svc = service();
+        svc.events()
+            .publish(&ConnectionEvent::ProbeStarted)
+            .unwrap();
+        let sub = svc.subscribe().expect("a subscription is offered");
+        assert_eq!(sub.backlog.len(), 1);
+    }
+
+    #[test]
+    fn the_idle_snapshot_is_served_through_the_checked_encoder() {
+        let svc = service();
+        let wire = svc.dispatch(&Request::GetState).unwrap();
+        let snapshot = dnet_ipc::protocol::decode_state_snapshot(&wire)
+            .expect("what the daemon serves, a client can read");
+        assert_eq!(
+            snapshot.status,
+            dnet_ipc::protocol::ConnectionStatus::Disconnected
+        );
+    }
+
+    #[test]
     fn console_resolver_is_consulted() {
         let svc = service();
         assert_eq!(svc.console_session().unwrap().session_id, 1);
@@ -194,6 +233,8 @@ mod tests {
         let all = vec![
             Request::Connect {
                 acknowledge_tier2: false,
+                profile: None,
+                endpoint: None,
             },
             Request::Disconnect,
             Request::AddEndpoint,

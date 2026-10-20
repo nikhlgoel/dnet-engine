@@ -11,6 +11,11 @@
 > (section 2). The earlier 2026-09-11 run failed this way; see
 > [`docs/bugs/bug-007-spike-r4-uapi-pipe-owner.md`](../../docs/bugs/bug-007-spike-r4-uapi-pipe-owner.md).
 
+> **Added 2026-10-20 — a WSL2 lab (section 6) can stand in for the cloud endpoint.** Its first
+> elevated run returned **FAIL** and is not evidence for or against the design: the gate's own
+> counting missed the traffic, and the endpoint never answered (details in section 6). Whether a
+> later PASS may close T055 is the owner's decision.
+
 **What it proves.** With both cores running, Profile A (AmneziaWG) carries real traffic,
 and the tunnel's own encrypted packets to the endpoint leave **only** through the physical
 adapter — none re-enter the TUN. Failure presents as a successful handshake with zero
@@ -208,3 +213,87 @@ psexec -accepteula -s -i powershell.exe -NoProfile -ExecutionPolicy Bypass `
 - **Not run:** the TUN path, the wrapper's `-Transport Hy2` flow past argument binding, and any
   measurement against an off-LAN endpoint. Until those run, the Hysteria 2 profile is as unproven
   against the loop as Profile A is.
+
+---
+
+## 6. The WSL2 lab (`Invoke-WslLab.ps1`): an off-subnet endpoint without a cloud host
+
+For when no cloud VM exists. A WSL2 VM sits behind its own Hyper-V switch, so the script makes the VM
+the host's temporary **default gateway** and gives the endpoint an address (`203.0.113.10`, TEST-NET-3)
+that lives on the VM's loopback, not on the switch's subnet. The host then reaches the endpoint through
+its default route, which is the only way a loop can form.
+
+**How this differs from the unsupported LAN-VM attempt (top of this file).** There the endpoint was a
+bridged VM on a Wi-Fi adapter, where forwarded traffic was dropped and the counting could be bypassed
+inside the bridge driver. Here no physical NIC is involved: the "physical" adapter the gate counts is
+the host's own `vEthernet (WSL …)` adapter, so the packets are counted where they enter the switch.
+That is a virtual NIC, so the lab cannot say anything about a real NIC's offloads, MTU or NAT; it can
+only say whether the cores' own encrypted packets re-enter the TUN. That is the failure T055 exists to catch.
+
+**The gate's own guards still decide.** The control run must loop, and pktmon must expose both
+adapters. If the control does not loop the verdict is `INVALID`; if pktmon does not show the vEthernet
+adapter it is `INCONCLUSIVE`. Neither is a pass, and neither says anything about the design.
+
+**Prerequisites.**
+- WSL distro `dnet-endpoint`: an export of the harness endpoint image (it holds `/opt/awg-server.sh`
+  and the pinned `amneziawg-go`). `wsl-endpoint.sh` is copied in on every run.
+- `cargo build --release -p dnet-netstate --example spike_r4`, and the vendor binaries
+  (`cargo run -p xtask -- fetch-vendor`).
+- Disconnect any VPN. **The host has no internet while the gate runs.** If the machine's only
+  connection is a tethered phone, expect that to drop too.
+
+**1. Dry run (no elevation, changes nothing on the host).**
+
+```powershell
+.\testing\spike-r4\Invoke-WslLab.ps1 -Phase Check
+```
+
+It runs every preflight, starts the endpoint in the VM for 90 s, checks from inside the VM that the
+endpoint address is the VM's own, the server runs and a UDP listener holds 51820, and exports the
+client parameters to `wsl-lab-awg-client.json` (test keys; gitignored). Exit 0 means the endpoint half
+works; exit 2 lists every problem it found.
+
+**2. The run (elevated PowerShell).**
+
+```powershell
+.\testing\spike-r4\Invoke-WslLab.ps1 -Phase Launch
+```
+
+Launch repeats the preflight, starts the endpoint, then registers two SYSTEM scheduled tasks: the gate
+(`Run`) and a watchdog (`Watchdog`, default 10 minutes). `Run` saves the interface metrics to
+`wsl-lab-state.json` **before** it changes anything, makes the VM the default gateway, confirms the
+endpoint answers, runs `Invoke-SpikeR4.ps1` as SYSTEM (which satisfies BUG-007) and restores. If the
+gate hangs, the watchdog stops it, kills what it staged, restores networking and removes both tasks.
+Launch waits, prints the tail of `wsl-lab.log`, and exits with the gate's exit code (section 3's table).
+
+**3. If networking is left broken** (power loss mid-run, a killed shell). From an elevated shell:
+
+```powershell
+.\testing\spike-r4\Invoke-WslLab.ps1 -Phase Restore
+```
+
+It is idempotent and removes only routes whose next hop is the lab VM. Rebooting also works: the
+default route it adds is not persistent.
+
+**First elevated run, 2026-10-20 16:44: FAIL.** Not a verdict on the design. What it did establish:
+
+- **The lab works.** Preflight, the endpoint in the VM, the route flip (`203.0.113.10` via the VM on
+  `vEthernet (WSL …)`), the gate under SYSTEM, and restoration (default routes and metrics back, no
+  residue) all behaved. The AmneziaWG core started under SYSTEM and configured its peer, so the
+  BUG-007 workaround holds.
+- **The control looped.** With the host route withheld, 35 endpoint packets appeared on the
+  `sing-tun` adapter. The instrument can see a loop.
+- **In the PASS run no endpoint packet reached a tunnel adapter**, and `counters.txt` shows 35 leaving
+  through the host vNIC. But the transfer failed (the endpoint never answered), so this does not show
+  that a working tunnel stays off the TUN.
+- **Gate defect, found by this run.** The gate reported 0 packets on the physical adapter. pktmon
+  files the traffic under a sibling component named `Host vNic` that shares the adapter's component
+  Id (157) but not its name, and the gate matched by name only. The defect fails toward FAIL, never
+  toward PASS.
+- **The endpoint did not answer.** Both runs sent 35 packets that reached the VM's vNIC; nothing came
+  back (host vNIC Rx 0) and the handshake never completed. The server's log held only its startup
+  banner. Cause not yet established.
+
+**To do before the next run:** match pktmon components by Id as well as by name, and have the lab
+collect the VM's own view (server log at debug level, packet counters on the UDP port and the reply
+rule) into the results folder, so a failed handshake can be told apart from a dropped reply.

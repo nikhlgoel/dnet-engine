@@ -86,6 +86,8 @@ fn ipc01_request_classes_match_the_contract_table() {
     for r in [
         Connect {
             acknowledge_tier2: false,
+            profile: None,
+            endpoint: None,
         },
         Disconnect,
         AddEndpoint,
@@ -349,28 +351,43 @@ fn ipc04_tier1_never_requires_consent() {
 // ====================================================================== IPC-05
 // A StateSnapshot with an active profile always carries a non-null tier.
 
+/// A complete, self-consistent Connected snapshot with `profile` as its active profile, so a
+/// negative test below fails for the one field it breaks and for no other reason.
+fn connected_snapshot_with(profile: &str) -> String {
+    format!(
+        r#"{{"status":"Connected","active_profile":{profile},"active_endpoint":{{"id":"e","label":"l"}},"failure":null,"warnings":[],"routing_posture":{{"posture":"Tunnelled","tier":"Tier1"}}}}"#
+    )
+}
+
+#[test]
+fn ipc05_the_control_snapshot_is_valid() {
+    // Guards the three negatives below: if this stops decoding, they would pass vacuously.
+    let json = connected_snapshot_with(r#"{"id":"awg-default","kind":"AmneziaWg","tier":"Tier1"}"#);
+    assert!(decode_state_snapshot(&json).is_ok());
+}
+
 #[test]
 fn ipc05_active_profile_without_a_tier_is_rejected() {
-    let json = r#"{"status":"Connected","active_profile":{"id":"hy2-default","kind":"Hysteria2"}}"#;
-    assert!(decode_state_snapshot(json).is_err());
+    let json = connected_snapshot_with(r#"{"id":"hy2-default","kind":"Hysteria2"}"#);
+    assert!(decode_state_snapshot(&json).is_err());
 }
 
 #[test]
 fn ipc05_active_profile_with_a_null_tier_is_rejected() {
-    let json = r#"{"status":"Connected","active_profile":{"id":"hy2-default","kind":"Hysteria2","tier":null}}"#;
-    assert!(decode_state_snapshot(json).is_err());
+    let json = connected_snapshot_with(r#"{"id":"hy2-default","kind":"Hysteria2","tier":null}"#);
+    assert!(decode_state_snapshot(&json).is_err());
 }
 
 #[test]
 fn ipc05_active_profile_with_an_unknown_tier_is_rejected() {
-    let json = r#"{"status":"Connected","active_profile":{"id":"hy2-default","kind":"Hysteria2","tier":"Tier3"}}"#;
-    assert!(decode_state_snapshot(json).is_err());
+    let json = connected_snapshot_with(r#"{"id":"hy2-default","kind":"Hysteria2","tier":"Tier3"}"#);
+    assert!(decode_state_snapshot(&json).is_err());
 }
 
 #[test]
 fn ipc05_active_profile_carries_its_tier() {
-    let json = r#"{"status":"Connected","active_profile":{"id":"awg-default","kind":"AmneziaWg","tier":"Tier1"}}"#;
-    let snapshot = decode_state_snapshot(json).expect("a valid snapshot decodes");
+    let json = connected_snapshot_with(r#"{"id":"awg-default","kind":"AmneziaWg","tier":"Tier1"}"#);
+    let snapshot = decode_state_snapshot(&json).expect("a valid snapshot decodes");
     assert_eq!(snapshot.status, ConnectionStatus::Connected);
     let profile = snapshot.active_profile.expect("active profile present");
     assert_eq!(profile.tier, FailoverTier::Tier1);
@@ -378,7 +395,7 @@ fn ipc05_active_profile_carries_its_tier() {
 
 #[test]
 fn ipc05_disconnected_snapshot_has_no_active_profile() {
-    let json = r#"{"status":"Disconnected","active_profile":null}"#;
+    let json = r#"{"status":"Disconnected","active_profile":null,"active_endpoint":null,"failure":null,"warnings":[],"routing_posture":{"posture":"FailClosed"}}"#;
     let snapshot = decode_state_snapshot(json).expect("a valid snapshot decodes");
     assert_eq!(snapshot.status, ConnectionStatus::Disconnected);
     assert_eq!(snapshot.active_profile, None);

@@ -6,12 +6,16 @@
 //! *captured* client identity before the `Service` is asked to act on it, so an
 //! unauthorized mutating request never reaches routing state (SC-019).
 
+use std::time::Duration;
+
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::sync::broadcast::error::RecvError;
 
 use crate::authz::{authorize, ClientIdentity, ConsoleSession};
 use crate::frame;
-use crate::protocol::{decode_request, encode_ipc_error, IpcError};
+use crate::protocol::{decode_request, encode_ipc_error, IpcError, Request};
 use crate::service::Service;
+use crate::wire::{events_lost, Subscription};
 
 /// The control pipe (contract §Transport).
 pub const PIPE_NAME: &str = r"\\.\pipe\DNetEngine\control";
@@ -57,12 +61,150 @@ pub fn dispatch_frame(
     }
 }
 
+/// What the server does with one request.
+pub enum Reply {
+    /// Write this frame and keep serving requests on the connection.
+    Response(String),
+    /// The connection becomes a one-way event stream (see [`stream_events`]).
+    Stream(Subscription),
+}
+
+/// Authorize one decoded request against the captured identity and act on it: a `Subscribe`
+/// becomes a stream (when the service offers one), every other request is dispatched.
+///
+/// Like [`dispatch_frame`] this is pure and platform-independent, and the `Service` is reached
+/// only for a request the caller was authorized to make.
+pub fn dispatch_request(
+    payload: &str,
+    identity: &ClientIdentity,
+    console: Option<&ConsoleSession>,
+    service: &dyn Service,
+) -> Reply {
+    let request = match decode_request(payload) {
+        Ok(request) => request,
+        Err(e) => return Reply::Response(encode_ipc_error(&e)),
+    };
+    if let Err(e) = authorize(request.class(), identity, console) {
+        return Reply::Response(encode_ipc_error(&e));
+    }
+    if matches!(request, Request::Subscribe) {
+        return match service.subscribe() {
+            Ok(subscription) => Reply::Stream(subscription),
+            Err(e) => Reply::Response(encode_ipc_error(&e)),
+        };
+    }
+    Reply::Response(
+        service
+            .dispatch(&request)
+            .unwrap_or_else(|e| encode_ipc_error(&e)),
+    )
+}
+
+/// How long one write to a subscriber may take before the subscription is abandoned.
+pub const STREAM_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Serve an event subscription: an acknowledgement, the session so far, then live events.
+///
+/// The connection is **one-way** from here on. Any byte the client sends afterwards, including
+/// bytes already buffered behind the `Subscribe` frame (`leftover`), ends the subscription with
+/// an `InvalidRequest` frame saying why: a client that has something else to ask opens another
+/// connection. That keeps the read side from
+/// needing a buffer, and a hostile client from being able to make it grow.
+///
+/// A subscriber that falls behind is told how many events it missed ([`events_lost`]) and
+/// carries on. One that stops reading altogether is dropped after [`STREAM_WRITE_TIMEOUT`], so
+/// it cannot hold a task and a subscriber slot forever. The subscription ends, and its slot is
+/// freed, when the client disconnects (IPC-09).
+pub async fn stream_events<S>(
+    stream: S,
+    leftover: Vec<u8>,
+    subscription: Subscription,
+) -> Result<(), IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    stream_events_with(stream, leftover, subscription, STREAM_WRITE_TIMEOUT).await
+}
+
+/// [`stream_events`] with the write timeout given, so tests need not wait ten seconds.
+pub async fn stream_events_with<S>(
+    mut stream: S,
+    leftover: Vec<u8>,
+    mut subscription: Subscription,
+    write_timeout: Duration,
+) -> Result<(), IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    async fn send<S: AsyncWrite + Unpin>(
+        stream: &mut S,
+        payload: &str,
+        write_timeout: Duration,
+    ) -> Result<(), IpcError> {
+        let bytes = frame::encode(payload).map_err(|e| IpcError::InternalError {
+            detail: format!("failed to encode an event frame: {e}"),
+        })?;
+        match tokio::time::timeout(write_timeout, stream.write_all(&bytes)).await {
+            Ok(written) => written.map_err(io_err),
+            Err(_) => Err(IpcError::InternalError {
+                detail: "the client stopped reading events, so its subscription was closed"
+                    .to_string(),
+            }),
+        }
+    }
+
+    // The refusal a client gets for speaking on a one-way connection: said, then closed.
+    let one_way = || {
+        encode_ipc_error(&IpcError::InvalidRequest {
+            detail: "an event subscription is one-way; open another connection to send requests"
+                .to_string(),
+        })
+    };
+
+    let ack = serde_json::json!({
+        "subscribed": true,
+        "backlog": subscription.backlog.len(),
+    })
+    .to_string();
+    send(&mut stream, &ack, write_timeout).await?;
+    if !leftover.is_empty() {
+        send(&mut stream, &one_way(), write_timeout).await?;
+        return Ok(());
+    }
+    for event in std::mem::take(&mut subscription.backlog) {
+        send(&mut stream, &event, write_timeout).await?;
+    }
+
+    let mut probe = [0u8; 1];
+    loop {
+        tokio::select! {
+            biased;
+            // A client that disconnects ends the stream quietly; one that speaks is told why
+            // it is being closed.
+            read = stream.read(&mut probe) => {
+                if matches!(read, Ok(n) if n > 0) {
+                    send(&mut stream, &one_way(), write_timeout).await?;
+                }
+                return Ok(());
+            }
+            event = subscription.live.recv() => match event {
+                Ok(frame) => send(&mut stream, &frame, write_timeout).await?,
+                Err(RecvError::Lagged(missed)) => {
+                    send(&mut stream, &events_lost(missed), write_timeout).await?;
+                }
+                Err(RecvError::Closed) => return Ok(()),
+            },
+        }
+    }
+}
+
 /// Run the framing loop over a stream, calling `on_frame` for each decoded frame and
 /// writing back any response it returns.
 ///
 /// Ends — rather than lingering — when the peer disconnects (IPC-09), and closes the
 /// connection on an undecodable frame without panicking (IPC-08). `initial` seeds the
-/// read buffer with bytes already taken from the stream (used after a priming read).
+/// read buffer with bytes already taken from the stream (used after a priming read). A
+/// [`Reply::Stream`] turns the rest of the connection into an event stream.
 pub(crate) async fn frame_loop<S, F>(
     mut stream: S,
     mut buf: Vec<u8>,
@@ -70,7 +212,7 @@ pub(crate) async fn frame_loop<S, F>(
 ) -> Result<(), IpcError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
-    F: FnMut(&str) -> Option<String>,
+    F: FnMut(&str) -> Option<Reply>,
 {
     let mut chunk = [0u8; READ_CHUNK];
     loop {
@@ -78,11 +220,18 @@ where
             Ok(Some(frame)) => {
                 let payload = frame.payload.clone();
                 buf.drain(..frame.consumed);
-                if let Some(response) = on_frame(&payload) {
-                    let bytes = frame::encode(&response).map_err(|e| IpcError::InternalError {
-                        detail: format!("failed to encode response: {e}"),
-                    })?;
-                    stream.write_all(&bytes).await.map_err(io_err)?;
+                match on_frame(&payload) {
+                    None => {}
+                    Some(Reply::Response(response)) => {
+                        let bytes =
+                            frame::encode(&response).map_err(|e| IpcError::InternalError {
+                                detail: format!("failed to encode response: {e}"),
+                            })?;
+                        stream.write_all(&bytes).await.map_err(io_err)?;
+                    }
+                    Some(Reply::Stream(subscription)) => {
+                        return stream_events(stream, buf, subscription).await;
+                    }
                 }
             }
             Ok(None) => {
@@ -174,7 +323,7 @@ mod windows_pipe {
         let service_for_loop = Arc::clone(&service);
         frame_loop(server, initial, move |payload| {
             let console = service_for_loop.console_session();
-            Some(super::dispatch_frame(
+            Some(super::dispatch_request(
                 payload,
                 &identity,
                 console.as_ref(),

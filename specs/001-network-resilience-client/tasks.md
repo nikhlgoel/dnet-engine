@@ -372,6 +372,24 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
   >
   > **See BUG-007 (2026-10-16):** the one recorded run failed before routing, because the AmneziaWG core cannot create its UAPI pipe from an Administrator shell; run the spike as LocalSystem (`docs/bugs/bug-007-spike-r4-uapi-pipe-owner.md`).
   >
+  >
+  > **2026-10-20 — a WSL2 lab path exists, not yet run.** `testing/spike-r4/Invoke-WslLab.ps1` makes a
+  > WSL2 VM the temporary default gateway and serves the endpoint from its loopback at an off-subnet
+  > address, so the gate's own `VACUOUS` check is satisfied without a cloud host (runbook: README
+  > section 6). It differs from the failed LAN-bridge attempt in that the counted adapter is the
+  > host's `vEthernet (WSL)` NIC, not a Wi-Fi bridge. BUG-007's preflight and error surfacing are in
+  > `Invoke-SpikeR4.ps1`.
+  >
+  > **First elevated run, 2026-10-20: FAIL, and not evidence about the design.** The lab itself worked
+  > (route flip, gate under SYSTEM, full restoration) and the control looped (35 packets on the tunnel
+  > adapter), so the instrument sees loops. Two defects stand between it and a verdict: the gate counted
+  > the physical adapter by name and missed the traffic pktmon filed under the sibling `Host vNic`
+  > component (same Id; fails toward FAIL, not PASS), and the endpoint never answered, so no transfer
+  > happened (cause unknown). Both are to be fixed before the next run (`testing/spike-r4/README.md` §6).
+  > **Owner decision pending:** a lab `PASS` with a looping control is real evidence about the cores'
+  > own packets but is not the provisioned endpoint of T098a; whether it closes T055 or only reduces
+  > the risk is for the owner to say. Until then T055 stays open.
+  >
   > **What the logic-level tests cover.** The safety orderings are asserted by call order: host
   > route before tunnel, rewrite before rebind, reap before adapter, kill before undo. A missing
   > gateway fails with `NoUsablePath` and starts no tunnel. The bypass rule and the host route
@@ -707,7 +725,23 @@ polish phase only because the original list ended there; by dependency they belo
   > - A degraded active endpoint is kept; only the probe that makes it unreachable triggers a move.
   > - There is no "acknowledged Tier 2" input: a connect races only the profiles it names or all of them, and the race prefers Tier 1, so the consent case `selection::select` guards cannot arise. Tier 2 is warned about (`WarnTier2`), not refused.
 - [ ] T124 Add the config store and secret store the orchestrator reads profiles, endpoints and credentials from (`dnet-config`, `dnetd`); credentials never in plain files
-- [ ] T125 Define the IPC payloads for connect, disconnect, status and the event stream, carrying `ConnectionEvent` with its `because` (`dnet-ipc`, IPC-04, IPC-06)
+- [x] T125 Define the IPC payloads for connect, disconnect, status and the event stream, carrying `ConnectionEvent` with its `because` (`dnet-ipc`, IPC-04, IPC-06)
+  > **Done 2026-10-20 (not committed; security review pending).** Contract: `ipc-protocol.md`, tests IPC-10…14.
+  > - **Connect.** `Request::Connect` carries `profile` and `endpoint`, validated as hostile input
+  >   (id grammar, canonical UUID, a consent flag that must be a boolean). `encode_request` is the client half.
+  > - **Status.** `StateSnapshot` is complete (endpoint, failure with `title`/`detail`/`action`, warnings,
+  >   posture). One consistency rule is applied on both encode and decode. Path fields are omitted, not faked.
+  > - **Events.** Every `ConnectionEvent` gets a `because`, including those whose domain form has none.
+  >   `EventBus` numbers them, replays the current session (256 max), and caps subscribers (16).
+  > - **Stream.** `Subscribe` becomes a one-way, write-timed stream (`server::stream_events`); the real named-pipe
+  >   path is tested in `tests/pipe_stream.rs`. Mutation checks on the cap and the encode-side consistency
+  >   rule both failed the tests as they should, then were reverted.
+  > - **Daemon.** `GetState` is served through the checked encoder; `DnetService` owns an `EventBus`.
+  > - **Found, not fixed: nothing enforces the kill switch.** `FailClosed` exists only as a domain value
+  >   (T028); no task makes the OS drop traffic when the tunnel is lost, and the constitution rules out the
+  >   kernel driver that would do it. A user-mode mechanism (the ADR-0005 table names WFP filters on Windows)
+  >   needs its own task and ADR. Until then the snapshot's posture is a decision, and says so.
+  > - **Still to do for the endpoint selector:** the engine takes no endpoint. T126 refuses a named one.
 - [ ] T126 Implement the Connect orchestrator in `crates/dnetd`: feed `Engine` its inputs (race results from `dnet-probe`, live checks, endpoint probes, environment, reach) and perform its actions through the supervisor, route and posture seams
 - [ ] T127 Implement `dnetctl` (connect, disconnect, status, events) so the whole path can be driven and tested before the tray exists
 

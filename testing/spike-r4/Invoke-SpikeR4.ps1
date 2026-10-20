@@ -67,6 +67,16 @@ if (-not $me.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
 }
 
 $isHy2 = $Transport -eq 'Hy2'
+
+# BUG-007: the AmneziaWG core creates its control pipe owned by SYSTEM, which an Administrator
+# token cannot assign, so Profile A cannot start from an elevated shell and the run would stop
+# before it measured any routing. Fail here, naming the cause, not 30 s later with a timeout.
+# Hysteria 2 runs the primary core alone and has no such pipe.
+if (-not $isHy2 -and -not [Security.Principal.WindowsIdentity]::GetCurrent().IsSystem) {
+    Stop-Spike ('Profile A must run as LocalSystem, not merely elevated (BUG-007): the AmneziaWG core cannot create its ' +
+        'control pipe from an Administrator shell. Use PsExec -s or a SYSTEM scheduled task; see README.md section 2 ' +
+        '(or Invoke-WslLab.ps1, which does this).') 2
+}
 $staged = @{
     Driver  = Join-Path $Vendor 'wintun\wintun.dll'
     Primary = Join-Path $Vendor 'primary-core\primary-core.exe'
@@ -199,7 +209,19 @@ function Invoke-Mode([string]$Mode) {
         Physical = @{ Sum = 0; Hit = $false }; Tunnel = @{ Sum = 0; Hit = $false } }
     try {
         if (-not (Wait-ForFile (Join-Path $run "$tag.cores-up.ready") 180 $proc)) {
-            $result.Error = 'cores never came up (see runner.log)'; return $result
+            $result.Error = 'cores never came up (see runner.log)'
+            # Name the cause: a core that cannot create its UAPI pipe says so in one log line, and
+            # that line is what separates BUG-007 from every other reason a core fails to start.
+            $log = Join-Path $run 'runner.log'
+            if (Test-Path $log) {
+                $line = Select-String -Path $log -Pattern 'uapi socket' -SimpleMatch | Select-Object -Last 1
+                if ($line) {
+                    $text = ($line.Line -replace '\x1b\[[0-9;]*m', '').Trim()
+                    $hint = if ($text -match 'may not be assigned as the owner') { ' (BUG-007: the script is not running as LocalSystem)' } else { '' }
+                    $result.Error = "cores never came up: $text$hint"
+                }
+            }
+            return $result
         }
         # Adapters exist, no peer yet: start capture now so pktmon attaches to them.
         $tunnelAdapters = @(Get-NetAdapter -Name $TunAlias, $AwgAlias -ErrorAction SilentlyContinue)

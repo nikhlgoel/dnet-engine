@@ -275,6 +275,11 @@ fn check_licence_texts(repo_root: &Path, failures: &mut Vec<String>) -> Result<(
     Ok(())
 }
 
+/// Where `testing/spike-r4/Invoke-SpikeR4.ps1` writes its run artifacts, relative to the repo root.
+fn spike_results_dir() -> PathBuf {
+    Path::new("testing").join("spike-r4").join("results")
+}
+
 fn walk(root: &Path) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -287,6 +292,15 @@ fn walk(root: &Path) -> Result<Vec<PathBuf>> {
             let name = name.to_string_lossy();
             // Skip build output and VCS metadata; they contain no vendored source.
             if name == ".git" || name == "target" || name == "node_modules" {
+                continue;
+            }
+            // The SPIKE-R4 gate's own output. It is gitignored, so nothing in it can reach the
+            // repository, and a run as SYSTEM leaves directories (the generated core
+            // configuration, T049) that only SYSTEM and Administrators may read.
+            if path
+                .strip_prefix(root)
+                .is_ok_and(|rel| rel == spike_results_dir())
+            {
                 continue;
             }
             if path.is_dir() {
@@ -319,6 +333,40 @@ mod tests {
     fn embedded_summary_says_when_nothing_was_scanned() {
         assert!(embedded_summary(0).contains("NOT run"));
         assert!(embedded_summary(2).starts_with("2 of 2"));
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("verify-vendor-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// The gate's output directory is not part of what is checked; everything else still is.
+    #[test]
+    fn walk_skips_only_the_spike_results_directory() {
+        let root = scratch("walk");
+        let results = root.join(spike_results_dir()).join("20260101-000000");
+        std::fs::create_dir_all(&results).unwrap();
+        std::fs::write(results.join("staged.txt"), "x").unwrap();
+        let other = root.join("testing").join("harness");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("kept.txt"), "x").unwrap();
+        // A directory that merely has the same last name elsewhere is still walked.
+        let lookalike = root.join("vendor").join("results");
+        std::fs::create_dir_all(&lookalike).unwrap();
+        std::fs::write(lookalike.join("also-kept.txt"), "x").unwrap();
+
+        let found: Vec<String> = walk(&root)
+            .unwrap()
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        std::fs::remove_dir_all(&root).unwrap();
+
+        assert!(!found.contains(&"staged.txt".to_string()), "{found:?}");
+        assert!(found.contains(&"kept.txt".to_string()), "{found:?}");
+        assert!(found.contains(&"also-kept.txt".to_string()), "{found:?}");
     }
 
     #[test]

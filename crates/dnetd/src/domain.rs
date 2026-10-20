@@ -15,6 +15,7 @@ use dnet_core::ids::ProfileId;
 use dnet_core::ids::RuleId;
 use dnet_core::profile::{ConnectionProfile, ProfileKind, ProfileParams};
 use dnet_core::rule::{validate_dns_leak_protection, validate_rule_set, RoutingRule};
+use dnet_ipc::protocol::{encode_state_snapshot, ConnectionStatus, RoutingPosture, StateSnapshot};
 use serde_json::{json, Value};
 
 /// Everything the daemon knows about endpoints, profiles, and routing.
@@ -45,20 +46,19 @@ impl DomainState {
 
     // ----------------------------------------------------------- wire responses
 
-    /// A `GetState` snapshot. The daemon does not yet establish tunnels (that lands in
-    /// Phases 4–6), so it always reports `Disconnected` with no active profile.
+    /// A `GetState` snapshot. The daemon does not yet establish tunnels (T126), so it always
+    /// reports `Disconnected` with nothing active. `FailClosed` is the engine's decided posture
+    /// for "no tunnel"; no component enforces it at the OS yet.
     pub fn state_snapshot_json(&self) -> String {
-        json!({
-            "status": "Disconnected",
-            "active_profile": Value::Null,
-            "active_endpoint": Value::Null,
-            "carrying_path": Value::Null,
-            // Fail closed by default: with no tunnel up, would-be-tunnelled traffic
-            // (and DNS) is dropped rather than routed to the physical interface.
-            "routing_posture": "FailClosed",
-            "warnings": [],
+        encode_state_snapshot(&StateSnapshot {
+            status: ConnectionStatus::Disconnected,
+            active_profile: None,
+            active_endpoint: None,
+            failure: None,
+            warnings: Vec::new(),
+            posture: RoutingPosture::FailClosed,
         })
-        .to_string()
+        .expect("the idle snapshot is consistent by construction")
     }
 
     pub fn endpoints_json(&self) -> String {
@@ -337,7 +337,7 @@ mod tests {
     fn disconnected_snapshot_is_fail_closed() {
         let json: Value =
             serde_json::from_str(&DomainState::seeded().state_snapshot_json()).unwrap();
-        assert_eq!(json["routing_posture"], "FailClosed");
+        assert_eq!(json["routing_posture"]["posture"], "FailClosed");
     }
 
     #[test]

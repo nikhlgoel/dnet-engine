@@ -54,6 +54,15 @@ The privilege boundary lives here. `dnet-tray` is unprivileged; `dnetd` is Local
 }
 ```
 
+> **Implemented shape (T125, 2026-10-20).** `carrying_path` and `standby_paths` are **absent** until
+> Phase 7 can produce them; an empty list would claim there is no standby path. `routing_posture`
+> is added: `{"posture":"Tunnelled","tier":"Tier1"}` or `{"posture":"FailClosed"}`. It is the posture
+> the engine **decided**, not proof that the OS enforces it. `failure` also carries `title`, `detail`
+> and `action`. `active_profile` and `active_endpoint` are set only while `Connected`.
+> A snapshot that contradicts itself (connected with nothing active, failed with no cause, tunnelled
+> while not connected, a posture tier that differs from the profile's) is refused by the encoder and
+> by the decoder.
+
 **Contract requirements**
 - `tier` is **always** present on an active profile. The UI must be able to show it without a second
   request (FR-016b).
@@ -65,6 +74,11 @@ The privilege boundary lives here. `dnet-tray` is unprivileged; `dnetd` is Local
 
 Both fields `null` means "choose for me" — the single-control path (FR-036).
 
+- `profile` is 1 to 64 of `a-z`, `0-9`, `-`, not starting or ending with `-`. `endpoint` is a UUID
+  in hyphenated form. `acknowledge_tier2` must be a boolean if present. Anything else is
+  `InvalidRequest`; a malformed selector is never ignored. A named `profile` is tried alone and no
+  other is substituted. A named `endpoint` is validated but the engine cannot yet honour one, so the
+  daemon answers `InvalidRequest` saying so rather than connecting elsewhere.
 - If the selection resolves to a `Tier2` profile while a `Tier1` profile is viable, the server
   responds `Err(TierDowngradeRequiresConsent { profile, tier })`. The tray must re-issue with
   `acknowledge_tier2: true`. Consent is not inferable from the first request (FR-016b).
@@ -81,6 +95,19 @@ Every event carries `because`. Event variants mirror `ConnectionEvent` in
 ```
 
 **Contract requirement**: `because` is never empty and never restates the event name.
+
+**Stream behaviour (T125).**
+- The reply to `Subscribe` is `{"subscribed":true,"backlog":N}`, then the `N` events of the current
+  session that are still held (at most 256, oldest dropped), then live events with no gap and no repeat.
+- Each event carries `seq`, a number that never repeats within one run of the daemon. A gap in `seq`
+  is how a client sees that events were missed.
+- A client that reads too slowly receives `{"event":"EventsLost","missed":N,"because":"..."}` in place
+  of what it missed, and the stream continues.
+- The connection is **one-way** after `Subscribe`. Any further byte from the client is answered with
+  `InvalidRequest` and the connection is closed. Open a second connection to send requests.
+- At most 16 subscriptions exist at once; the 17th gets `ServiceBusy` (retryable). A subscriber that
+  does not accept a write within 10 s is dropped. Closing the connection frees the slot (IPC-09).
+- 64-bit interface ids (`PathChanged.from`/`to`) are decimal strings.
 
 ### `StartProvisioning { provider, region } → JobId`
 
@@ -126,3 +153,8 @@ defect.
 | IPC-07 | `DiagnosticBundle` contains no credential material and no browsing destinations by default. |
 | IPC-08 | Malformed frames, oversized lengths, and truncated payloads are rejected without panicking or leaking the connection. |
 | IPC-09 | A client disconnecting mid-request leaves no orphaned server task. |
+| IPC-10 | `Connect` selectors are validated server-side and every request round-trips. |
+| IPC-11 | A `StateSnapshot` round-trips; an inconsistent one cannot be encoded or decoded. |
+| IPC-12 | Every `ConnectionEvent` encodes with a `because` that explains it; a producer that supplies none is an error, not a blank. |
+| IPC-13 | The event bus replays the session, bounds its memory, numbers events and caps subscribers. |
+| IPC-14 | A subscription is one-way, bounded and ends when the client goes; verified over a real pipe in `pipe_stream.rs`. |

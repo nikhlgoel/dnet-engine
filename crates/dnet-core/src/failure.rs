@@ -111,6 +111,15 @@ pub struct Explanation {
     pub action: String,
 }
 
+/// A supervised core in words a user can read. The primary core is never named after its vendor
+/// (branding rule, `lint-branding`).
+pub fn core_description(core: &CoreBinding) -> &'static str {
+    match core {
+        CoreBinding::PrimaryCore => "the main connection engine",
+        CoreBinding::AmneziaWgCore => "the AmneziaWG engine",
+    }
+}
+
 /// Explain a cause. Every cause has its own title, detail and action.
 pub fn explain(cause: &FailureCause) -> Explanation {
     let (title, detail, action) = match cause {
@@ -145,10 +154,7 @@ pub fn explain(cause: &FailureCause) -> Explanation {
             "Restart the DNet Engine service as an administrator, or reinstall it, and try again.",
         ),
         FailureCause::CoreFailedPersistently { core } => {
-            let name = match core {
-                CoreBinding::PrimaryCore => "the main connection engine",
-                CoreBinding::AmneziaWgCore => "the AmneziaWG engine",
-            };
+            let name = core_description(core);
             (
                 "A connection component keeps failing",
                 format!(

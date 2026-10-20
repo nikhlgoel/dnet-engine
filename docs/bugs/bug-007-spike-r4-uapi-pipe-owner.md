@@ -1,6 +1,6 @@
 # BUG-007: SPIKE-R4 cannot start the AmneziaWG core from an Administrator shell
 
-**Status**: Open. The cause is checked against the pinned source; the workaround has not been run
+**Status**: Worked around. The cause is checked against the pinned source; the SYSTEM workaround ran on 2026-10-20. Closes when T055 / T098a completes
 **Severity**: **High**
 **Found**: 2026-10-16, by reading the results folder of the 2026-09-11 22:07 spike run. It was not noticed at the time
 **Area**: `testing/spike-r4`, and `dnet-supervisor` (the identity the cores are launched under)
@@ -59,27 +59,40 @@ shell that fails.
 
 ## Resolution
 
-None yet. The runbook now says to run the spike as LocalSystem (2026-10-16).
+**Workaround confirmed 2026-10-20.** Run as LocalSystem (a SYSTEM scheduled task, by
+`testing/spike-r4/Invoke-WslLab.ps1`): the AmneziaWG core created its control pipe, the runner
+configured the peer through it and removed it again at teardown. The core was never started from an
+Administrator shell in that run, so the inference about the privilege (`SeRestorePrivilege` disabled in an
+Administrator token) is consistent with this but was not tested directly.
 
-Two ways to get past it, neither run yet:
+Two ways to get past it, the first now proven:
 
 1. **Run the spike as LocalSystem** (Sysinternals PsExec `-s`, or a scheduled task running as SYSTEM).
    Preferred: it matches the identity the shipped service uses, so the run also exercises production
    conditions.
 2. **Enable `SeRestorePrivilege`** in the runner process before it spawns the cores. A child process
    inherits the privilege's enabled state. This changes how the cores are launched, so it would need
-   its own review.
+   its own review. Not tried.
 
 Not recommended: patching the core's descriptor. It carries a source patch for a harness-identity
 problem and makes the tested binary differ from the shipped one.
 
 ## Prevention
 
-Proposed, not done:
+**Done 2026-10-20** (checked by parsing, a regex test on the real log line, and the non-elevated
+refusal; the `IsSystem` branch itself needs an elevated shell and has not been exercised):
 
-- **Preflight.** `Invoke-SpikeR4.ps1` should check for `WindowsIdentity.IsSystem` and stop with exit
-  code 2 and a pointer to this bug, instead of accepting any Administrator shell.
-- **Verdict text.** A core that never becomes ready should name the core's last error line in
-  `summary.md`, so the cause is not left in `runner.log`.
+- **Preflight.** `Invoke-SpikeR4.ps1` stops with exit code 2, naming this bug, when `-Transport A`
+  is run by anything other than LocalSystem. Hysteria 2 is exempt: it runs the primary core alone and
+  has no such pipe.
+- **Verdict text.** A core that never becomes ready now puts the core's last `uapi socket` line in
+  the run's error, which reaches `summary.md`, with a BUG-007 hint when it is the owner refusal.
+- **A SYSTEM launcher.** `testing/spike-r4/Invoke-WslLab.ps1` runs the gate through a SYSTEM
+  scheduled task, so the lab path does not depend on PsExec.
+
+Still open:
+
 - **Close this bug** when the live run (T055 / T098a) completes under SYSTEM. Record the verdict here
   and in `tasks.md`.
+- Whether `dnetd --console` (the developer's own account) hits the same refusal on a Profile A connect.
+  Unverified; the installed LocalSystem service is expected to be fine.
