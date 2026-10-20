@@ -19,16 +19,17 @@ dnet-supervisor = { workspace = true }
 dnet-config = { workspace = true }
 dnet-etw = { workspace = true }
 dnet-netstate = { workspace = true }
+dnet-probe = { workspace = true }
 dnet-provision = { workspace = true }
 anyhow = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time", "sync", "net"] }
+tokio-util = { workspace = true }
 tracing = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
-uuid = { workspace = true }
 tracing-subscriber = { workspace = true }
 windows-service = { workspace = true }
-windows = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Memory", "Win32_System_RemoteDesktop"] }
+windows = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Memory", "Win32_System_RemoteDesktop", "Win32_System_Threading"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util", "macros", "rt", "time", "sync", "net", "io-util"] }

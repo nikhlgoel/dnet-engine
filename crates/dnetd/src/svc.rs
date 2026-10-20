@@ -56,7 +56,10 @@ fn run() -> anyhow::Result<()> {
     let status_handle = service_control_handler::register(SERVICE_NAME, handler)
         .map_err(|e| anyhow::anyhow!("failed to register the service control handler: {e}"))?;
 
-    let report = |state: ServiceState, accept: ServiceControlAccept| -> anyhow::Result<()> {
+    let report = |state: ServiceState,
+                  accept: ServiceControlAccept,
+                  wait_hint: Duration|
+     -> anyhow::Result<()> {
         status_handle
             .set_service_status(ServiceStatus {
                 service_type: SERVICE_TYPE,
@@ -64,17 +67,23 @@ fn run() -> anyhow::Result<()> {
                 controls_accepted: accept,
                 exit_code: ServiceExitCode::Win32(0),
                 checkpoint: 0,
-                wait_hint: Duration::from_secs(5),
+                wait_hint,
                 process_id: None,
             })
             .map_err(|e| anyhow::anyhow!("failed to set service status: {e}"))
     };
 
-    report(ServiceState::Running, ServiceControlAccept::STOP)?;
+    report(
+        ServiceState::Running,
+        ServiceControlAccept::STOP,
+        Duration::default(),
+    )?;
     tracing::info!("dnetd running as a Windows service");
 
-    let service = crate::build_service();
     let runtime = tokio::runtime::Runtime::new()?;
+    // The orchestrator spawns its tasks when the service is built, so a runtime must be current.
+    let _entered = runtime.enter();
+    let (service, orchestrator) = crate::build_service();
     runtime.block_on(async {
         tokio::select! {
             result = dnet_ipc::server::run_control_listener(service) => {
@@ -86,8 +95,19 @@ fn run() -> anyhow::Result<()> {
                 tracing::info!("stop requested by the SCM");
             }
         }
+        // Bringing a tunnel down can take a while; say so, so the SCM does not take it for a hang.
+        let _ = report(
+            ServiceState::StopPending,
+            ServiceControlAccept::empty(),
+            crate::SHUTDOWN_WAIT,
+        );
+        crate::shutdown_orchestrator(orchestrator).await;
     });
 
-    report(ServiceState::Stopped, ServiceControlAccept::empty())?;
+    report(
+        ServiceState::Stopped,
+        ServiceControlAccept::empty(),
+        Duration::default(),
+    )?;
     Ok(())
 }

@@ -18,6 +18,7 @@ pub mod health;
 pub mod hostname;
 pub mod ids;
 pub mod migrate;
+pub mod origin;
 pub mod path;
 pub mod posture;
 pub mod probe;

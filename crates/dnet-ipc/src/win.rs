@@ -13,11 +13,12 @@ use std::os::windows::io::RawHandle;
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL};
 use windows::Win32::Security::Authorization::{
-    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo,
+    SDDL_REVISION_1, SE_FILE_OBJECT,
 };
 use windows::Win32::Security::{
-    GetTokenInformation, RevertToSelf, TokenSessionId, TokenUser, PSECURITY_DESCRIPTOR,
-    SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
+    GetTokenInformation, RevertToSelf, TokenSessionId, TokenUser, OWNER_SECURITY_INFORMATION,
+    PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
 };
 use windows::Win32::System::Pipes::ImpersonateNamedPipeClient;
 use windows::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
@@ -167,6 +168,50 @@ unsafe fn token_user_sid(token: HANDLE) -> Option<String> {
         let _ = LocalFree(HLOCAL(sid_string.0 as *mut c_void));
     }
     sid
+}
+
+/// The SID, as text, of the **owner of the object** behind an open pipe handle.
+///
+/// This is how a client tells the real service from an impostor: the service creates its pipe as
+/// SYSTEM (or, in a development run from an elevated shell, as Administrators), so the pipe object
+/// is owned by one of those. A process started by an ordinary user that created the pipe name
+/// first owns its pipe itself. Reading the owner needs only the read access the pipe already
+/// grants every authenticated user.
+pub fn pipe_owner_sid(handle: RawHandle) -> Option<String> {
+    let mut owner = PSID::default();
+    let mut descriptor = PSECURITY_DESCRIPTOR::default();
+    // SAFETY: `handle` is open for the duration of the call (the caller holds the pipe);
+    // `owner` points into `descriptor`, a LocalAlloc'd buffer freed below after the SID is copied.
+    unsafe {
+        let status = GetSecurityInfo(
+            HANDLE(handle),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            Some(&mut owner),
+            None,
+            None,
+            None,
+            Some(&mut descriptor),
+        );
+        if status.is_err() || owner.0.is_null() {
+            if !descriptor.0.is_null() {
+                let _ = LocalFree(HLOCAL(descriptor.0));
+            }
+            return None;
+        }
+        let mut text = PWSTR::null();
+        let converted = ConvertSidToStringSidW(owner, &mut text).is_ok();
+        let sid = if converted {
+            text.to_string().ok()
+        } else {
+            None
+        };
+        if !text.is_null() {
+            let _ = LocalFree(HLOCAL(text.0 as *mut c_void));
+        }
+        let _ = LocalFree(HLOCAL(descriptor.0));
+        sid
+    }
 }
 
 /// SAFETY: `token` is an open access token handle with `TOKEN_QUERY`.

@@ -18,7 +18,7 @@ use dnet_core::rule::{validate_dns_leak_protection, validate_rule_set, RoutingRu
 use dnet_ipc::protocol::{encode_state_snapshot, ConnectionStatus, RoutingPosture, StateSnapshot};
 use serde_json::{json, Value};
 
-use crate::persist::{self, LoadedConfig, PersistError};
+use dnet_config::persist::{LoadedConfig, PersistError};
 
 /// The outcome of reading the saved configuration at start-up.
 pub struct StartupConfig {
@@ -66,7 +66,7 @@ impl DomainState {
         let mut state = Self::seeded();
         for saved in loaded.profiles {
             let Some(slot) = state.profiles.iter_mut().find(|p| p.id() == &saved.id) else {
-                // `persist::decode` refuses ids outside the catalogue; reaching here is a defect.
+                // `dnet_config::persist::decode` refuses ids outside the catalogue; reaching here is a defect.
                 return Err(PersistError::Invalid(
                     "a saved profile is not in the catalogue".into(),
                 ));
@@ -125,7 +125,7 @@ impl DomainState {
     // Saving has no caller until configuration requests carry payloads (Phase 9, T126); tests cover it.
     #[allow(dead_code)]
     pub fn to_config_bytes(&self) -> Result<Vec<u8>, PersistError> {
-        persist::encode(&self.endpoints, &self.profiles)
+        dnet_config::persist::encode(&self.endpoints, &self.profiles)
     }
 
     // ----------------------------------------------------------- wire responses
@@ -548,7 +548,7 @@ mod tests {
     }
 
     fn reload(state: &DomainState) -> StartupConfig {
-        let loaded = persist::decode(&state.to_config_bytes().unwrap()).unwrap();
+        let loaded = dnet_config::persist::decode(&state.to_config_bytes().unwrap()).unwrap();
         DomainState::from_load_result(Ok(Some(loaded)))
     }
 
@@ -606,7 +606,8 @@ mod tests {
     #[test]
     fn notes_from_loading_are_passed_on_and_do_not_refuse_the_file() {
         let mut loaded =
-            persist::decode(&state_with_settings().to_config_bytes().unwrap()).unwrap();
+            dnet_config::persist::decode(&state_with_settings().to_config_bytes().unwrap())
+                .unwrap();
         loaded
             .notes
             .push("profile 'hy2-default': Brutal ... turned off".into());

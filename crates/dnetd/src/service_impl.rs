@@ -5,21 +5,26 @@
 //! never re-checks identity — but it also performs no privileged action beyond what the
 //! request's class permits.
 //!
-//! Scope at this phase: the read-only queries are fully served from the domain store.
-//! Connect/Disconnect and the config mutations are recognized but return an honest
-//! "not available yet" error, because tunnel establishment lands in Phases 4–6 and the
-//! request wire types do not yet carry mutation payloads (that arrives with the tray,
-//! Phase 9). The privilege boundary and the read path are real now.
+//! The read-only queries are served from the domain store. With a connection orchestrator
+//! attached (T126), `Connect`, `Disconnect` and `GetState` are served by it; without one they
+//! answer honestly that connecting is not available. The configuration mutations are recognized
+//! but return the same honest answer, because the request wire types do not yet carry mutation
+//! payloads (that arrives with the tray, Phase 9). The privilege boundary and the read path are
+//! real now.
 
 use std::sync::Mutex;
 
 use dnet_ipc::authz::ConsoleSession;
-use dnet_ipc::protocol::{IpcError, Request, RequestClass};
+use dnet_ipc::protocol::{encode_state_snapshot, IpcError, Request, RequestClass};
 use dnet_ipc::service::Service;
 use dnet_ipc::wire::{EventBus, Subscription};
 
 use crate::domain::DomainState;
+use crate::orchestrator::Handle;
 use crate::recovery::{Recovered, RecoveryError};
+
+/// The reply to a request the orchestrator took on. Progress follows on the event stream.
+const ACCEPTED: &str = r#"{"accepted":true}"#;
 
 /// How the service learns who the interactive console user is.
 ///
@@ -39,6 +44,9 @@ pub struct DnetService {
     /// mutating request is refused, exactly as after a failed recovery: the service keeps answering
     /// read-only queries so the user can see why, and it never saves over a file it could not read.
     config_refusal: Option<String>,
+    /// The connection orchestrator (T126), once one is attached. Without it, connecting is not
+    /// available and `GetState` reports the idle state.
+    orchestrator: Option<Handle>,
 }
 
 impl DnetService {
@@ -55,7 +63,72 @@ impl DnetService {
             recovery,
             events: EventBus::new(),
             config_refusal: None,
+            orchestrator: None,
         }
+    }
+
+    /// Attach the connection orchestrator. It must publish to [`DnetService::events`], so that a
+    /// subscriber sees what it does.
+    pub fn with_orchestrator(mut self, handle: Handle) -> Self {
+        self.orchestrator = Some(handle);
+        self
+    }
+
+    /// The orchestrator, for whoever must shut it down when the service stops.
+    pub fn orchestrator_handle(&self) -> Option<Handle> {
+        self.orchestrator.clone()
+    }
+
+    /// Attach the orchestrator with the real effects (T126), if the service is in a state to
+    /// connect: start-up recovery succeeded, and the saved configuration was accepted. Otherwise
+    /// the service is returned as it is, and every connect answers that connecting is unavailable,
+    /// for the reason already logged. Must be called with a Tokio runtime current.
+    #[cfg(windows)]
+    pub fn with_production_orchestrator(self) -> Self {
+        use std::sync::Arc;
+
+        use dnet_config::persist::default_secrets_dir;
+        use dnet_config::secret_store::machine_secret_store;
+        use dnet_core::engine::Engine;
+
+        use crate::effects::{Layout, RealEffects};
+        use crate::orchestrator::{self, Timing};
+
+        let undo = match &self.recovery {
+            Ok(recovered) => Arc::clone(recovered.undo()),
+            Err(_) => return self,
+        };
+        if self.config_refusal.is_some() {
+            return self;
+        }
+        let layout = match Layout::installed() {
+            Ok(layout) => layout,
+            Err(error) => {
+                tracing::error!(kind = ?error.kind(), "the service cannot find its own files; connecting is unavailable");
+                return self;
+            }
+        };
+        let (profiles, endpoints, rules) = {
+            let state = self.state.lock().expect("domain state mutex poisoned");
+            (
+                state.profiles().to_vec(),
+                state.endpoints().to_vec(),
+                state.rules().to_vec(),
+            )
+        };
+        let secrets = Arc::new(machine_secret_store(default_secrets_dir()));
+        let (effects, profiles, usable) =
+            RealEffects::new(profiles, &endpoints, rules, secrets, undo, layout);
+        // Only endpoints that can be used, and profiles they can serve, are known to the engine,
+        // so it never chooses one that would fail after a race.
+        let engine = Engine::new(profiles, usable);
+        let timing = Timing {
+            // A refused connection takes Windows about two seconds to report.
+            reach_timeout: std::time::Duration::from_secs(4),
+            ..Timing::default()
+        };
+        let handle = orchestrator::spawn(engine, Arc::new(effects), self.events.clone(), timing);
+        self.with_orchestrator(handle)
     }
 
     /// Mark the saved configuration as refused for `reason`. See the field.
@@ -65,7 +138,7 @@ impl DnetService {
     }
 
     /// The bus the connection orchestrator publishes to.
-    #[allow(dead_code)] // Used by the orchestrator (T126).
+    #[allow(dead_code)] // The tests read it; the production service passes its own clone.
     pub fn events(&self) -> &EventBus {
         &self.events
     }
@@ -75,7 +148,7 @@ impl DnetService {
     #[cfg(windows)]
     pub fn production(recovery: Result<Recovered, RecoveryError>) -> Self {
         use crate::domain::StartupConfig;
-        use crate::persist::{default_config_path, ConfigStore, TrustedStateFile};
+        use dnet_config::persist::{default_config_path, ConfigStore, TrustedStateFile};
 
         let store = ConfigStore::new(Box::new(TrustedStateFile::new(default_config_path())));
         let StartupConfig {
@@ -127,7 +200,8 @@ impl Service for DnetService {
             if let Some(reason) = &self.config_refusal {
                 return Err(IpcError::InternalError {
                     detail: format!(
-                        "{reason}. DNet Engine will not connect or change anything until the file                          is corrected or removed, then the service restarted"
+                        "{reason}. DNet Engine will not connect or change anything until the \
+                         file is corrected or removed, then the service restarted"
                     ),
                 });
             }
@@ -135,15 +209,44 @@ impl Service for DnetService {
         let state = self.state.lock().expect("domain state mutex poisoned");
         match request {
             // Fully served now.
-            Request::GetState => Ok(state.state_snapshot_json()),
+            Request::GetState => match &self.orchestrator {
+                Some(orchestrator) => encode_state_snapshot(&orchestrator.snapshot()),
+                None => Ok(state.state_snapshot_json()),
+            },
             Request::GetSession => Ok(state.session_json()),
             Request::ListEndpoints => Ok(state.endpoints_json()),
             Request::ListProfiles => Ok(state.profiles_json()),
             Request::ListRules => Ok(state.rules_json()),
             Request::GetDiagnostics => Ok(state.session_json()), // placeholder bundle; T112 fills it
 
+            Request::Connect {
+                profile, endpoint, ..
+            } => match &self.orchestrator {
+                // `acknowledge_tier2` is not consulted: a connect races only the profiles it names
+                // or all of them and prefers Tier 1, so the consent case the flag answers cannot
+                // arise here (engine.rs). Tier 2 is warned about in the state, not refused.
+                Some(orchestrator) => {
+                    if endpoint.is_some() {
+                        return Err(IpcError::InvalidRequest {
+                            detail: "choosing a particular endpoint is not supported yet; connect \
+                                     without one and the best endpoint is used"
+                                .to_string(),
+                        });
+                    }
+                    orchestrator.connect(profile.clone())?;
+                    Ok(ACCEPTED.to_string())
+                }
+                None => Self::not_available("connecting"),
+            },
+            Request::Disconnect => match &self.orchestrator {
+                Some(orchestrator) => {
+                    orchestrator.disconnect()?;
+                    Ok(ACCEPTED.to_string())
+                }
+                None => Self::not_available("disconnecting"),
+            },
+
             // Recognized, authorized, but not yet actionable.
-            Request::Connect { .. } | Request::Disconnect => Self::not_available("connecting"),
             Request::AddEndpoint
             | Request::RemoveEndpoint
             | Request::SetEndpointEnabled
@@ -380,6 +483,223 @@ mod tests {
             svc.dispatch(&Request::Disconnect),
             Err(IpcError::InternalError { detail }) if detail.contains("not available")
         ));
+    }
+
+    // ---------------------------------------------------------------- with an orchestrator (T126)
+
+    mod orchestrated {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        use dnet_core::credential::CredentialRef;
+        use dnet_core::endpoint::{Endpoint, EndpointAddress, EndpointOrigin};
+        use dnet_core::engine::{Engine, Environment};
+        use dnet_core::failure::Reach;
+        use dnet_core::health::ProbeOutcome;
+        use dnet_core::ids::{EndpointId, ProfileId};
+        use dnet_core::probe::{ProfileProbe, RaceDecision};
+        use dnet_core::reprobe::LiveCheck;
+        use dnet_core::session::FailureCause;
+        use dnet_core::tier::FailoverTier;
+        use dnet_ipc::protocol::{decode_state_snapshot, ConnectionStatus};
+        use dnet_ipc::wire::decode_event_view;
+        use tokio_util::sync::CancellationToken;
+
+        use super::*;
+        use crate::orchestrator::{self, Effects, RaceOutcome, Timing};
+
+        /// An endpoint that always works: the race picks Hysteria 2 and the tunnel comes up.
+        struct Quick;
+
+        impl Effects for Quick {
+            fn environment(&self) -> Environment {
+                Environment::default()
+            }
+            async fn reach(&self, endpoints: &[Endpoint]) -> Vec<Reach> {
+                vec![Reach::Reachable; endpoints.len()]
+            }
+            async fn race(
+                &self,
+                _profiles: Vec<ProfileId>,
+                _endpoint: EndpointId,
+                cancel: CancellationToken,
+            ) -> Option<RaceOutcome> {
+                // Long enough that a test can act while the connect is still in progress.
+                tokio::select! {
+                    () = cancel.cancelled() => None,
+                    () = tokio::time::sleep(Duration::from_secs(2)) => Some((
+                        RaceDecision::Selected {
+                            profile: ProfileId::new("hy2-default"),
+                            tier: FailoverTier::Tier2,
+                            bits_per_sec: 10_000_000,
+                        },
+                        vec![(
+                            ProfileId::new("hy2-default"),
+                            ProfileProbe::Transferred {
+                                bytes: 1_000_000,
+                                elapsed: Duration::from_secs(1),
+                            },
+                        )],
+                    )),
+                }
+            }
+            async fn start_tunnel(&self, _: &ProfileId, _: EndpointId) -> Result<(), FailureCause> {
+                Ok(())
+            }
+            async fn stop_tunnel(&self) {}
+            async fn live_check(&self, _: &ProfileId) -> LiveCheck {
+                LiveCheck::Passed
+            }
+            async fn probe_endpoint(&self, _: EndpointId) -> ProbeOutcome {
+                ProbeOutcome::Ok {
+                    rtt: Duration::from_millis(30),
+                    loss: false,
+                }
+            }
+        }
+
+        fn connect_request() -> Request {
+            Request::Connect {
+                acknowledge_tier2: false,
+                profile: None,
+                endpoint: None,
+            }
+        }
+
+        fn orchestrated_service() -> DnetService {
+            let service = service();
+            let endpoint = Endpoint::new(
+                EndpointId::new(),
+                "home",
+                EndpointAddress::new("203.0.113.10", 51820).unwrap(),
+                EndpointOrigin::Manual,
+                CredentialRef::new("endpoint-home"),
+            )
+            .unwrap();
+            let engine = Engine::new(DomainState::seeded().profiles().to_vec(), vec![endpoint]);
+            let handle = orchestrator::spawn(
+                engine,
+                Arc::new(Quick),
+                service.events().clone(),
+                Timing::default(),
+            );
+            service.with_orchestrator(handle)
+        }
+
+        /// What a client reading `GetState` sees, decoded with the client rules.
+        fn state_of(svc: &DnetService) -> dnet_ipc::protocol::StateSnapshot {
+            decode_state_snapshot(&svc.dispatch(&Request::GetState).unwrap())
+                .expect("the daemon only ever serves a state a client can read")
+        }
+
+        async fn until_status(svc: &DnetService, want: ConnectionStatus) {
+            for _ in 0..1000 {
+                if state_of(svc).status == want {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            panic!("never reached {want:?}; last {:?}", state_of(svc));
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn a_connect_through_the_service_runs_the_orchestrator() {
+            let svc = orchestrated_service();
+            assert_eq!(state_of(&svc).status, ConnectionStatus::Disconnected);
+
+            let reply = svc.dispatch(&connect_request()).unwrap();
+            assert_eq!(reply, r#"{"accepted":true}"#);
+
+            until_status(&svc, ConnectionStatus::Connected).await;
+            let connected = state_of(&svc);
+            assert_eq!(connected.active_profile.unwrap().id, "hy2-default");
+            assert_eq!(connected.active_endpoint.unwrap().label, "home");
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn progress_arrives_on_the_event_stream_not_in_the_reply() {
+            let svc = orchestrated_service();
+            // Subscribe first, as a client would, then connect.
+            let mut subscription = svc.subscribe().unwrap();
+
+            svc.dispatch(&connect_request()).unwrap();
+            until_status(&svc, ConnectionStatus::Connected).await;
+
+            let mut seen = Vec::new();
+            while let Ok(frame) = subscription.live.try_recv() {
+                // Each is read with the client rule: a real `because`, never blank.
+                seen.push(decode_event_view(&frame).expect("an explained event").event);
+            }
+            assert!(seen.contains(&"ProbeStarted".to_string()), "{seen:?}");
+            assert!(seen.contains(&"ProfileSelected".to_string()), "{seen:?}");
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn the_service_answers_honestly_about_what_it_cannot_do_in_the_current_state() {
+            let svc = orchestrated_service();
+            assert_eq!(
+                svc.dispatch(&Request::Disconnect),
+                Err(IpcError::NotConnected)
+            );
+
+            svc.dispatch(&connect_request()).unwrap();
+            assert_eq!(
+                svc.dispatch(&connect_request()),
+                Err(IpcError::ServiceBusy),
+                "a second connect while one is under way is refused, not ignored"
+            );
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn a_named_endpoint_is_refused_with_a_reason_not_silently_ignored() {
+            let svc = orchestrated_service();
+            let request = Request::Connect {
+                acknowledge_tier2: false,
+                profile: None,
+                endpoint: Some(EndpointId::new()),
+            };
+            match svc.dispatch(&request) {
+                Err(IpcError::InvalidRequest { detail }) => {
+                    assert!(detail.contains("not supported yet"), "{detail}")
+                }
+                other => panic!("expected a refusal that says why, got {other:?}"),
+            }
+            assert_eq!(state_of(&svc).status, ConnectionStatus::Disconnected);
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn disconnect_takes_a_live_connection_down() {
+            let svc = orchestrated_service();
+            svc.dispatch(&connect_request()).unwrap();
+            until_status(&svc, ConnectionStatus::Connected).await;
+
+            assert_eq!(
+                svc.dispatch(&Request::Disconnect).unwrap(),
+                r#"{"accepted":true}"#
+            );
+            until_status(&svc, ConnectionStatus::Disconnected).await;
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn the_recovery_and_configuration_gates_still_come_first() {
+            // A refused saved configuration must keep the orchestrator from ever being asked.
+            let svc = orchestrated_service().with_config_refusal(Some("refused".into()));
+            assert!(matches!(
+                svc.dispatch(&connect_request()),
+                Err(IpcError::InternalError { .. })
+            ));
+            assert_eq!(state_of(&svc).status, ConnectionStatus::Disconnected);
+        }
+    }
+
+    #[test]
+    fn the_refusal_message_reads_as_a_sentence() {
+        // The wording once carried a run of spaces from a flattened line continuation.
+        let svc = service_with_refused_config();
+        let Err(IpcError::InternalError { detail }) = svc.dispatch(&Request::Disconnect) else {
+            panic!("a mutating request must be refused");
+        };
+        assert!(!detail.contains("  "), "{detail:?}");
     }
 
     #[test]

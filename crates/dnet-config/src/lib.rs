@@ -24,6 +24,7 @@ pub mod credentials;
 pub mod endpoint_bypass;
 pub mod error;
 pub mod hysteria2;
+pub mod persist;
 pub mod primary;
 pub mod probe;
 pub mod reality;

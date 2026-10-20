@@ -20,8 +20,8 @@ use std::collections::{BTreeMap, HashSet};
 use std::net::IpAddr;
 use std::path::PathBuf;
 
-use dnet_config::secret_store::SecretKey;
-use dnet_config::write::default_run_dir;
+use crate::secret_store::SecretKey;
+use crate::write::default_run_dir;
 use dnet_core::catalogue::bundled_kind;
 use dnet_core::credential::CredentialRef;
 use dnet_core::endpoint::{Endpoint, EndpointAddress, EndpointOrigin};
@@ -96,8 +96,6 @@ pub fn default_config_path() -> PathBuf {
 }
 
 /// Where the sealed secrets are.
-// Read by the orchestrator (T126), which opens the secret store; tests cover it.
-#[allow(dead_code)]
 pub fn default_secrets_dir() -> PathBuf {
     default_run_dir().with_file_name("state").join("secrets")
 }
@@ -123,8 +121,6 @@ pub struct LoadedConfig {
 /// One file of bytes. The production one is a `TrustedFile`; tests use memory.
 pub trait StateFile: Send + Sync {
     fn read(&self) -> Result<Option<Vec<u8>>, String>;
-    // Saving has no caller until configuration requests carry payloads (Phase 9, T126); tests cover it.
-    #[allow(dead_code)]
     fn write(&self, bytes: &[u8]) -> Result<(), String>;
 }
 
@@ -147,8 +143,6 @@ impl ConfigStore {
     }
 
     /// Save `endpoints` and the settings of `profiles`, replacing what was there.
-    // Saving has no caller until configuration requests carry payloads (Phase 9, T126); tests cover it.
-    #[allow(dead_code)]
     pub fn save(
         &self,
         endpoints: &[Endpoint],
@@ -157,6 +151,58 @@ impl ConfigStore {
         let bytes = encode(endpoints, profiles)?;
         self.file.write(&bytes).map_err(PersistError::Storage)
     }
+
+    /// Save a configuration as it was loaded, replacing what was there.
+    pub fn save_config(&self, config: &LoadedConfig) -> Result<(), PersistError> {
+        let bytes = encode_config(config)?;
+        self.file.write(&bytes).map_err(PersistError::Storage)
+    }
+}
+
+/// A state file held in memory: for dry runs, and for tests of anything that saves a configuration.
+#[derive(Default)]
+pub struct MemoryStateFile {
+    bytes: std::sync::Mutex<Option<Vec<u8>>>,
+}
+
+impl MemoryStateFile {
+    /// A file that already holds `bytes` (or does not exist, for `None`).
+    pub fn with_bytes(bytes: Option<Vec<u8>>) -> Self {
+        Self {
+            bytes: std::sync::Mutex::new(bytes),
+        }
+    }
+
+    /// What the file holds now.
+    pub fn bytes(&self) -> Option<Vec<u8>> {
+        self.bytes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+impl StateFile for MemoryStateFile {
+    fn read(&self) -> Result<Option<Vec<u8>>, String> {
+        Ok(self.bytes())
+    }
+    fn write(&self, bytes: &[u8]) -> Result<(), String> {
+        *self
+            .bytes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(bytes.to_vec());
+        Ok(())
+    }
+}
+
+/// A shared handle to a state file is a state file, so a caller can keep one end.
+impl<T: StateFile + ?Sized> StateFile for std::sync::Arc<T> {
+    fn read(&self) -> Result<Option<Vec<u8>>, String> {
+        (**self).read()
+    }
+    fn write(&self, bytes: &[u8]) -> Result<(), String> {
+        (**self).write(bytes)
+    }
 }
 
 #[cfg(windows)]
@@ -164,7 +210,7 @@ pub use windows_file::TrustedStateFile;
 
 #[cfg(windows)]
 mod windows_file {
-    use dnet_config::trusted_file::TrustedFile;
+    use crate::trusted_file::TrustedFile;
 
     use super::StateFile;
 
@@ -294,44 +340,13 @@ fn plain_text(value: &str, what: &str) -> Result<(), PersistError> {
 ///
 /// Refuses what [`decode`] would refuse, so the service can never write a file it cannot read back
 /// (which would turn the next restart into a refused configuration).
-// Saving has no caller until configuration requests carry payloads (Phase 9, T126); tests cover it.
-#[allow(dead_code)]
 pub fn encode(
     endpoints: &[Endpoint],
     profiles: &[ConnectionProfile],
 ) -> Result<Vec<u8>, PersistError> {
-    let wire = Wire {
-        version: FORMAT_VERSION,
-        endpoints: endpoints
-            .iter()
-            .map(|e| EndpointWire {
-                id: e.id().to_string(),
-                label: e.label().to_owned(),
-                host: e.address().host().to_owned(),
-                port: e.address().port(),
-                origin: match e.origin() {
-                    EndpointOrigin::Manual => OriginWire {
-                        kind: "manual".into(),
-                        provider: None,
-                        region: None,
-                        resource_ids: None,
-                    },
-                    EndpointOrigin::Provisioned {
-                        provider,
-                        region,
-                        resource_ids,
-                    } => OriginWire {
-                        kind: "provisioned".into(),
-                        provider: Some(provider.clone()),
-                        region: Some(region.clone()),
-                        resource_ids: Some(resource_ids.clone()),
-                    },
-                },
-                credential: e.credentials().store_key().to_owned(),
-                enabled: e.is_enabled(),
-            })
-            .collect(),
-        profiles: profiles
+    finish(
+        endpoints,
+        profiles
             .iter()
             .map(|p| ProfileWire {
                 id: p.id().as_str().to_owned(),
@@ -348,6 +363,69 @@ pub fn encode(
                 }),
             })
             .collect(),
+    )
+}
+
+/// The stored form of a configuration that was read back (or built from one), for a tool that
+/// changes the saved configuration without a running service. Same rules as [`encode`].
+pub fn encode_config(config: &LoadedConfig) -> Result<Vec<u8>, PersistError> {
+    finish(
+        &config.endpoints,
+        config
+            .profiles
+            .iter()
+            .map(|p| ProfileWire {
+                id: p.id.as_str().to_owned(),
+                params: p
+                    .params
+                    .iter()
+                    .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                    .collect(),
+                brutal: p.brutal.map(|(bandwidth, ack)| BrutalWire {
+                    up_mbps: bandwidth.up_mbps,
+                    down_mbps: bandwidth.down_mbps,
+                    warning_revision: ack.warning_revision,
+                    acknowledged_at_unix: ack.acknowledged_at_unix,
+                }),
+            })
+            .collect(),
+    )
+}
+
+fn endpoint_wire(e: &Endpoint) -> EndpointWire {
+    EndpointWire {
+        id: e.id().to_string(),
+        label: e.label().to_owned(),
+        host: e.address().host().to_owned(),
+        port: e.address().port(),
+        origin: match e.origin() {
+            EndpointOrigin::Manual => OriginWire {
+                kind: "manual".into(),
+                provider: None,
+                region: None,
+                resource_ids: None,
+            },
+            EndpointOrigin::Provisioned {
+                provider,
+                region,
+                resource_ids,
+            } => OriginWire {
+                kind: "provisioned".into(),
+                provider: Some(provider.clone()),
+                region: Some(region.clone()),
+                resource_ids: Some(resource_ids.clone()),
+            },
+        },
+        credential: e.credentials().store_key().to_owned(),
+        enabled: e.is_enabled(),
+    }
+}
+
+fn finish(endpoints: &[Endpoint], profiles: Vec<ProfileWire>) -> Result<Vec<u8>, PersistError> {
+    let wire = Wire {
+        version: FORMAT_VERSION,
+        endpoints: endpoints.iter().map(endpoint_wire).collect(),
+        profiles,
     };
     let bytes = serde_json::to_vec_pretty(&wire).map_err(|e| malformed(&e))?;
     // The strongest statement that what is written can be read: read it.
@@ -558,11 +636,11 @@ fn decode_profile(
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use dnet_config::credentials::{EndpointCredentials, Hysteria2Bundle};
-    use dnet_config::hysteria2::{Hysteria2Credentials, Hysteria2EndpointParams, Hysteria2Obfs};
-    use dnet_config::secret::Secret;
-    use dnet_config::secret_store::{MemorySecretStore, SecretStore};
-    use dnet_config::tls::ServerTrust;
+    use crate::credentials::{EndpointCredentials, Hysteria2Bundle};
+    use crate::hysteria2::{Hysteria2Credentials, Hysteria2EndpointParams, Hysteria2Obfs};
+    use crate::secret::Secret;
+    use crate::secret_store::{MemorySecretStore, SecretStore};
+    use crate::tls::ServerTrust;
 
     use super::*;
 
@@ -768,6 +846,7 @@ mod tests {
         let key = SecretKey::parse(endpoints()[0].credentials()).unwrap();
         let bundle = EndpointCredentials {
             hysteria2: Some(Hysteria2Bundle {
+                server_port: 44443,
                 credentials: Hysteria2Credentials {
                     auth_password: Secret::new(format!("a-{SENTINEL}")),
                     obfs_password: Secret::new(format!("o-{SENTINEL}")),

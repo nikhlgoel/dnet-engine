@@ -5,7 +5,11 @@
 # the harness endpoint image). Everything here lives in the VM's memory: WSL discards it when the
 # VM idles down, which is why setup and keep-alive are one long-lived process and not two steps.
 #
-#   usage: wsl-endpoint.sh <endpoint-ip> <hold-seconds>   set up, print READY <eth0-ip>, hold
+#   usage: wsl-endpoint.sh <endpoint-ip> <hold-seconds> [all]
+#                                                         set up, print READY <eth0-ip>, hold.
+#                                                         With `all`, Hysteria 2 (udp/44443) and
+#                                                         VLESS+REALITY (tcp/8443) are served too,
+#                                                         for the T126 gate that drives the daemon.
 #          wsl-endpoint.sh diag                           print what the VM saw (after a run)
 #
 # Prints exactly one line "READY <eth0-ip>" on stdout when the server is up. Anything else on
@@ -40,6 +44,9 @@ if [ "${1:-}" = "diag" ]; then
   grep '^Udp:' /proc/net/snmp 2>/dev/null || true
   echo "== server log, worker start-up lines removed (newest 80):"
   grep -v -E 'Routine: (encryption|decryption|handshake) worker|Routine: (TUN reader|event worker|receive incoming)'     $STATE/awg-server.log 2>/dev/null | tail -n 80 || echo "(no server log)"
+  echo "== Hysteria 2 / REALITY server logs (newest 15 each):"
+  tail -n 15 "$STATE/hy2-server.log" 2>/dev/null || echo "(no Hysteria 2 server log)"
+  tail -n 15 "$STATE/reality-server.log" 2>/dev/null || echo "(no REALITY server log)"
   echo "== server's view of the peer:"
   python3 - <<'PY' 2>&1 || true
 import re, socket, time
@@ -66,8 +73,11 @@ fi
 
 ENDPOINT_IP="${1:-}"
 HOLD="${2:-}"
+SERVE="${3:-awg}"
+[ "$SERVE" = "awg" ] || [ "$SERVE" = "all" ] || fail_early=1
 
 fail() { echo "FAILED $*"; exit 1; }
+[ -z "${fail_early:-}" ] || fail "third argument must be 'all' or absent, got '$SERVE'"
 
 [[ "$ENDPOINT_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || fail "endpoint ip '$ENDPOINT_IP' is not a dotted quad"
 [[ "$HOLD" =~ ^[0-9]+$ ]] && [ "$HOLD" -ge 60 ] || fail "hold seconds '$HOLD' must be an integer >= 60"
@@ -81,6 +91,8 @@ selftest_rule=(OUTPUT -d "$ENDPOINT_IP" -p udp --dport 51899 -j DNAT --to-destin
 
 cleanup() {
   pkill -x amneziawg-go 2>/dev/null || true
+  pkill -x primary-core 2>/dev/null || true
+  pkill -f /opt/reality-target.py 2>/dev/null || true
   pkill -f /opt/lab-sniff.py 2>/dev/null || true
   pkill -f /opt/origin.py 2>/dev/null || true
   iptables -t nat -D "${dnat_rule[@]}" 2>/dev/null || true
@@ -166,6 +178,16 @@ LOG_LEVEL=debug /opt/awg-server.sh < /dev/null || fail "/opt/awg-server.sh exite
 
 [ -s /opt/state/awg-client.json ] || fail "awg-client.json was not written"
 
+# The other two transports, served by the pinned primary core, when asked. Each script generates
+# (or reuses) test keys, validates its configuration with the core's own `check` and writes the
+# client parameters beside awg-client.json.
+if [ "$SERVE" = "all" ]; then
+  /opt/hy2-server.sh < /dev/null > "$STATE/hy2-setup.log" 2>&1 || fail "/opt/hy2-server.sh failed: $(tail -n 3 "$STATE/hy2-setup.log" | tr '\n' ' ')"
+  /opt/reality-server.sh < /dev/null > "$STATE/reality-setup.log" 2>&1 || fail "/opt/reality-server.sh failed: $(tail -n 3 "$STATE/reality-setup.log" | tr '\n' ' ')"
+  [ -s /opt/state/hy2-client.json ] || fail "hy2-client.json was not written"
+  [ -s /opt/state/reality-client.json ] || fail "reality-client.json was not written"
+fi
+
 # The HTTP origin the runner downloads from THROUGH the tunnel (203.0.113.80:8080, an address the
 # server script put on lo). The Docker image's entrypoint starts it; this script replaces that
 # entrypoint, so it must too. Without it the tunnel works and every transfer is reset by a host with
@@ -193,6 +215,11 @@ grep -qi ":${PORT_HEX} " /proc/net/udp /proc/net/udp6 || fail "nothing is listen
 iptables -t nat -C "${dnat_rule[@]}" || fail "the DNAT rule is missing"
 pgrep -f /opt/lab-sniff.py > /dev/null || fail "the packet recorder is not running"
 pgrep -f /opt/origin.py > /dev/null || fail "the HTTP origin is not running"
+if [ "$SERVE" = "all" ]; then
+  # 44443 = 0xAD9B (udp, Hysteria 2); 8443 = 0x20FB (tcp, REALITY).
+  grep -qi ":AD9B " /proc/net/udp /proc/net/udp6 || fail "nothing is listening on udp/44443 (Hysteria 2)"
+  grep -qi ":20FB " /proc/net/tcp /proc/net/tcp6 || fail "nothing is listening on tcp/8443 (REALITY)"
+fi
 
 echo "READY ${ETH0_IP}"
 # Hold the VM alive for the whole run. `exec` would skip the EXIT trap, so keep the shell.

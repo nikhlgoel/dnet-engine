@@ -252,6 +252,45 @@ mod tests {
         assert!(!err.to_string().contains("planted"));
     }
 
+    /// The defence against a pre-created directory. A temporary directory is owned by an ordinary
+    /// user, which is exactly who could plant one under `%PROGRAMDATA%`, so it must be refused
+    /// without elevation. Nothing may be written into it.
+    #[test]
+    fn a_directory_owned_by_an_ordinary_user_is_refused_and_nothing_is_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = TrustedFile::new(dir.path().join("state").join("config.json"));
+
+        let err = file.write(b"secret-ish").unwrap_err();
+
+        // Let the temporary directory be cleaned up: the refused write had restricted it.
+        let state_dir = dir.path().join("state");
+        let _ = win::apply_protected_dacl(&state_dir, "D:P(A;OICI;FA;;;WD)");
+        assert!(matches!(err, TrustedFileError::Untrusted(_)), "{err:?}");
+        assert!(err.to_string().contains("refusing"), "{err}");
+        assert!(
+            !state_dir.join("config.json").exists() && !state_dir.join("config.json.tmp").exists(),
+            "a refused write must leave no file behind"
+        );
+    }
+
+    #[test]
+    fn removing_inside_a_directory_owned_by_an_ordinary_user_is_refused_and_the_file_stays() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret-x.bin");
+        std::fs::write(&path, b"keep me").unwrap();
+
+        let err = TrustedFile::new(&path).remove().unwrap_err();
+
+        assert!(matches!(err, TrustedFileError::Untrusted(_)), "{err:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"keep me");
+    }
+
+    #[test]
+    fn a_path_with_no_parent_directory_is_an_error_not_a_panic() {
+        let file = TrustedFile::new("");
+        assert!(matches!(file.write(b"x"), Err(TrustedFileError::Io(_))));
+    }
+
     #[test]
     fn removing_a_file_that_is_not_there_is_not_an_error() {
         let dir = tempfile::tempdir().unwrap();

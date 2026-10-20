@@ -6,6 +6,7 @@
 //! Contract: `specs/001-network-resilience-client/contracts/ipc-protocol.md`.
 
 pub mod authz;
+pub mod client;
 pub mod frame;
 pub mod protocol;
 pub mod server;

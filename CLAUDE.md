@@ -27,6 +27,8 @@ cargo test --workspace
 cargo run -p xtask -- verify-vendor    # no Wintun source, no embedded executables, signed DLL
 cargo run -p xtask -- lint-branding    # confines the primary core's vendor name to attribution files
 cargo run -p xtask -- fetch-vendor     # builds the pinned cores from source; needs Go
+cargo run -p xtask -- import-harness-endpoint --host <ip> --dry-run   # put the harness endpoint into the stores (real run: elevated)
+cargo run -p dnetctl -- status          # talk to the running service: status, connect, disconnect, events, profiles, endpoints
 ```
 
 `cargo xtask <task>` works too: `.cargo/config.toml` aliases it to the form above.

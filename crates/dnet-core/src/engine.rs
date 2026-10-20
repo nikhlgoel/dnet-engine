@@ -31,9 +31,9 @@
 //!   the endpoint are ruled out. A dead endpoint is moved, in every phase that uses one.
 //! - Every automatic change emits a [`ConnectionEvent`] that says why, in words.
 //!
-//! **Known limit:** phase is the only gate on late results. The orchestrator (T126) must drop the
-//! results of tasks it cancelled; attempt ids on actions and results are the planned guard. The
-//! engine already ignores a race winner that was not in the current race.
+//! **Late results.** The engine gates them by phase only (and ignores a race winner that was not in
+//! the current race). The orchestrator (`dnetd::orchestrator`, T126) closes the rest: every step that
+//! starts background work takes an attempt number and results from older numbers never reach here.
 
 use std::time::Instant;
 

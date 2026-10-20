@@ -47,6 +47,12 @@ param(
     # Resolved by Launch (WSL distros are per user, so the SYSTEM task cannot ask wsl.exe).
     [string] $WslIp,
     [ValidateRange(4, 60)] [int] $WatchdogMinutes = 10,
+    # Loop: the T055 routing-loop gate (the default). Connect: the T126 gate, which runs the real
+    # daemon against the same endpoint and drives it over its control pipe.
+    [ValidateSet('Loop', 'Connect')] [string] $Gate = 'Loop',
+    # Which transport the Loop gate measures: A (AmneziaWG, the default) or Hy2 (Hysteria 2). Hy2
+    # makes the VM serve Hysteria 2 as well. The Connect gate always serves and tests all three.
+    [ValidateSet('A', 'Hy2')] [string] $Transport = 'A',
     # The SID of the person who started the lab; Launch passes it so the SYSTEM task can hand the
     # results folder back to them. Validated before it reaches icacls.
     [string] $GrantSid,
@@ -62,8 +68,20 @@ $StateFile   = Join-Path $Here 'wsl-lab-state.json'
 $LogFile     = Join-Path $Here 'wsl-lab.log'
 $EndpointLog = Join-Path $Here 'wsl-lab-endpoint.log'
 $LabParams   = Join-Path $Here 'wsl-lab-awg-client.json'
+# The Connect gate also serves Hysteria 2 and REALITY; their client files are exported beside the
+# AmneziaWG one, under the names `xtask import-harness-endpoint` reads.
+$ClientDir   = Join-Path $Here 'wsl-lab-client'
+# The VM serves Hysteria 2 and REALITY too when either gate needs them.
+$ServeAll    = ($Gate -eq 'Connect') -or ($Transport -eq 'Hy2')
 $Results     = Join-Path $Here 'results'
 $Runner      = Join-Path $Repo 'target\release\examples\spike_r4.exe'
+$Dnetd       = Join-Path $Repo 'target\release\dnetd.exe'
+$Xtask       = Join-Path $Repo 'target\release\xtask.exe'
+$Dnetctl     = Join-Path $Repo 'target\release\dnetctl.exe'
+# Rendezvous between the SYSTEM side (Invoke-ConnectGate.ps1) and the client side (Invoke-ConnectDriver.ps1).
+$ReadyFile   = Join-Path $Here 'wsl-lab-connect.ready'
+$StopFile    = Join-Path $Here 'wsl-lab-connect.stop'
+$DriverOut   = Join-Path $Here 'wsl-lab-connect-result.json'
 $SwitchPat   = 'vEthernet (WSL*'
 $RunTask     = 'dnet-t055-run'
 $DogTask     = 'dnet-t055-watchdog'
@@ -126,7 +144,11 @@ function Get-Problems([bool]$NeedElevation) {
     $distros = (Invoke-Wsl @('-l', '-q')) -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ }
     if ($distros -notcontains $Distro) { $p.Add("WSL distro '$Distro' is not installed (wsl -l -q shows: $($distros -join ', ')).") }
 
-    if (-not (Test-Path $Runner)) {
+    if ($Gate -eq 'Connect') {
+        foreach ($f in $Dnetd, $Xtask, $Dnetctl) {
+            if (-not (Test-Path $f)) { $p.Add("Missing $f. Build it: cargo build --release -p dnetd -p xtask -p dnetctl") }
+        }
+    } elseif (-not (Test-Path $Runner)) {
         $p.Add("Missing $Runner. Build it: cargo build --release -p dnet-netstate --example spike_r4")
     }
     foreach ($f in 'wintun\wintun.dll', 'primary-core\primary-core.exe', 'amneziawg-go\amneziawg-go.exe') {
@@ -160,7 +182,7 @@ function Start-Endpoint([int]$HoldSeconds) {
     [IO.File]::WriteAllText($nul, '', $Utf8NoBom)
     $proc = Start-Process wsl.exe -PassThru -WindowStyle Hidden -RedirectStandardInput $nul `
         -RedirectStandardOutput $EndpointLog -RedirectStandardError "$EndpointLog.err" `
-        -ArgumentList @('-d', $Distro, '-u', 'root', '--exec', '/opt/wsl-endpoint.sh', $EndpointIp, "$HoldSeconds")
+        -ArgumentList (@('-d', $Distro, '-u', 'root', '--exec', '/opt/wsl-endpoint.sh', $EndpointIp, "$HoldSeconds") + $(if ($ServeAll) { 'all' } else { @() }))
 
     $deadline = (Get-Date).AddSeconds(120)
     $ethIp = $null
@@ -180,6 +202,17 @@ function Start-Endpoint([int]$HoldSeconds) {
         if (-not $parsed.PSObject.Properties[$k]) { $proc.Kill(); throw "client parameters lack '$k'" }
     }
     [IO.File]::WriteAllText($LabParams, $json, $Utf8NoBom)
+
+    if ($ServeAll) {
+        New-Item -ItemType Directory -Force $ClientDir | Out-Null
+        Get-ChildItem $ClientDir -File -ErrorAction SilentlyContinue | Remove-Item -Force
+        [IO.File]::WriteAllText((Join-Path $ClientDir 'awg-client.json'), $json, $Utf8NoBom)
+        foreach ($name in 'hy2', 'reality') {
+            $other = Invoke-Wsl @('-d', $Distro, '-u', 'root', '--exec', 'cat', "/opt/state/$name-client.json")
+            try { $null = $other | ConvertFrom-Json } catch { $proc.Kill(); throw "$name client parameters are not valid JSON" }
+            [IO.File]::WriteAllText((Join-Path $ClientDir "$name-client.json"), $other, $Utf8NoBom)
+        }
+    }
 
     # READY is only printed after the script verified, inside the VM, that the endpoint address is
     # the VM's own, the server process runs and a UDP listener holds the port.
@@ -324,7 +357,7 @@ switch ($Phase) {
                     -ExecutionTimeLimit (New-TimeSpan -Minutes ($WatchdogMinutes + 2))
         $mk = {
             param($phase, $at, $name)
-            $arg = "-NoProfile -ExecutionPolicy Bypass -File `"$self`" -Phase $phase -EndpointIp $EndpointIp -WslIp $WslIp -WatchdogMinutes $WatchdogMinutes -GrantSid $mySid"
+            $arg = "-NoProfile -ExecutionPolicy Bypass -File `"$self`" -Phase $phase -EndpointIp $EndpointIp -WslIp $WslIp -WatchdogMinutes $WatchdogMinutes -Gate $Gate -Transport $Transport -GrantSid $mySid"
             $act = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arg
             $trg = New-ScheduledTaskTrigger -Once -At $at
             Register-ScheduledTask -TaskName $name -Action $act -Trigger $trg -Principal $sys -Settings $set -Force | Out-Null
@@ -334,7 +367,19 @@ switch ($Phase) {
         & $mk 'Watchdog' $dogAt $DogTask
         & $mk 'Run' (Get-Date).AddYears(1) $RunTask
         Log "launch: endpoint up at $WslIp; watchdog restores networking at $($dogAt.ToString('HH:mm:ss')); starting the gate as SYSTEM. The host goes offline now."
+        Remove-Item $ReadyFile, $StopFile, $DriverOut -Force -ErrorAction SilentlyContinue
         Start-ScheduledTask -TaskName $RunTask
+
+        # The Connect gate's client half runs here, as the person at the console: the daemon only
+        # accepts a Connect from them, and the SYSTEM task cannot be that person.
+        $driverExit = $null
+        if ($Gate -eq 'Connect' -and -not $NoWait) {
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Here 'Invoke-ConnectDriver.ps1') `
+                -ReadyFile $ReadyFile -StopFile $StopFile -ResultFile $DriverOut -Dnetctl $Dnetctl *>&1 |
+                Tee-Object -FilePath (Join-Path $Here 'wsl-lab-connect-driver.log') | ForEach-Object { Log "driver: $_" }
+            $driverExit = $LASTEXITCODE
+            Log "driver exit code $driverExit"
+        }
 
         if ($NoWait) { Write-Host "Not waiting. Follow $LogFile; the line '$Finished' marks the end."; break }
         $until = (Get-Date).AddMinutes($WatchdogMinutes + 2)
@@ -353,7 +398,14 @@ switch ($Phase) {
         $latest = Get-ChildItem $Results -Directory -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -Last 1
         if ($latest -and (Test-Path (Join-Path $latest.FullName 'summary.md'))) { Write-Host "`nSummary: $(Join-Path $latest.FullName 'summary.md')" }
         $codeLine = Select-String -Path $LogFile -Pattern 'gate exit code (\d+)' | Select-Object -Last 1
-        if ($codeLine) { exit [int]$codeLine.Matches[0].Groups[1].Value } else { exit 5 }
+        $gateExit = if ($codeLine) { [int]$codeLine.Matches[0].Groups[1].Value } else { 5 }
+        if ($Gate -eq 'Connect') {
+            # Both halves must be clean: the driver saw it work, and the gate saw nothing left behind.
+            Log "connect gate: driver $driverExit, daemon side $gateExit; result in $DriverOut"
+            if ($driverExit -ne 0) { exit 1 }
+            exit $gateExit
+        }
+        exit $gateExit
     }
 
     'Run' {
@@ -363,6 +415,7 @@ switch ($Phase) {
             if (-not $wsl) { throw 'No "vEthernet (WSL" adapter; is the WSL VM running?' }
             if (-not $WslIp) { throw 'Run needs -WslIp (Launch passes it).' }
             if (-not (Test-Path $LabParams)) { throw "Missing $LabParams (Launch writes it)." }
+            if ($ServeAll -and -not (Test-Path (Join-Path $ClientDir 'reality-client.json'))) { throw "Missing the client files in $ClientDir (Launch writes them)." }
             Log "WSL VM $WslIp on $($wsl.Name) (ifIndex $($wsl.ifIndex)); endpoint $EndpointIp"
 
             $targets = @($wsl.ifIndex) + @((Get-NetRoute -DestinationPrefix '0.0.0.0/0').ifIndex) | Select-Object -Unique
@@ -389,10 +442,18 @@ switch ($Phase) {
             if (-not $ok) { throw "$EndpointIp does not answer through the VM; not running the gate." }
             Log 'endpoint answers through the VM; running the gate as SYSTEM'
 
-            $script = Join-Path $Here 'Invoke-SpikeR4.ps1'
-            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script -EndpointIp $EndpointIp `
-                -ParamsFile $LabParams -SkipBuild *>&1 |
-                Tee-Object -FilePath (Join-Path $Here 'wsl-lab-gate.log') | ForEach-Object { Log "gate: $_" }
+            if ($Gate -eq 'Connect') {
+                $script = Join-Path $Here 'Invoke-ConnectGate.ps1'
+                & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script -EndpointIp $EndpointIp `
+                    -ParamsDir $ClientDir -ReadyFile $ReadyFile -StopFile $StopFile -WaitMinutes ($WatchdogMinutes - 2) *>&1 |
+                    Tee-Object -FilePath (Join-Path $Here 'wsl-lab-gate.log') | ForEach-Object { Log "gate: $_" }
+            } else {
+                $script = Join-Path $Here 'Invoke-SpikeR4.ps1'
+                $params = if ($Transport -eq 'Hy2') { Join-Path $ClientDir 'hy2-client.json' } else { $LabParams }
+                & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script -EndpointIp $EndpointIp `
+                    -Transport $Transport -ParamsFile $params -SkipBuild *>&1 |
+                    Tee-Object -FilePath (Join-Path $Here 'wsl-lab-gate.log') | ForEach-Object { Log "gate: $_" }
+            }
             Log "gate exit code $LASTEXITCODE"
         }
         catch { Log "ERROR: $_" }

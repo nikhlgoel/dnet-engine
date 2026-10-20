@@ -392,9 +392,16 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
   > collapse (its transfer succeeded), so the §R4 failure mode was not reproduced; the result supports
   > "the host route prevents re-entry", not "re-entry is fatal". (2) The required host-route rewrite
   > across a simulated interface change was **SKIPPED** (one path). (3) The path is a virtual NIC on one
-  > machine, one run. (4) Hysteria 2 has not been run through the lab. (5) It is not the provisioned
+  > machine, one run. (4) ~~Hysteria 2 has not been run through the lab~~ **(Hysteria 2 PASSED 2026-10-21 00:31, see below.)** (5) It is not the provisioned
   > endpoint of T098a. **Owner decision pending:** whether this closes T055 or only reduces the risk
   > until T098a is for the owner to say.
+  >
+  > **Hysteria 2, same lab, run 2026-10-21 00:29-00:31 (`Invoke-WslLab.ps1 -Phase Launch -Transport Hy2`): PASS.** Production
+  > configuration: 548.8 Mbit/s, **0 of 98,383 endpoint:44443 packets on a tunnel adapter**. Control (`auto_detect_interface`
+  > withheld): **391,218 packets re-entered a tunnel adapter, the transfer failed (0 Mbit/s)**, so for this transport the
+  > instrument sees a loop and the §R4 failure mode (re-entry that collapses the transfer) *was* reproduced, unlike
+  > Profile A's control. Restoration left no residue. The same limits (3) and (5) apply; Hysteria 2 has no host route, so
+  > there is no rewrite across a path change to test for it.
   >
   > **What the logic-level tests cover.** The safety orderings are asserted by call order: host
   > route before tunnel, rewrite before rebind, reap before adapter, kill before undo. A missing
@@ -726,7 +733,7 @@ polish phase only because the original list ended there; by dependency they belo
   > - AmneziaWG is offered only once every raceable profile is blocked.
   > - Before a profile is blamed for failed live checks, the environment (no path, portal, privilege) and the endpoint are ruled out. A dead endpoint is moved in every phase that uses one (starting, racing, recovering, connected).
   > - A connect forgets earlier reach reports; the daemon reports reach after `Connect`.
-  > - **Open:** late results from cancelled races or tunnels are gated by phase only (plus "winner was in this race"). T126 must drop cancelled tasks' results; attempt ids are the planned guard.
+  > - **Was open, resolved 2026-10-20 by T126 step 1:** late results from cancelled races or tunnels were gated by phase only. The orchestrator now numbers every step that starts background work and drops any report from an older number (`dnetd::orchestrator`); a test shows the engine alone would have accepted such a result.
   > - A failure to bring the chosen tunnel up is reported, not retried on another profile: the cause may be local (privilege, a crashing core), not a block.
   > - A degraded active endpoint is kept; only the probe that makes it unreachable triggers a move.
   > - There is no "acknowledged Tier 2" input: a connect races only the profiles it names or all of them, and the race prefers Tier 1, so the consent case `selection::select` guards cannot arise. Tier 2 is warned about (`WarnTier2`), not refused.
@@ -758,9 +765,8 @@ polish phase only because the original list ended there; by dependency they belo
   >   runs in the unelevated tests. **Not run (need an elevated shell):** the three `--ignored` tests that
   >   restrict a directory and read it back (`cargo test -p dnet-config -p dnet-netstate -- --ignored`).
   > - **Not done, and why.** Saving is unused until configuration requests carry payloads (Phase 9), and user
-  >   routing rules are not persisted yet (US5, Phase 6). **Gap for T126/T127:** nothing creates an endpoint or its
-  >   credentials yet, so the orchestrator cannot be driven end to end. A command that imports the harness
-  >   endpoint (`testing/harness/.state/*.json`) into both stores is needed first.
+  >   routing rules are not persisted yet (US5, Phase 6). The gap that left T126/T127 with nothing to connect to
+  >   is closed by T128.
 - [x] T125 Define the IPC payloads for connect, disconnect, status and the event stream, carrying `ConnectionEvent` with its `because` (`dnet-ipc`, IPC-04, IPC-06)
   > **Done 2026-10-20 (not committed; security review pending).** Contract: `ipc-protocol.md`, tests IPC-10…14.
   > - **Connect.** `Request::Connect` carries `profile` and `endpoint`, validated as hostile input
@@ -778,8 +784,136 @@ polish phase only because the original list ended there; by dependency they belo
   >   kernel driver that would do it. A user-mode mechanism (the ADR-0005 table names WFP filters on Windows)
   >   needs its own task and ADR. Until then the snapshot's posture is a decision, and says so.
   > - **Still to do for the endpoint selector:** the engine takes no endpoint. T126 refuses a named one.
-- [ ] T126 Implement the Connect orchestrator in `crates/dnetd`: feed `Engine` its inputs (race results from `dnet-probe`, live checks, endpoint probes, environment, reach) and perform its actions through the supervisor, route and posture seams
-- [ ] T127 Implement `dnetctl` (connect, disconnect, status, events) so the whole path can be driven and tested before the tray exists
+- [x] T126 Implement the Connect orchestrator in `crates/dnetd`: feed `Engine` its inputs (race results from `dnet-probe`, live checks, endpoint probes, environment, reach) and perform its actions through the supervisor, route and posture seams
+  > **Step 1 done 2026-10-20 (not committed): the orchestrator and its IPC wiring, against a scripted fake.** `crates/dnetd/src/orchestrator.rs`, 19 tests, plus 7 service-level tests in `service_impl.rs`.
+  > - **Shape.** One actor owns the engine; every input is a message to it. An executor performs the work of a step
+  >   *in order* (the engine asks for `StopTunnel` then `StartTunnel` when it moves to another endpoint; the order is
+  >   what keeps traffic from leaking in between). Races run in the background and can be cancelled. Everything the OS
+  >   does is behind the `Effects` trait, so every transition is testable on any machine.
+  > - **Stale results are dropped by construction** (attempt numbers). The reachability answer is delivered before
+  >   the race result, because the engine can only say "endpoint unreachable" instead of the misleading "all profiles
+  >   blocked" if it has it first.
+  > - **A race found by its own test.** `Handle::connect` judged "already connecting" from the published state, which lags
+  >   the request, so two quick connects were both accepted and the second silently ignored. Acceptance now claims
+  >   an atomic flag, cleared only after the new state is published.
+  > - **What clients see is always consistent**: the snapshot is derived from the engine after every message and a
+  >   test checks every reachable phase encodes. Only `Connected` is `Tunnelled`; everything else is `FailClosed`.
+  > - **IPC.** `Connect`, `Disconnect` and `GetState` go to the orchestrator when one is attached; otherwise the
+  >   old honest "not available". `endpoint` in `Connect` is refused with a reason (the engine cannot honour one
+  >   yet). The recovery and configuration gates still come first.
+  > - **Mutation checks** on stale-report dropping, ordered execution, snapshot consistency and reach-before-race: the first
+  >   round caught two of four, which exposed two weak tests; both were rewritten around scenarios where the wrong
+  >   behaviour gives a visibly wrong answer, and all four are now caught.
+  > **Step 2 built 2026-10-20 (not committed). Live gate PASSED 2026-10-20 23:42 (AmneziaWG only) and 23:56 (full matrix, below). T126 is done; the caveats listed under it stand.** The real effects, attached to the production
+  > `dnetd`. Everything that decides what to do is portable and tested against fakes; the Windows code only carries it out.
+  > - `plan.rs` (22 tests): endpoint + profile + stored credentials -> the primary core's configuration, the AmneziaWG peer, the
+  >   probe job. **Each profile dials its own stored port on the endpoint's host** (the endpoint's single port is not used to
+  >   connect), and the peer address, host route and `direct` rule come from one `ActiveEndpointBypass`. A host *name* and an
+  >   IPv6 address are refused with a message that says why (resolving a name before the tunnel exists is a DNS-leak decision,
+  >   not a detail). `assess_endpoints` leaves unusable endpoints out of the engine and reports each reason.
+  > - `tunnel.rs` (16 tests): composes `start_cores` / `bring_up` / `tear_down` / `shutdown_all`. A failed start leaves nothing
+  >   running (and tears the peer down only if bring-up was attempted: a test caught it tearing down a peer never installed);
+  >   a second start takes the first down; stop is peer, route, cores, then undo, each step attempted whatever the last did;
+  >   the generated configuration (it holds credentials) is deleted as soon as the core has read it.
+  > - `checks.rs` (12 tests): reach is `Reachable` or `Unknown`, never `Unreachable` (a TCP connect cannot tell a dead host from
+  >   a filtered one, and the engine reads `Unreachable` as "migrate"); live check and endpoint probe go through the tunnel to
+  >   the endpoint's measurement origin, judged by the same `judge` rule that chose the profile.
+  > - `effects.rs` (Windows only, compiles, **no automated test of its own**): paths, restricted directories, the real runtime and
+  >   bring-up objects, credential lookup (read when needed, not kept), elevation check.
+  > - `Orchestrator::shutdown` + `main.rs`/`svc.rs`: the service stopping waits for the tunnel to be stopped (SUP-04), and tells
+  >   the SCM the stop is pending. Covered by orchestrator tests with fakes; the real SCM stop is not exercised by the lab.
+  > - **Decision made here, owner to confirm: the measurement origin.** Probes and live checks need a known HTTP origin reachable
+  >   only through the endpoint; nothing defined where production gets one, and this project operates no infrastructure to
+  >   default to. It is now stored per endpoint with the credentials (`EndpointCredentials::measure_origin`, optional, validated
+  >   with the prober's own rule when stored, moved to `dnet_core::origin`). An endpoint without one is reported unusable.
+  > - Known limits: hostname endpoints unsupported; profile-tunable client parameters (BBR profile etc.) not yet read from the
+  >   profile; captive portal not detected; a core crash is noticed only through failing live checks (no restart policy yet).
+  > - **Gate:** `Invoke-WslLab.ps1 -Gate Connect` (SYSTEM task runs the real `dnetd` with a private %PROGRAMDATA%, user shell
+  >   drives it as the console user). **Run 1 (AmneziaWG only), PASS:** idle and FailClosed; connect accepted; a second connect
+  >   refused with `ServiceBusy`; Connected in about 10 s; state names `awg-default` and is `Tunnelled`; 5 000 000 of 5 000 000
+  >   bytes through the tunnel (170 Mbit/s); disconnect; adapters gone; no host route or adapter left behind; the event stream
+  >   carried `ProbeStarted`, two `ProfileBlocked`, `ProfileSelected`, each with a reason.
+  > - **Defect the run exposed, fixed:** `hy2-default` and `reality-default` were reported *blocked* ("did not respond in time")
+  >   although they were never tried, because the endpoint had no credentials for them. A statement about the user's network
+  >   that was false. Profiles no usable endpoint can serve are now not offered to the engine (`plan::served_profiles`), so the
+  >   engine says "the only profile configured" instead.
+  > - **Matrix run 2026-10-20 23:56, PASS (4 of 4 cases, every step), through the real `dnetd` as SYSTEM:** the lab VM serves
+  >   AmneziaWG, Hysteria 2 (udp/44443) and REALITY (tcp/8443). Each case: idle and FailClosed; connect accepted; second connect
+  >   refused (`ServiceBusy`); Connected; state names the right profile and is `Tunnelled`; 5 MB through the tunnel; still
+  >   Connected after a live check; disconnect; adapters gone; every event has a reason; and at the end no adapter or endpoint
+  >   host route left behind.
+  >
+  >   | case | carried by | time to connect | 5 MB transfer |
+  >   |---|---|---|---|
+  >   | default (race decides) | `hy2-default` | 4.1 s | 414 Mbit/s |
+  >   | `hy2-default` by name | Hysteria 2 | 1.2 s | 777 Mbit/s |
+  >   | `reality-default` by name | VLESS+REALITY | 1.3 s | 880 Mbit/s |
+  >   | `awg-default` by name | AmneziaWG (started directly, cannot be raced) | 3.7 s | 155 Mbit/s |
+  >
+  >   The daemon's own log shows each live check reaching the origin about 5 s after its tunnel came up, through the outbound
+  >   of the profile that carries it. Throughput here is a loopback-speed virtual link; it says nothing about real networks.
+  > - **Finding, not fixed (new task T130):** after a tunnel is stopped and another started, the primary core logs
+  >   `router: missing fakeip record, try enable experimental.cache_file` for connections that used a fake address handed out in
+  >   the previous session (3 times in 4 cycles, background traffic). FakeIP mappings live in the core's memory and die with it.
+  >   Options: persist them (`experimental.cache_file`, `store_fakeip`) or flush the resolver cache when a tunnel stops. Needs a
+  >   decision on the cache file's location and lifetime, and a contract change (`contracts/core-config.md`).
+  > - **Still not covered by any live run:** the Windows service stop (SCM) path, a core crashing mid-session, a host *name*
+  >   endpoint. (The T055 packet-count gate for Hysteria 2 has since passed: see T055.)
+  > - **Re-run after the security review's two fixes (2026-10-21 00:27, `-Gate Connect`): PASS, same four cases, no residue.**
+  >   The review closed two defects in the new code: private directories were not checked for a pre-planted owner or junction
+  >   (now `dnet_config::write::prepare_private_dir`, refused before any change is made), and the reachability check sent TCP
+  >   to UDP-only ports, a recognisable burst (now only TCP-carried ports, `plan::reach_ports`).
+- [ ] T130 FakeIP mappings do not survive a tunnel restart (see the T126 finding). Decide persist vs flush, implement, add a lab step that reconnects and checks the log stays free of `missing fakeip record`
+- [x] T127 Implement `dnetctl` (connect, disconnect, status, events) so the whole path can be driven and tested before the tray exists
+  > **Built 2026-10-21 (not committed); proven against the real daemon unprivileged, live gate run pending.**
+  > - `dnet_ipc::client` (12 tests): the client half of the pipe, reusable by the tray. Replies are read as untrusted input
+  >   (oversized, non-UTF-8, truncated, not JSON, error without a code: each an error, none echoed, none a panic).
+  > - `crates/dnetctl` (49 tests): `status`, `connect [--profile] [--accept-tier2] [--no-wait]`, `disconnect`, `events [-f]`,
+  >   `profiles`, `endpoints`, `--json`, `--timeout`. Hand-parsed (no new dependency); an option a command does not take is
+  >   refused, never ignored. Waiting is polling `GetState`, not a subscription. Exit codes: 0 done, 1 refused or failed,
+  >   2 usage, 3 service unreachable, 4 timed out (the work carries on), 5 unexpected reply. A profile id the service would
+  >   refuse is a usage error and nothing is sent. Everything the service sends is stripped of control and bidirectional
+  >   characters before it reaches the terminal. The display says the kill switch is "not yet enforced by the system",
+  >   because that is true. Tests drive every command against the real server dispatch in memory with the clock paused;
+  >   six mutation checks were each caught.
+  > - **Run against the real `dnetd --console` over the real pipe, unprivileged:** status, profiles, endpoints, events work;
+  >   connect and disconnect are refused with a reason; a bad profile id and an unknown command are exit 2; with the service
+  >   stopped it says so (exit 3).
+  > - **A daemon defect it exposed, fixed (`Handle::snapshot`):** right after a Connect is accepted, `GetState` still returned
+  >   the state before it (`Disconnected`, or the previous `Failed`) until the actor ran. Any client that asked and looked back
+  >   was told the connection had not started. A pending connect now reads as connecting. Two tests; removing the fix fails them.
+  > - **Lab:** `Invoke-ConnectDriver.ps1 -Dnetctl` runs a last cycle through the real `dnetctl.exe` (status, idle disconnect,
+  >   connect waits, second connect refused, status --json, traffic, events, disconnect waits, adapters gone).
+  > - **Who is on the other end (found reviewing the client's threat model):** until the real service starts, any local
+  >   process can create a pipe named `\\.\pipe\DNetEngine\control`, and a client would show its answers (a spoofed
+  >   "Connected") to a user who may rely on them. The client now reads the **owner of the pipe object** and talks only to
+  >   one owned by SYSTEM or Administrators (`dnet_ipc::client::Trust::ServiceOwnedOnly`, the default for everyone; the
+  >   tray must keep it). The development opt-out is explicit, named for what it risks, and not the default
+  >   (`dnetctl --allow-unprivileged-service`). Shown on the real pipe: an unprivileged `dnetd` is refused, naming whose pipe
+  >   it is; with the opt-out it is served. Acceptance of a SYSTEM-owned pipe is exercised by the lab's `dnetctl` cycle.
+  >   Not covered: a pipe squatter that is itself an administrator (it could do anything already).
+  > - Known rough edge, daemon side: a mutating request from a service that cannot look up the console user (any non-SYSTEM
+  >   run) is refused with "no interactive console session is active", which blames the session when the cause is privilege.
+  > - Not done: the installer must place `dnetctl.exe` (T114); no PATH or shell-completion work.
+- [x] T128 `cargo xtask import-harness-endpoint --host <ip> [--dry-run] [--replace] [--label <name>]` puts the simulated harness endpoint (`testing/harness/.state/*.json`) into the saved configuration and the sealed secret store, so T126/T127 have an endpoint to connect to (added 2026-10-20; developer tooling, not a product feature: the product creates endpoints through provisioning T093 and import T097 over IPC)
+  > **Done 2026-10-20 (not committed).** `crates/xtask/src/import_harness.rs`, 18 tests.
+  > - **Safe by construction.** `--host` has no default (a silent loopback default would make the routing-loop gate
+  >   meaningless; loopback is accepted with a warning for the prober). A real run needs an elevated shell and
+  >   **refuses before touching anything** otherwise: an unelevated attempt would leave a user-owned state
+  >   directory that the service rightly refuses to trust. `--dry-run` validates everything and writes nothing.
+  > - **Never destructive.** A refused saved configuration is never overwritten (it may be the only copy). The
+  >   secret is written first and the configuration second, so the configuration never names missing
+  >   credentials; a failed second write removes a secret that was new. `--replace` keeps the endpoint's id.
+  >   Unrelated endpoints and profile settings survive.
+  > - **Never prints a secret.** Errors name a file and a field, never a value (serde would otherwise quote one).
+  > - **Verified** against the real harness files by `--dry-run` (all three transports parsed and validated by the
+  >   same rules the secret store applies); mutation checks on the rollback and the refuse-to-overwrite rule failed
+  >   as they should. **Not run:** a real import (needs an elevated shell).
+  > - **Spec gap found and closed here.** `data-model.md` gives an endpoint one `host + port`, but a host serves
+  >   AmneziaWG (UDP 51820), Hysteria 2 (UDP 44443) and REALITY (TCP 8443) on different ports, and the
+  >   provisioning contract already speaks of "the profile ports". Each profile's server port is therefore stored
+  >   **with its credentials**, and T126 pairs it with the endpoint's host when it builds each profile's address.
+  >   The generators and the host-route logic are unchanged. The port on the `Endpoint` is display-only.
 
 ---
 

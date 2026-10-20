@@ -16,7 +16,7 @@ A destination the user owns, through which traffic exits.
 |---|---|---|
 | `id` | `EndpointId` (UUID v4) | Immutable once created |
 | `label` | `String` | 1–64 chars, user-supplied, unique among endpoints |
-| `address` | `EndpointAddress` | Host (IP or DNS name) + port |
+| `address` | `EndpointAddress` | Host (IP or DNS name) + port. **The port here is not used to connect** (2026-10-20, T124/T128): one host serves each profile on its own port, so each profile's server port is stored with its credentials and paired with this host when a profile is started |
 | `origin` | `EndpointOrigin` | `Provisioned { provider, region, resource_ids }` or `Manual` |
 | `credentials` | `CredentialRef` | Handle into the secret store — **never the material itself** |
 | `health` | `EndpointHealth` | See §1.1 |

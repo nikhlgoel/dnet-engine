@@ -228,6 +228,19 @@ impl MemorySecretStore {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// How many bundles are held. A store has no listing on purpose, but a test of a rollback has
+    /// to be able to see that nothing was left behind.
+    pub fn len(&self) -> usize {
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 impl SecretStore for MemorySecretStore {
@@ -499,8 +512,10 @@ mod tests {
                     h3: 3,
                     h4: 4,
                 },
+                server_port: 51820,
             }),
             hysteria2: Some(Hysteria2Bundle {
+                server_port: 44443,
                 credentials: Hysteria2Credentials {
                     auth_password: Secret::new(format!("auth-{SENTINEL}")),
                     obfs_password: Secret::new(format!("obfs-{SENTINEL}")),
@@ -513,6 +528,7 @@ mod tests {
                 },
             }),
             reality: None,
+            measure_origin: None,
         }
     }
 

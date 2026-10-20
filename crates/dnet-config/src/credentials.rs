@@ -6,6 +6,16 @@
 //! client key and obfuscation, the Hysteria 2 passwords with the obfuscation and certificate trust
 //! they go with, and the REALITY user id and short id with the target and public key.
 //!
+//! Each profile has its own **server port** (one host serves AmneziaWG, Hysteria 2 and REALITY on
+//! different ports and different protocols), so the port is stored with the profile credentials and
+//! the orchestrator pairs it with the host of the endpoint. An `Endpoint` still carries one address,
+//! host plus port as the data model gives it; the port there is not used to connect.
+//!
+//! The bundle also names the **measurement origin**: an `http://host:port` the endpoint's probes and
+//! live checks fetch from, reachable only through the endpoint. It is not secret, but it is
+//! provisioned with the endpoint and means nothing without it, so it is kept here. There is no
+//! default and no shared host: this project operates no infrastructure to point at.
+//!
 //! The bundle holds the parameters the endpoint must share (ADR-0002 §5.4) beside the secrets, and
 //! not in the profile: they are provisioned as a set, and a client that applied one alone would
 //! no longer match its server. The parameters the client may change alone stay with the profile.
@@ -19,6 +29,7 @@
 use std::net::Ipv4Addr;
 
 use dnet_core::hostname::is_dns_hostname;
+use dnet_core::origin::Origin;
 use dnet_core::transport_params::gecko_packet_sizes_valid;
 use serde::{Deserialize, Serialize};
 
@@ -61,11 +72,15 @@ pub struct AmneziaWgCredentials {
     pub client_address: Ipv4Addr,
     pub prefix_len: u8,
     pub obfuscation: ObfuscationParams,
+    /// The UDP port the AmneziaWG server listens on.
+    pub server_port: u16,
 }
 
 /// What Hysteria 2 needs from an endpoint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hysteria2Bundle {
+    /// The UDP port the Hysteria 2 server listens on.
+    pub server_port: u16,
     pub credentials: Hysteria2Credentials,
     pub endpoint: Hysteria2EndpointParams,
 }
@@ -73,6 +88,8 @@ pub struct Hysteria2Bundle {
 /// What VLESS+REALITY needs from an endpoint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RealityBundle {
+    /// The TCP port the REALITY server listens on.
+    pub server_port: u16,
     pub credentials: RealityCredentials,
     pub endpoint: RealityEndpointParams,
 }
@@ -83,10 +100,14 @@ pub struct EndpointCredentials {
     pub amneziawg: Option<AmneziaWgCredentials>,
     pub hysteria2: Option<Hysteria2Bundle>,
     pub reality: Option<RealityBundle>,
+    /// Where probes and live checks fetch from. Without it the endpoint can be stored but not
+    /// measured, so a connect says so instead of guessing a target.
+    pub measure_origin: Option<Origin>,
 }
 
 impl EndpointCredentials {
-    /// Whether the bundle carries nothing, which no endpoint should.
+    /// Whether the bundle carries no profile, which no endpoint should. The origin alone does not
+    /// make a bundle: there would be nothing to connect with.
     pub fn is_empty(&self) -> bool {
         self.amneziawg.is_none() && self.hysteria2.is_none() && self.reality.is_none()
     }
@@ -98,14 +119,20 @@ impl EndpointCredentials {
         self.validate()?;
         let wire = Wire {
             version: FORMAT_VERSION,
+            measure_origin: self
+                .measure_origin
+                .as_ref()
+                .map(|o| format!("http://{}:{}", o.host(), o.port())),
             amneziawg: self.amneziawg.as_ref().map(|a| AwgWire {
                 client_private_key: a.client_private_key.expose_wire().to_owned(),
                 server_public_key: a.server_public_key.clone(),
                 client_address: a.client_address,
                 prefix_len: a.prefix_len,
                 obfuscation: ObfuscationWire::from(a.obfuscation),
+                server_port: a.server_port,
             }),
             hysteria2: self.hysteria2.as_ref().map(|h| Hy2Wire {
+                server_port: h.server_port,
                 auth_password: h.credentials.auth_password.expose().to_owned(),
                 obfs_password: h.credentials.obfs_password.expose().to_owned(),
                 obfs: match h.endpoint.obfs {
@@ -140,6 +167,7 @@ impl EndpointCredentials {
                 },
             }),
             reality: self.reality.as_ref().map(|r| RealityWire {
+                server_port: r.server_port,
                 uuid: r.credentials.uuid.expose().to_owned(),
                 short_id: r.credentials.short_id.expose().to_owned(),
                 target_domain: r.endpoint.target_domain.as_str().to_owned(),
@@ -175,6 +203,7 @@ impl EndpointCredentials {
             client_address: a.client_address,
             prefix_len: a.prefix_len,
             obfuscation: a.obfuscation.into(),
+            server_port: a.server_port,
         });
 
         let hysteria2 = wire
@@ -206,6 +235,7 @@ impl EndpointCredentials {
                     _ => return Err(CredentialsError::Invalid("Hysteria 2 certificate trust")),
                 };
                 Ok(Hysteria2Bundle {
+                    server_port: h.server_port,
                     credentials: Hysteria2Credentials {
                         auth_password: Secret::new(h.auth_password),
                         obfs_password: Secret::new(h.obfs_password),
@@ -224,6 +254,7 @@ impl EndpointCredentials {
                     _ => return Err(CredentialsError::Invalid("REALITY flow")),
                 };
                 Ok(RealityBundle {
+                    server_port: r.server_port,
                     credentials: RealityCredentials {
                         uuid: Secret::new(r.uuid),
                         short_id: Secret::new(r.short_id),
@@ -239,10 +270,17 @@ impl EndpointCredentials {
             })
             .transpose()?;
 
+        let measure_origin = wire
+            .measure_origin
+            .map(|text| Origin::parse(&text))
+            .transpose()
+            .map_err(|_| CredentialsError::Invalid("measurement origin"))?;
+
         let bundle = Self {
             amneziawg,
             hysteria2,
             reality,
+            measure_origin,
         };
         bundle.validate()?;
         Ok(bundle)
@@ -258,6 +296,9 @@ impl EndpointCredentials {
             if !is_lower_hex(&a.server_public_key, 64) {
                 return Err(CredentialsError::Invalid("AmneziaWG server key"));
             }
+            if a.server_port == 0 {
+                return Err(CredentialsError::Invalid("AmneziaWG server port"));
+            }
             if !(1..=32).contains(&a.prefix_len) {
                 return Err(CredentialsError::Invalid("AmneziaWG tunnel prefix length"));
             }
@@ -266,6 +307,9 @@ impl EndpointCredentials {
                 .map_err(|_| CredentialsError::Invalid("AmneziaWG obfuscation"))?;
         }
         if let Some(h) = &self.hysteria2 {
+            if h.server_port == 0 {
+                return Err(CredentialsError::Invalid("Hysteria 2 server port"));
+            }
             let (auth, obfs) = (
                 h.credentials.auth_password.expose(),
                 h.credentials.obfs_password.expose(),
@@ -292,6 +336,9 @@ impl EndpointCredentials {
             }
         }
         if let Some(r) = &self.reality {
+            if r.server_port == 0 {
+                return Err(CredentialsError::Invalid("REALITY server port"));
+            }
             validate_uuid(&r.credentials.uuid)
                 .map_err(|_| CredentialsError::Invalid("VLESS user id"))?;
             validate_short_id(&r.credentials.short_id)
@@ -307,6 +354,8 @@ impl EndpointCredentials {
 #[serde(deny_unknown_fields)]
 struct Wire {
     version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    measure_origin: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     amneziawg: Option<AwgWire>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -329,6 +378,7 @@ struct AwgWire {
     client_address: Ipv4Addr,
     prefix_len: u8,
     obfuscation: ObfuscationWire,
+    server_port: u16,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -380,6 +430,7 @@ impl From<ObfuscationWire> for ObfuscationParams {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Hy2Wire {
+    server_port: u16,
     auth_password: String,
     obfs_password: String,
     obfs: ObfsWire,
@@ -410,6 +461,7 @@ struct TrustWire {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RealityWire {
+    server_port: u16,
     uuid: String,
     short_id: String,
     target_domain: String,
@@ -431,6 +483,11 @@ fn hex_encode(bytes: &[u8]) -> String {
             let _ = write!(s, "{b:02x}");
             s
         })
+}
+
+/// A SHA-256 certificate pin in the form it is stored and exchanged: 64 lowercase hex digits.
+pub fn parse_spki_sha256_hex(text: &str) -> Option<[u8; 32]> {
+    hex_decode_32(text)
 }
 
 fn hex_decode_32(text: &str) -> Option<[u8; 32]> {
@@ -482,11 +539,13 @@ mod tests {
                 h3: 3_175_921_403,
                 h4: 4_012_837_465,
             },
+            server_port: 51820,
         }
     }
 
     fn hy2(trust: ServerTrust, obfs: Hysteria2Obfs) -> Hysteria2Bundle {
         Hysteria2Bundle {
+            server_port: 44443,
             credentials: Hysteria2Credentials {
                 auth_password: Secret::new(format!("auth-{SENTINEL}")),
                 obfs_password: Secret::new(format!("obfs-{SENTINEL}")),
@@ -497,6 +556,7 @@ mod tests {
 
     fn reality() -> RealityBundle {
         RealityBundle {
+            server_port: 8443,
             credentials: RealityCredentials {
                 uuid: Secret::new("123e4567-e89b-42d3-a456-426614174000"),
                 short_id: Secret::new("0123abcd"),
@@ -524,6 +584,7 @@ mod tests {
                 },
             )),
             reality: Some(reality()),
+            measure_origin: Some(Origin::parse("http://203.0.113.80:8080").unwrap()),
         }
     }
 
@@ -545,6 +606,7 @@ mod tests {
                 amneziawg: parts.amneziawg.clone().filter(|_| mask & 1 != 0),
                 hysteria2: parts.hysteria2.clone().filter(|_| mask & 2 != 0),
                 reality: parts.reality.clone().filter(|_| mask & 4 != 0),
+                measure_origin: parts.measure_origin.clone().filter(|_| mask & 1 != 0),
             };
             let stored = bundle.to_plaintext_json().unwrap();
             assert_eq!(
@@ -696,7 +758,16 @@ mod tests {
     #[test]
     fn values_the_generators_would_refuse_are_refused_on_the_way_in() {
         type Break = fn(&mut EndpointCredentials);
-        let cases: [(&str, Break); 9] = [
+        let cases: [(&str, Break); 12] = [
+            ("AmneziaWG server port", |c| {
+                c.amneziawg.as_mut().unwrap().server_port = 0
+            }),
+            ("Hysteria 2 server port", |c| {
+                c.hysteria2.as_mut().unwrap().server_port = 0
+            }),
+            ("REALITY server port", |c| {
+                c.reality.as_mut().unwrap().server_port = 0
+            }),
             ("AmneziaWG server key", |c| {
                 c.amneziawg.as_mut().unwrap().server_public_key = "not-hex".into()
             }),
@@ -820,5 +891,80 @@ mod tests {
         assert_eq!(hex_decode_32(&text).unwrap().to_vec(), bytes);
         assert!(hex_decode_32(&text.to_uppercase()).is_none());
         assert!(hex_decode_32(&text[..62]).is_none());
+    }
+
+    // ------------------------------------------------------------ measurement origin
+
+    fn with_stored_origin(origin: &str) -> Vec<u8> {
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&full().to_plaintext_json().unwrap()).unwrap();
+        json["measure_origin"] = serde_json::Value::String(origin.to_owned());
+        serde_json::to_vec(&json).unwrap()
+    }
+
+    #[test]
+    fn the_measurement_origin_round_trips_and_may_be_absent() {
+        let with = full();
+        let stored = with.to_plaintext_json().unwrap();
+        let read = EndpointCredentials::from_plaintext_json(&stored).unwrap();
+        assert_eq!(
+            read.measure_origin.as_ref().map(|o| (o.host(), o.port())),
+            Some(("203.0.113.80", 8080))
+        );
+
+        let without = EndpointCredentials {
+            measure_origin: None,
+            ..full()
+        };
+        let stored = without.to_plaintext_json().unwrap();
+        assert!(!String::from_utf8(stored.clone())
+            .unwrap()
+            .contains("measure_origin"));
+        assert_eq!(
+            EndpointCredentials::from_plaintext_json(&stored).unwrap(),
+            without
+        );
+    }
+
+    /// The same rule the prober applies, applied when it is stored: a value that could not be used
+    /// is refused now, not at the first connect.
+    #[test]
+    fn a_measurement_origin_the_prober_would_refuse_is_refused_when_stored() {
+        for bad in [
+            "https://203.0.113.80",
+            "203.0.113.80:8080",
+            "http://203.0.113.80/bytes/1",
+            "http://user@203.0.113.80",
+            "http://203.0.113.80:0",
+            "http://a b.net",
+            "",
+        ] {
+            let error =
+                EndpointCredentials::from_plaintext_json(&with_stored_origin(bad)).expect_err(bad);
+            assert_eq!(
+                error,
+                CredentialsError::Invalid("measurement origin"),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_refused_origin_is_not_echoed() {
+        let marker = "ORIGIN-MARKER-9c1e";
+        let error = EndpointCredentials::from_plaintext_json(&with_stored_origin(&format!(
+            "https://{marker}.example"
+        )))
+        .unwrap_err();
+        assert!(!error.to_string().contains(marker), "{error}");
+    }
+
+    #[test]
+    fn an_origin_alone_is_not_a_credential_set() {
+        let only_origin = EndpointCredentials {
+            measure_origin: full().measure_origin,
+            ..EndpointCredentials::default()
+        };
+        assert!(only_origin.is_empty());
     }
 }

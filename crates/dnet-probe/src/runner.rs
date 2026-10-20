@@ -207,22 +207,28 @@ pub fn free_loopback_ports(count: usize) -> std::io::Result<Vec<u16>> {
         .collect()
 }
 
+/// Remove probe configurations a crashed run left in `work_dir`. Returns how many were removed.
+/// For a caller that has a directory but no prober yet, such as the daemon at start-up.
+pub fn sweep_stale_in(work_dir: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(work_dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with("probe-") && name.ends_with(".json")
+        })
+        .filter(|entry| std::fs::remove_file(entry.path()).is_ok())
+        .count()
+}
+
 impl Prober {
     /// Remove probe configurations a crashed run left behind. Returns how many were removed.
     /// Call it when the daemon starts.
     pub fn sweep_stale(&self) -> usize {
-        let Ok(entries) = std::fs::read_dir(&self.work_dir) else {
-            return 0;
-        };
-        entries
-            .flatten()
-            .filter(|entry| {
-                let name = entry.file_name();
-                let name = name.to_string_lossy();
-                name.starts_with("probe-") && name.ends_with(".json")
-            })
-            .filter(|entry| std::fs::remove_file(entry.path()).is_ok())
-            .count()
+        sweep_stale_in(&self.work_dir)
     }
 
     /// Probe one profile and report what happened.

@@ -26,14 +26,67 @@ pub fn default_run_dir() -> PathBuf {
     base.join("DNet Engine").join("run")
 }
 
+/// Create `dir` if needed and make it a directory only SYSTEM and Administrators control, or
+/// refuse it. Used for every directory a credential-bearing file is written into.
+///
+/// `%PROGRAMDATA%` lets any user create a subdirectory, and the owner of a directory keeps the right
+/// to rewrite its DACL, so a directory someone else pre-created, or replaced with a junction or
+/// symbolic link, would have a LocalSystem service write credentials where that person chose (and,
+/// worse, reset the DACL of whatever the link pointed at). So, **before anything is changed**:
+///
+/// - an existing path that is a link, or is not a directory, is refused;
+/// - an existing directory not owned by SYSTEM or Administrators is refused, untouched.
+///
+/// Then the directory is created, restricted (protected DACL, inheritable), and its owner checked
+/// again, which also covers one that was created in the instant between the checks. Ownership of
+/// the directories above `dir` is the installer's to establish (T114).
+#[cfg(windows)]
+pub fn prepare_private_dir(dir: &Path) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    let refuse = |why: &str| {
+        Error::new(
+            ErrorKind::PermissionDenied,
+            format!("refusing {}: {why}", dir.display()),
+        )
+    };
+    let owned_by_trusted = |dir: &Path| -> std::io::Result<bool> {
+        let sddl = win::read_owner_and_dacl_sddl(dir)?;
+        Ok(sddl.starts_with("O:SY") || sddl.starts_with("O:BA"))
+    };
+
+    match std::fs::symlink_metadata(dir) {
+        Ok(found) => {
+            if found.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                return Err(refuse("it is a link"));
+            }
+            if !found.is_dir() {
+                return Err(refuse("it is not a directory"));
+            }
+            if !owned_by_trusted(dir)? {
+                return Err(refuse("it is not owned by SYSTEM or Administrators"));
+            }
+        }
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    std::fs::create_dir_all(dir)?;
+    // Restrict the directory first, so what is written into it inherits the restriction on creation.
+    win::apply_protected_dacl(dir, RUN_DIR_SDDL)?;
+    if !owned_by_trusted(dir)? {
+        return Err(refuse("it is not owned by SYSTEM or Administrators"));
+    }
+    Ok(())
+}
+
 /// Write `contents` to `dir/file_name` with the SYSTEM + Administrators ACL, returning
 /// the final path. Requires the privilege to set a DACL on `dir` (LocalSystem or an
-/// elevated Administrator).
+/// elevated Administrator). `dir` must pass [`prepare_private_dir`].
 #[cfg(windows)]
 pub fn write_restricted(dir: &Path, file_name: &str, contents: &[u8]) -> std::io::Result<PathBuf> {
-    std::fs::create_dir_all(dir)?;
-    // Restrict the directory first, so the file inherits the restriction on creation.
-    win::apply_protected_dacl(dir, RUN_DIR_SDDL)?;
+    prepare_private_dir(dir)?;
 
     let final_path = dir.join(file_name);
     let tmp_path = dir.join(format!("{file_name}.tmp"));
@@ -276,5 +329,109 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"{\"log\":{}}");
         assert_only_system_and_admins(&read_dacl_sddl(&dir).unwrap());
         assert_only_system_and_admins(&read_dacl_sddl(&path).unwrap());
+    }
+}
+
+#[cfg(all(test, windows))]
+mod private_dir_tests {
+    use super::win::{apply_protected_dacl, read_owner_and_dacl_sddl};
+    use super::*;
+
+    /// A temporary directory is owned by an ordinary user: exactly who could pre-create one under
+    /// `%PROGRAMDATA%`. These tests run unelevated, like the rest of the suite.
+    fn cleanup(dir: &Path) {
+        let _ = apply_protected_dacl(dir, "D:P(A;OICI;FA;;;WD)");
+    }
+
+    #[test]
+    fn a_directory_someone_else_pre_created_is_refused_and_left_exactly_as_it_was() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("config");
+        std::fs::create_dir(&dir).unwrap();
+        let before = read_owner_and_dacl_sddl(&dir).unwrap();
+
+        let err = prepare_private_dir(&dir).unwrap_err();
+
+        let after = read_owner_and_dacl_sddl(&dir).unwrap();
+        cleanup(&dir);
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{err}");
+        assert!(err.to_string().contains("not owned"), "{err}");
+        assert_eq!(before, after, "a refused directory must not be modified");
+    }
+
+    /// The write path is the one that matters: nothing is written into a refused directory.
+    #[test]
+    fn nothing_is_written_into_a_directory_someone_else_pre_created() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("config");
+        std::fs::create_dir(&dir).unwrap();
+
+        let err = write_restricted(&dir, "primary-core.json", b"credentials").unwrap_err();
+
+        let entries = std::fs::read_dir(&dir).unwrap().count();
+        cleanup(&dir);
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{err}");
+        assert_eq!(entries, 0, "no file, not even a temporary one");
+    }
+
+    /// A junction can be made without privilege. Following it would write the configuration where
+    /// the person who made it chose, and reset the DACL of whatever it pointed at.
+    #[test]
+    fn a_junction_is_refused_and_its_target_is_not_touched() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("elsewhere");
+        std::fs::create_dir(&target).unwrap();
+        let link = root.path().join("config");
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&target)
+            .output()
+            .unwrap();
+        assert!(
+            made.status.success(),
+            "could not make the junction for the test"
+        );
+        let before = read_owner_and_dacl_sddl(&target).unwrap();
+
+        let err = write_restricted(&link, "primary-core.json", b"credentials").unwrap_err();
+
+        let after = read_owner_and_dacl_sddl(&target).unwrap();
+        let written = std::fs::read_dir(&target).unwrap().count();
+        let _ = std::fs::remove_dir(&link);
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{err}");
+        assert!(err.to_string().contains("link"), "{err}");
+        assert_eq!(before, after, "the junction's target must not be modified");
+        assert_eq!(written, 0, "nothing may be written through the junction");
+    }
+
+    #[test]
+    fn a_file_where_the_directory_should_be_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config");
+        std::fs::write(&path, b"not a directory").unwrap();
+
+        let err = prepare_private_dir(&path).unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{err}");
+        assert!(err.to_string().contains("not a directory"), "{err}");
+    }
+
+    /// What the service does on a good machine: a fresh directory, created by an elevated owner,
+    /// is accepted, restricted, and can be prepared again.
+    #[test]
+    #[ignore = "requires an elevated Administrator (run: cargo test -p dnet-config -- --ignored)"]
+    fn a_fresh_directory_is_accepted_restricted_and_can_be_prepared_again() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("run").join("config");
+
+        prepare_private_dir(&dir).unwrap();
+        prepare_private_dir(&dir).unwrap();
+
+        // Owned by SYSTEM or Administrators, protected, and naming nobody else: the same test the
+        // state files are held to.
+        let sddl = read_owner_and_dacl_sddl(&dir).unwrap();
+        assert!(crate::trusted_file::is_trusted_sddl(&sddl), "{sddl}");
+        cleanup(&dir);
     }
 }

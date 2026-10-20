@@ -20,72 +20,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::socks5;
 
-/// The known origin a probe fetches from.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Origin {
-    host: String,
-    port: u16,
-}
-
-/// Why an origin URL was refused.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum OriginError {
-    #[error("the origin must be an http:// URL")]
-    NotHttp,
-    #[error("the origin has no host")]
-    NoHost,
-    #[error("the origin port is not valid")]
-    BadPort,
-    #[error("the origin must be just scheme, host and port, with no path or credentials")]
-    Extra,
-}
-
-impl Origin {
-    pub fn host(&self) -> &str {
-        &self.host
-    }
-
-    pub fn port(&self) -> u16 {
-        self.port
-    }
-
-    /// Parse `http://host[:port][/]`. The port defaults to 80. Anything else in the URL (a path,
-    /// a query, credentials) is refused so a probe cannot be pointed somewhere unexpected.
-    pub fn parse(url: &str) -> Result<Origin, OriginError> {
-        let rest = url.strip_prefix("http://").ok_or(OriginError::NotHttp)?;
-        let rest = rest.strip_suffix('/').unwrap_or(rest);
-        if rest.contains(['/', '?', '#', '@']) {
-            return Err(OriginError::Extra);
-        }
-        let (host, port) = match rest.rsplit_once(':') {
-            Some((host, port)) => {
-                let port = port
-                    .parse::<u16>()
-                    .ok()
-                    .filter(|p| *p != 0)
-                    .ok_or(OriginError::BadPort)?;
-                (host, port)
-            }
-            None => (rest, 80),
-        };
-        if host.is_empty() {
-            return Err(OriginError::NoHost);
-        }
-        // Letters, digits, dots and hyphens only. That excludes an IPv6 literal (a probe does not
-        // take one) and, more to the point, anything that could add a header line to the request
-        // the host is written into: CR, LF, spaces, NUL.
-        if !host
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
-        {
-            return Err(OriginError::Extra);
-        }
-        Ok(Origin {
-            host: host.to_string(),
-            port,
-        })
-    }
-}
+pub use dnet_core::origin::{Origin, OriginError};
 
 /// How a transfer is run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,6 +67,58 @@ pub async fn measure_via_proxy(
         }
     };
 
+    transfer(&mut stream, origin, config).await
+}
+
+/// What a direct measurement saw: how long the connection took to open, if it did, and the
+/// transfer judged in the same terms as a proxied one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirectMeasurement {
+    /// Time to open the connection, or `None` if it could not be opened in time.
+    pub connect: Option<Duration>,
+    pub probe: ProfileProbe,
+}
+
+/// Fetch `/bytes/<n>` from `origin` over an ordinary connection, which the operating system routes
+/// wherever its routing table says. Used while a tunnel is up, when "where the table says" is the
+/// tunnel: the origin is reachable only through it, so a transfer that completes proves the tunnel
+/// carries traffic, and the time to open the connection is a round trip through it.
+pub async fn measure_direct(origin: &Origin, config: &MeasureConfig) -> DirectMeasurement {
+    let started = Instant::now();
+    let address = format!("{}:{}", origin.host(), origin.port());
+    let mut stream = match tokio::time::timeout(
+        config.connect_timeout,
+        tokio::net::TcpStream::connect(address),
+    )
+    .await
+    {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(error)) => {
+            tracing::debug!(%error, "direct connect failed");
+            return DirectMeasurement {
+                connect: None,
+                probe: ProfileProbe::HandshakeFailed,
+            };
+        }
+        Err(_) => {
+            return DirectMeasurement {
+                connect: None,
+                probe: ProfileProbe::HandshakeFailed,
+            }
+        }
+    };
+    let connect = started.elapsed().max(Duration::from_micros(1));
+    DirectMeasurement {
+        connect: Some(connect),
+        probe: transfer(&mut stream, origin, config).await,
+    }
+}
+
+/// The request and the measurement of its answer, over a connection already open to the origin.
+async fn transfer<S>(stream: &mut S, origin: &Origin, config: &MeasureConfig) -> ProfileProbe
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     let request = format!(
         "GET /bytes/{} HTTP/1.0\r\nHost: {}:{}\r\nConnection: close\r\n\r\n",
         config.bytes,
@@ -279,67 +266,6 @@ mod tests {
             text
         });
         (addr, task)
-    }
-
-    #[test]
-    fn origin_urls_parse_to_host_and_port() {
-        let o = Origin::parse("http://203.0.113.80:8080").unwrap();
-        assert_eq!((o.host(), o.port()), ("203.0.113.80", 8080));
-        assert_eq!(Origin::parse("http://example.net/").unwrap().port(), 80);
-        assert_eq!(
-            Origin::parse("http://example.net").unwrap().host(),
-            "example.net"
-        );
-    }
-
-    /// The host is written into a request line, so it must not be able to add a header.
-    #[test]
-    fn a_host_that_could_inject_a_header_is_refused() {
-        for bad in [
-            "http://a b.net",
-            "http://a\r\nX-Evil: 1.net",
-            "http://a\nb",
-            "http://a\0b",
-            "http://under_score.net",
-            "http://[::1]:80",
-        ] {
-            assert!(Origin::parse(bad).is_err(), "{bad:?} must be refused");
-        }
-    }
-
-    #[test]
-    fn origin_urls_with_anything_else_are_refused() {
-        assert_eq!(
-            Origin::parse("https://example.net"),
-            Err(OriginError::NotHttp)
-        );
-        assert_eq!(Origin::parse("example.net:80"), Err(OriginError::NotHttp));
-        assert_eq!(Origin::parse("http://"), Err(OriginError::NoHost));
-        assert_eq!(Origin::parse("http://:80"), Err(OriginError::NoHost));
-        assert_eq!(
-            Origin::parse("http://example.net:0"),
-            Err(OriginError::BadPort)
-        );
-        assert_eq!(
-            Origin::parse("http://example.net:99999"),
-            Err(OriginError::BadPort)
-        );
-        assert_eq!(
-            Origin::parse("http://example.net:abc"),
-            Err(OriginError::BadPort)
-        );
-        assert_eq!(
-            Origin::parse("http://example.net/bytes/1"),
-            Err(OriginError::Extra)
-        );
-        assert_eq!(
-            Origin::parse("http://user@example.net"),
-            Err(OriginError::Extra)
-        );
-        assert_eq!(
-            Origin::parse("http://example.net?x=1"),
-            Err(OriginError::Extra)
-        );
     }
 
     #[tokio::test]
@@ -551,5 +477,78 @@ mod tests {
             ProfileProbe::Transferred { bytes, .. } => assert_eq!(bytes, 2000),
             other => panic!("expected a transfer, got {other:?}"),
         }
+    }
+
+    // ------------------------------------------------------------------ direct
+
+    /// An origin on loopback that plays `behave` for one connection.
+    async fn direct_origin<F, Fut>(behave: F) -> Origin
+    where
+        F: FnOnce(TcpStream) -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut byte = [0u8; 1];
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") {
+                if s.read_exact(&mut byte).await.is_err() {
+                    return;
+                }
+                head.push(byte[0]);
+            }
+            behave(s).await;
+        });
+        Origin::parse(&format!("http://127.0.0.1:{port}")).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_direct_transfer_reports_the_connect_time_and_the_bytes() {
+        let origin = direct_origin(|mut s| async move {
+            s.write_all(b"HTTP/1.0 200 OK\r\n\r\n").await.unwrap();
+            s.write_all(&vec![b'x'; 100_000]).await.unwrap();
+        })
+        .await;
+
+        let seen = measure_direct(&origin, &config(100_000)).await;
+
+        assert!(seen.connect.is_some());
+        assert!(
+            matches!(seen.probe, ProfileProbe::Transferred { bytes: 100_000, .. }),
+            "{:?}",
+            seen.probe
+        );
+    }
+
+    #[tokio::test]
+    async fn a_direct_connect_that_is_refused_has_no_connect_time() {
+        // Bind and drop, so the port is closed.
+        let port = {
+            let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let origin = Origin::parse(&format!("http://127.0.0.1:{port}")).unwrap();
+
+        let seen = measure_direct(&origin, &config(1000)).await;
+
+        assert_eq!(seen.connect, None);
+        assert_eq!(seen.probe, ProfileProbe::HandshakeFailed);
+    }
+
+    #[tokio::test]
+    async fn a_direct_origin_that_answers_with_an_error_is_connected_but_moves_nothing() {
+        let origin = direct_origin(|mut s| async move {
+            s.write_all(b"HTTP/1.0 404 Not Found\r\n\r\nnope")
+                .await
+                .unwrap();
+        })
+        .await;
+
+        let seen = measure_direct(&origin, &config(1000)).await;
+
+        assert!(seen.connect.is_some());
+        assert_eq!(seen.probe, ProfileProbe::HandshakeOnly);
     }
 }

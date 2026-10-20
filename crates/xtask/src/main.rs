@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 mod embedded;
 mod fetch_vendor;
+mod import_harness;
 mod lint_branding;
 mod pins;
 mod verify_vendor;
@@ -20,6 +21,10 @@ fn main() -> Result<()> {
         Some("fetch-vendor") => fetch_vendor::run(&root),
         Some("verify-vendor") => verify_vendor::run(&root),
         Some("lint-branding") => lint_branding::run(&root),
+        Some("import-harness-endpoint") => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            import_harness::run(&root, &rest)
+        }
         Some(other) => {
             eprintln!("unknown task: {other}");
             print_help();
@@ -38,6 +43,11 @@ fn print_help() {
     eprintln!("  fetch-vendor    download and hash-verify pinned third-party binaries");
     eprintln!("  verify-vendor   assert signed Wintun DLL; reject its source and embedded copies");
     eprintln!("  lint-branding   assert the primary core vendor name stays in attribution files");
+    eprintln!("  import-harness-endpoint --host <ip> [--dry-run] [--replace] [--label <name>]");
+    eprintln!(
+        "                  put the simulated harness endpoint into the saved configuration and"
+    );
+    eprintln!("                  the secret store (developer tooling; a real run needs an elevated shell)");
 }
 
 /// The workspace root, resolved from this crate's manifest directory.

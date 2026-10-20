@@ -15,4 +15,14 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = { workspace = true }
+dnet-config = { workspace = true }
+dnet-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 sha2 = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
