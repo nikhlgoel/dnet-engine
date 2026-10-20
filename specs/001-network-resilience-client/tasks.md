@@ -380,15 +380,21 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
   > host's `vEthernet (WSL)` NIC, not a Wi-Fi bridge. BUG-007's preflight and error surfacing are in
   > `Invoke-SpikeR4.ps1`.
   >
-  > **First elevated run, 2026-10-20: FAIL, and not evidence about the design.** The lab itself worked
-  > (route flip, gate under SYSTEM, full restoration) and the control looped (35 packets on the tunnel
-  > adapter), so the instrument sees loops. Two defects stand between it and a verdict: the gate counted
-  > the physical adapter by name and missed the traffic pktmon filed under the sibling `Host vNic`
-  > component (same Id; fails toward FAIL, not PASS), and the endpoint never answered, so no transfer
-  > happened (cause unknown). Both are to be fixed before the next run (`testing/spike-r4/README.md` §6).
-  > **Owner decision pending:** a lab `PASS` with a looping control is real evidence about the cores'
-  > own packets but is not the provisioned endpoint of T098a; whether it closes T055 or only reduces
-  > the risk is for the owner to say. Until then T055 stays open.
+  > **Lab runs, 2026-10-20 (three elevated runs; the third PASSED).** Run 1 failed on a gate counting
+  > defect (it matched the physical adapter by name and missed traffic pktmon filed under the sibling
+  > `Host vNic`) and on a lab endpoint whose replies left from the wrong address; run 2 proved the handshake
+  > but the lab endpoint had no HTTP origin; run 3 (17:23) returned **PASS**: a 20 MB transfer through
+  > Profile A at 144.8 Mbit/s with **0 of 185,297 endpoint packets on a tunnel adapter**, while the control
+  > (host route withheld) showed 21,895 re-entering, so the instrument can tell loop from no loop. Server
+  > counters agree; restoration left no residue (`testing/spike-r4/README.md` §6).
+  >
+  > **What the PASS does not cover, so T055 stays open:** (1) the control re-entered but did **not**
+  > collapse (its transfer succeeded), so the §R4 failure mode was not reproduced; the result supports
+  > "the host route prevents re-entry", not "re-entry is fatal". (2) The required host-route rewrite
+  > across a simulated interface change was **SKIPPED** (one path). (3) The path is a virtual NIC on one
+  > machine, one run. (4) Hysteria 2 has not been run through the lab. (5) It is not the provisioned
+  > endpoint of T098a. **Owner decision pending:** whether this closes T055 or only reduces the risk
+  > until T098a is for the owner to say.
   >
   > **What the logic-level tests cover.** The safety orderings are asserted by call order: host
   > route before tunnel, rewrite before rebind, reap before adapter, kill before undo. A missing
@@ -724,7 +730,37 @@ polish phase only because the original list ended there; by dependency they belo
   > - A failure to bring the chosen tunnel up is reported, not retried on another profile: the cause may be local (privilege, a crashing core), not a block.
   > - A degraded active endpoint is kept; only the probe that makes it unreachable triggers a move.
   > - There is no "acknowledged Tier 2" input: a connect races only the profiles it names or all of them, and the race prefers Tier 1, so the consent case `selection::select` guards cannot arise. Tier 2 is warned about (`WarnTier2`), not refused.
-- [ ] T124 Add the config store and secret store the orchestrator reads profiles, endpoints and credentials from (`dnet-config`, `dnetd`); credentials never in plain files
+- [x] T124 Add the config store and secret store the orchestrator reads profiles, endpoints and credentials from (`dnet-config`, `dnetd`); credentials never in plain files
+  > **Done 2026-10-20 (not committed; security review pending, since it touches credential material).**
+  > - **Secret store** (`dnet_config::secret_store`, `credentials`). One bundle per endpoint (AmneziaWG key and
+  >   obfuscation, Hysteria 2 passwords with their obfuscation and certificate trust, REALITY id and public
+  >   key), validated with the generators' own rules and refused if it has an unknown field, another version or a
+  >   value a generator would refuse. Sealed with **DPAPI machine scope**, bound to its own key as DPAPI entropy
+  >   (a blob copied under another key does not open), and stored one file per key in a directory only SYSTEM and
+  >   Administrators control. `Sealer` and `BlobStorage` are separate traits so Linux can seal with
+  >   `systemd-creds` (ADR-0005, T-L10) without touching the rest. Keys are `a-z0-9-` slugs and files carry a
+  >   `secret-` prefix, so a key cannot name a path, a stream or a Windows device. Plaintext is wiped after use
+  >   (best effort).
+  > - **What this does and does not protect.** A blob is useless off this machine and the directory keeps
+  >   ordinary users out. Machine-scope DPAPI does not stop an administrator process on this machine.
+  > - **Config store** (`dnetd::persist`). `state\config.json`: endpoints (no secrets, only the credential's key) and
+  >   per-profile parameters and Brutal opt-in. Read as hostile: strict schema, size and count limits, hosts must
+  >   be IP literals or host names, ids are UUIDs, and **one bad entry refuses the whole file**. A profile id
+  >   outside the catalogue is refused (ADR-0002 §5.3). Tier and viability are never stored. A Brutal
+  >   acknowledgement of an older warning is dropped with a note, not an error (FR-006). Errors never echo the file.
+  > - **Start-up.** `DnetService::production` loads it. A refused file leaves the daemon up read-only with the
+  >   reason, refuses every mutating request, and nothing may be saved over it (it may be the only copy).
+  > - **Shared trust code.** The "owned by SYSTEM/Administrators, protected DACL, read through the same handle"
+  >   logic moved from `dnet-netstate::undo_file` to `dnet_config::trusted_file`; the undo journal now uses it.
+  >   Behaviour is unchanged and its tests moved with it.
+  > - **Verification.** 73 new tests; mutation checks on the key binding, the sealing step, the credential-key
+  >   grammar, the stale-acknowledgement rule and the refused-config gate each failed as they should. Real DPAPI
+  >   runs in the unelevated tests. **Not run (need an elevated shell):** the three `--ignored` tests that
+  >   restrict a directory and read it back (`cargo test -p dnet-config -p dnet-netstate -- --ignored`).
+  > - **Not done, and why.** Saving is unused until configuration requests carry payloads (Phase 9), and user
+  >   routing rules are not persisted yet (US5, Phase 6). **Gap for T126/T127:** nothing creates an endpoint or its
+  >   credentials yet, so the orchestrator cannot be driven end to end. A command that imports the harness
+  >   endpoint (`testing/harness/.state/*.json`) into both stores is needed first.
 - [x] T125 Define the IPC payloads for connect, disconnect, status and the event stream, carrying `ConnectionEvent` with its `because` (`dnet-ipc`, IPC-04, IPC-06)
   > **Done 2026-10-20 (not committed; security review pending).** Contract: `ipc-protocol.md`, tests IPC-10…14.
   > - **Connect.** `Request::Connect` carries `profile` and `endpoint`, validated as hostile input

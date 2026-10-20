@@ -17,6 +17,8 @@
 #[cfg_attr(not(windows), allow(dead_code))]
 mod domain;
 #[cfg_attr(not(windows), allow(dead_code))]
+mod persist;
+#[cfg_attr(not(windows), allow(dead_code))]
 mod recovery;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod service_impl;

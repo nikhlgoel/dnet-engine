@@ -47,6 +47,9 @@ param(
     # Resolved by Launch (WSL distros are per user, so the SYSTEM task cannot ask wsl.exe).
     [string] $WslIp,
     [ValidateRange(4, 60)] [int] $WatchdogMinutes = 10,
+    # The SID of the person who started the lab; Launch passes it so the SYSTEM task can hand the
+    # results folder back to them. Validated before it reaches icacls.
+    [string] $GrantSid,
     [switch] $NoWait
 )
 
@@ -219,6 +222,57 @@ function Invoke-Restore {
     Log "restore: default route and interface metrics put back; default routes now: $($left -join '; ')"
 }
 
+# The gate runs as SYSTEM, and the files and folders it creates belong to SYSTEM. Give them back to
+# the person who started the lab, so the results can be read, committed-around and deleted without
+# an elevated shell. Works from an elevated user (takes ownership first) and from SYSTEM.
+
+# The first link (junction or symbolic link) at or under $Root, or $null. Never descends into one.
+# The results folder is writable by the person who starts the lab, and Repair-Results changes
+# ownership and permissions recursively as an administrator or SYSTEM: a link planted inside it
+# would send that change to wherever it points.
+function Find-ReparsePoint {
+    param([string]$Root)
+    $link = [IO.FileAttributes]::ReparsePoint
+    if ((Get-Item -LiteralPath $Root -Force).Attributes -band $link) { return $Root }
+    $pending = New-Object System.Collections.Generic.Stack[string]
+    $pending.Push($Root)
+    while ($pending.Count) {
+        $dir = $pending.Pop()
+        foreach ($item in Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue) {
+            if ($item.Attributes -band $link) { return $item.FullName }
+            if ($item.PSIsContainer) { $pending.Push($item.FullName) }
+        }
+    }
+    return $null
+}
+
+function Repair-Results {
+    param([string]$Sid)
+    if (-not (Test-Path $Results)) { return }
+    if ($Sid -notmatch '^S-1-\d+(-\d+)+$') { Log "restore: not repairing results permissions (no valid SID given)"; return }
+    $link = Find-ReparsePoint $Results
+    if ($link) { Log "restore: NOT repairing results permissions: '$link' is a link, and the repair would follow it. Remove it and run -Phase Restore."; return }
+    if (-not (Test-System)) { & takeown.exe /f $Results /r /d y *> $null }
+    & icacls.exe $Results /grant "*${Sid}:(OI)(CI)F" /t /c /q *> $null
+    Log "restore: results folder handed back to $Sid"
+}
+
+# What the VM saw during the run: the packets on the endpoint port in both directions, the server's
+# own debug log and the NAT counters. Only the person who started the lab can ask the VM (WSL
+# distros are per user), so Launch calls this after the SYSTEM task has finished.
+function Save-VmDiagnostics {
+    $text = Invoke-Wsl @('-d', $Distro, '-u', 'root', '--exec', '/opt/wsl-endpoint.sh', 'diag')
+    [IO.File]::WriteAllText((Join-Path $Here 'wsl-lab-vm-diag.txt'), $text, $Utf8NoBom)
+    $latest = Get-ChildItem $Results -Directory -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -Last 1
+    if ($latest) {
+        # A folder left by a SYSTEM run may still be unwritable until Launch repairs it.
+        try { [IO.File]::WriteAllText((Join-Path $latest.FullName 'vm-diag.txt'), $text, $Utf8NoBom) }
+        catch { Log "diagnostics: could not copy into $($latest.Name): $($_.Exception.Message)" }
+    }
+    Log "diagnostics: the VM's view saved to wsl-lab-vm-diag.txt ($($text.Length) characters)"
+    return $text
+}
+
 function Remove-LabTasks {
     foreach ($t in $RunTask, $DogTask) { Unregister-ScheduledTask -TaskName $t -Confirm:$false -ErrorAction SilentlyContinue }
 }
@@ -239,6 +293,10 @@ switch ($Phase) {
                 $net = Get-NetIPAddress -InterfaceIndex $sw.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -First 1
                 if ($net) { Log "check: host side of the VM switch is $($net.IPAddress)/$($net.PrefixLength); VM is $($ep.WslIp)" }
             }
+            $diag = Save-VmDiagnostics
+            foreach ($needle in '== PREROUTING nat rules', "server's view of the peer", 'errno=0') {
+                if ($diag -notmatch [regex]::Escape($needle)) { throw "check: the VM diagnostics lack '$needle'" }
+            }
             Log 'check: OK. Nothing on the host was changed.'
         } finally {
             if (-not $ep.Process.HasExited) { $ep.Process.Kill() }
@@ -250,6 +308,8 @@ switch ($Phase) {
         if ($problems.Count) { $problems | ForEach-Object { Write-Host "PROBLEM: $_" -ForegroundColor Red }; exit 2 }
         Remove-LabTasks
         Remove-Item $LogFile -Force -ErrorAction SilentlyContinue
+        $mySid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        Repair-Results $mySid
 
         $hold = ($WatchdogMinutes + 3) * 60
         $ep = Start-Endpoint $hold
@@ -264,7 +324,7 @@ switch ($Phase) {
                     -ExecutionTimeLimit (New-TimeSpan -Minutes ($WatchdogMinutes + 2))
         $mk = {
             param($phase, $at, $name)
-            $arg = "-NoProfile -ExecutionPolicy Bypass -File `"$self`" -Phase $phase -EndpointIp $EndpointIp -WslIp $WslIp -WatchdogMinutes $WatchdogMinutes"
+            $arg = "-NoProfile -ExecutionPolicy Bypass -File `"$self`" -Phase $phase -EndpointIp $EndpointIp -WslIp $WslIp -WatchdogMinutes $WatchdogMinutes -GrantSid $mySid"
             $act = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arg
             $trg = New-ScheduledTaskTrigger -Once -At $at
             Register-ScheduledTask -TaskName $name -Action $act -Trigger $trg -Principal $sys -Settings $set -Force | Out-Null
@@ -282,6 +342,7 @@ switch ($Phase) {
             Start-Sleep -Seconds 3
             if ((Test-Path $LogFile) -and (Select-String -Path $LogFile -Pattern $Finished -Quiet)) { break }
         }
+        try { [void](Save-VmDiagnostics) } catch { Log "launch: could not collect the VM's view: $_" }
         $ep.Process.Kill()
         Remove-LabTasks
         if (-not ((Test-Path $LogFile) -and (Select-String -Path $LogFile -Pattern $Finished -Quiet))) {
@@ -337,6 +398,7 @@ switch ($Phase) {
         catch { Log "ERROR: $_" }
         finally {
             try { Invoke-Restore } catch { Log "ERROR while restoring: $_" }
+            try { Repair-Results $GrantSid } catch { Log "ERROR while handing back the results: $_" }
             Log $Finished
         }
     }
@@ -348,13 +410,17 @@ switch ($Phase) {
             Invoke-Restore
         }
         catch { Log "ERROR in watchdog: $_" }
-        finally { Remove-LabTasks; Log $Finished }
+        finally {
+            try { Repair-Results $GrantSid } catch { Log "ERROR while handing back the results: $_" }
+            Remove-LabTasks; Log $Finished
+        }
     }
 
     'Restore' {
         if (-not (Test-Role Administrator)) { throw 'Restore needs an elevated PowerShell.' }
         Stop-ScheduledTask -TaskName $RunTask -ErrorAction SilentlyContinue
         Invoke-Restore
+        Repair-Results ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value)
         Remove-LabTasks
     }
 }

@@ -30,6 +30,27 @@ This is enforced by type design, not by discipline. There is no method to call t
 
 ---
 
+## 2a. Where service-held material rests (T124)
+
+One sealed file per endpoint under `%PROGRAMDATA%\DNet Engine\state\secrets\`, named
+`secret-<key>.bin`. The key is the endpoint's `CredentialRef`, restricted to `a-z`, `0-9` and `-` so it
+cannot name a path, an alternate stream or a Windows device.
+
+- **Sealing**: DPAPI **machine** scope, with the key as DPAPI entropy, so a blob copied under another key's
+  name does not open. Linux will seal with `systemd-creds` instead (ADR-0005, T-L10); the sealer is a trait.
+- **Directory and files**: owned by SYSTEM or Administrators, DACL protected, naming only those two. A file
+  or directory that is not is refused and nothing is read from it.
+- **What this protects**: a disk copied to another machine, and ordinary local users. **What it does not**:
+  an administrator process on this machine, which can unseal what the service can. No scheme that the
+  service must read unattended can.
+- **The contents** are one validated bundle per endpoint (`dnet_config::credentials`): the AmneziaWG client
+  key and obfuscation, the Hysteria 2 passwords with their obfuscation and certificate trust, the REALITY id
+  and public key. Plaintext exists only in memory, is never logged, and is overwritten after use (best
+  effort; it cannot reach copies the allocator or OS made).
+- **The configuration file** (`config.json`) holds no secret: an endpoint carries only the credential's key.
+
+---
+
 ## 3. Cloud credential lifecycle
 
 ```

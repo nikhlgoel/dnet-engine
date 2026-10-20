@@ -18,6 +18,18 @@ use dnet_core::rule::{validate_dns_leak_protection, validate_rule_set, RoutingRu
 use dnet_ipc::protocol::{encode_state_snapshot, ConnectionStatus, RoutingPosture, StateSnapshot};
 use serde_json::{json, Value};
 
+use crate::persist::{self, LoadedConfig, PersistError};
+
+/// The outcome of reading the saved configuration at start-up.
+pub struct StartupConfig {
+    pub state: DomainState,
+    /// Why the saved configuration was refused, if it was. Nothing may be changed or saved while
+    /// this is set.
+    pub refusal: Option<String>,
+    /// Settings dropped because they no longer apply, for the log.
+    pub notes: Vec<String>,
+}
+
 /// Everything the daemon knows about endpoints, profiles, and routing.
 pub struct DomainState {
     endpoints: Vec<Endpoint>,
@@ -42,6 +54,78 @@ impl DomainState {
             profiles,
             rules: builtin_rules(None),
         }
+    }
+
+    // ----------------------------------------------------------- persistence (T124)
+
+    /// The seeded store with the saved configuration applied: each saved profile's parameters and
+    /// Brutal setting, and the saved endpoints. The set of profiles is the bundled catalogue and
+    /// never changes; a saved setting for a profile replaces that profile's settings, rebuilt so its
+    /// tier is still the recorded measurement and its viability still `Untested`.
+    pub fn from_loaded(loaded: LoadedConfig) -> Result<Self, PersistError> {
+        let mut state = Self::seeded();
+        for saved in loaded.profiles {
+            let Some(slot) = state.profiles.iter_mut().find(|p| p.id() == &saved.id) else {
+                // `persist::decode` refuses ids outside the catalogue; reaching here is a defect.
+                return Err(PersistError::Invalid(
+                    "a saved profile is not in the catalogue".into(),
+                ));
+            };
+            let mut profile = ConnectionProfile::new(saved.id, slot.kind(), saved.params);
+            if let Some((bandwidth, acknowledgement)) = saved.brutal {
+                profile
+                    .enable_brutal(bandwidth, acknowledgement)
+                    .map_err(|e| PersistError::Invalid(e.to_string()))?;
+            }
+            *slot = profile;
+        }
+        for endpoint in loaded.endpoints {
+            state
+                .add_endpoint(endpoint)
+                .map_err(|e| PersistError::Invalid(e.to_string()))?;
+        }
+        Ok(state)
+    }
+
+    /// What start-up makes of the saved configuration.
+    ///
+    /// - Nothing saved yet (a first run): the seeded store.
+    /// - Saved and valid: that, with any notes (settings dropped because they no longer apply).
+    /// - Saved but refused: the seeded store **and the reason**. The caller must keep the service
+    ///   from changing anything and must not save over the file, which may be the only copy of the
+    ///   user's endpoints.
+    pub fn from_load_result(result: Result<Option<LoadedConfig>, PersistError>) -> StartupConfig {
+        let refused = |e: PersistError| StartupConfig {
+            state: Self::seeded(),
+            refusal: Some(e.to_string()),
+            notes: Vec::new(),
+        };
+        match result {
+            Ok(None) => StartupConfig {
+                state: Self::seeded(),
+                refusal: None,
+                notes: Vec::new(),
+            },
+            Ok(Some(loaded)) => {
+                let notes = loaded.notes.clone();
+                match Self::from_loaded(loaded) {
+                    Ok(state) => StartupConfig {
+                        state,
+                        refusal: None,
+                        notes,
+                    },
+                    Err(e) => refused(e),
+                }
+            }
+            Err(e) => refused(e),
+        }
+    }
+
+    /// The configuration in its stored form.
+    // Saving has no caller until configuration requests carry payloads (Phase 9, T126); tests cover it.
+    #[allow(dead_code)]
+    pub fn to_config_bytes(&self) -> Result<Vec<u8>, PersistError> {
+        persist::encode(&self.endpoints, &self.profiles)
     }
 
     // ----------------------------------------------------------- wire responses
@@ -421,5 +505,129 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["label"], "home");
         assert_eq!(items[0]["health"], "Unknown");
+    }
+
+    // ---------------------------------------------------------------- persistence (T124)
+
+    fn saved_endpoint(label: &str, uuid: &str) -> Endpoint {
+        Endpoint::new(
+            EndpointId::from_uuid(uuid.parse().unwrap()),
+            label,
+            EndpointAddress::new("vpn.example.com", 443).unwrap(),
+            EndpointOrigin::Manual,
+            CredentialRef::new(format!("endpoint-{uuid}")),
+        )
+        .unwrap()
+    }
+
+    fn state_with_settings() -> DomainState {
+        let mut state = DomainState::seeded();
+        state
+            .add_endpoint(saved_endpoint(
+                "home",
+                "123e4567-e89b-42d3-a456-426614174000",
+            ))
+            .unwrap();
+        let hy2 = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.id().as_str() == "hy2-default")
+            .unwrap();
+        hy2.enable_brutal(
+            dnet_core::profile::BandwidthPair {
+                up_mbps: 50,
+                down_mbps: 200,
+            },
+            dnet_core::profile::BrutalAcknowledgement {
+                warning_revision: dnet_core::profile::BRUTAL_WARNING_REVISION,
+                acknowledged_at_unix: 1_760_000_000,
+            },
+        )
+        .unwrap();
+        state
+    }
+
+    fn reload(state: &DomainState) -> StartupConfig {
+        let loaded = persist::decode(&state.to_config_bytes().unwrap()).unwrap();
+        DomainState::from_load_result(Ok(Some(loaded)))
+    }
+
+    #[test]
+    fn a_first_run_starts_from_the_seeded_defaults_without_complaint() {
+        let start = DomainState::from_load_result(Ok(None));
+        assert!(start.refusal.is_none() && start.notes.is_empty());
+        assert!(start.state.endpoints().is_empty());
+        assert_eq!(start.state.profiles().len(), 3);
+    }
+
+    #[test]
+    fn what_was_saved_is_what_starts() {
+        let before = state_with_settings();
+        let start = reload(&before);
+
+        assert!(start.refusal.is_none() && start.notes.is_empty());
+        assert_eq!(start.state.endpoints(), before.endpoints());
+        let hy2 = start
+            .state
+            .profiles()
+            .iter()
+            .find(|p| p.id().as_str() == "hy2-default")
+            .unwrap();
+        assert_eq!(hy2.brutal().unwrap().bandwidth().up_mbps, 50);
+        assert!(start.state.rules().iter().all(RoutingRule::is_builtin));
+    }
+
+    #[test]
+    fn a_restored_profile_takes_its_tier_from_the_measurement_never_from_the_file() {
+        // The file has no tier field at all; every restored profile is whatever the recorded
+        // HV-07 result says (Tier 2 until T085), and nothing in it has been probed.
+        let start = reload(&state_with_settings());
+        for profile in start.state.profiles() {
+            let fresh =
+                ConnectionProfile::new(profile.id().clone(), profile.kind(), ProfileParams::new());
+            assert_eq!(profile.tier(), fresh.tier(), "{}", profile.id());
+            assert_eq!(
+                profile.viability(),
+                &dnet_core::profile::Viability::Untested
+            );
+        }
+    }
+
+    #[test]
+    fn a_refused_file_starts_the_defaults_and_carries_the_reason() {
+        let start = DomainState::from_load_result(Err(PersistError::Invalid(
+            "endpoint 0: the host is neither an IP address nor a host name".into(),
+        )));
+        assert!(start.state.endpoints().is_empty());
+        let reason = start.refusal.expect("a refusal must be reported");
+        assert!(reason.contains("endpoint 0"), "{reason}");
+    }
+
+    #[test]
+    fn notes_from_loading_are_passed_on_and_do_not_refuse_the_file() {
+        let mut loaded =
+            persist::decode(&state_with_settings().to_config_bytes().unwrap()).unwrap();
+        loaded
+            .notes
+            .push("profile 'hy2-default': Brutal ... turned off".into());
+        for profile in &mut loaded.profiles {
+            profile.brutal = None;
+        }
+        let start = DomainState::from_load_result(Ok(Some(loaded)));
+
+        assert!(start.refusal.is_none());
+        assert_eq!(start.notes.len(), 1);
+        assert_eq!(start.state.endpoints().len(), 1);
+        assert!(start.state.profiles().iter().all(|p| p.brutal().is_none()));
+    }
+
+    #[test]
+    fn the_stored_form_carries_no_secret_and_no_measurement() {
+        let text = String::from_utf8(state_with_settings().to_config_bytes().unwrap())
+            .unwrap()
+            .to_lowercase();
+        for forbidden in ["password", "private", "secret", "token", "health", "rtt"] {
+            assert!(!text.contains(forbidden), "{forbidden}");
+        }
     }
 }

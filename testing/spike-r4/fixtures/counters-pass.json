@@ -1,0 +1,224 @@
+[
+ {
+  "Group": "WSL (Hyper-V firewall)",
+  "Components": [
+   {
+    "Name": "vEthernet (WSL (Hyper-V firewall))",
+    "Id": 157,
+    "Counters": [
+     {
+      "Name": "vmswitch.sys",
+      "Type": "Drops",
+      "Inbound": {
+       "Last Drop Reason": "Not specified",
+       "DirectionTag": "Egress",
+       "Packets": 0,
+       "Bytes": 0
+      },
+      "Outbound": {
+       "Last Drop Reason": "Not specified",
+       "DirectionTag": "Ingress",
+       "Packets": 0,
+       "Bytes": 0
+      }
+     }
+    ]
+   },
+   {
+    "Name": "Host vNic",
+    "Id": 157,
+    "Counters": [
+     {
+      "Name": "VmsProxyHNic.sys",
+      "Type": "Drops",
+      "Inbound": {
+       "Last Drop Reason": "Not specified",
+       "DirectionTag": "Rx",
+       "Packets": 0,
+       "Bytes": 0
+      },
+      "Outbound": {
+       "Last Drop Reason": "Not specified",
+       "DirectionTag": "Tx",
+       "Packets": 0,
+       "Bytes": 0
+      }
+     },
+     {
+      "Name": "Upper",
+      "Type": "Flows",
+      "Inbound": {
+       "DirectionTag": "Rx",
+       "Packets": 0,
+       "Bytes": 0
+      },
+      "Outbound": {
+       "DirectionTag": "Tx",
+       "Packets": 35,
+       "Bytes": 4093
+      }
+     }
+    ]
+   },
+   {
+    "Name": "00000000-0000-0000-0000-000000000158",
+    "Id": 158,
+    "Counters": [
+     {
+      "Name": "vmswitch.sys",
+      "Type": "Drops",
+      "Inbound": {
+       "Last Drop Reason": "Not specified",
+       "DirectionTag": "Egress",
+       "Packets": 0,
+       "Bytes": 0
+      },
+      "Outbound": {
+       "Last Drop Reason": "Not specified",
+       "DirectionTag": "Ingress",
+       "Packets": 0,
+       "Bytes": 0
+      }
+     },
+     {
+      "Name": "Upper",
+      "Type": "Flows",
+      "Inbound": {
+       "DirectionTag": "Rx",
+       "Packets": 35,
+       "Bytes": 4093
+      },
+      "Outbound": {
+       "DirectionTag": "Tx",
+       "Packets": 0,
+       "Bytes": 0
+      }
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "Group": "WAN Miniport (IP)",
+  "Components": [
+   {
+    "Name": "WAN Miniport (IP)",
+    "Id": 10,
+    "Counters": [
+     {
+      "Name": "ndiswan.sys",
+      "Type": "Drops",
+      "Inbound": {
+       "Last Drop Reason": "Not specified",
+       "DirectionTag": "Rx",
+       "Packets": 0,
+       "Bytes": 0
+      },
+      "Outbound": {
+       "Last Drop Reason": "Not specified",
+       "DirectionTag": "Tx",
+       "Packets": 0,
+       "Bytes": 0
+      }
+     },
+     {
+      "Name": "Upper",
+      "Type": "Flows",
+      "Inbound": {
+       "DirectionTag": "Rx",
+       "Packets": 0,
+       "Bytes": 0
+      },
+      "Outbound": {
+       "DirectionTag": "Tx",
+       "Packets": 0,
+       "Bytes": 0
+      }
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "Group": "WireGuard Tunnel",
+  "Components": [
+   {
+    "Name": "WireGuard Tunnel",
+    "Id": 2,
+    "Counters": [
+     {
+      "Name": "wintun.sys",
+      "Type": "Drops",
+      "Inbound": {
+       "Last Drop Reason": "Not specified",
+       "DirectionTag": "Rx",
+       "Packets": 0,
+       "Bytes": 0
+      },
+      "Outbound": {
+       "Last Drop Reason": "Not specified",
+       "DirectionTag": "Tx",
+       "Packets": 0,
+       "Bytes": 0
+      }
+     },
+     {
+      "Name": "Upper",
+      "Type": "Flows",
+      "Inbound": {
+       "DirectionTag": "Rx",
+       "Packets": 0,
+       "Bytes": 0
+      },
+      "Outbound": {
+       "DirectionTag": "Tx",
+       "Packets": 0,
+       "Bytes": 0
+      }
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "Group": "sing-tun Tunnel",
+  "Components": [
+   {
+    "Name": "sing-tun Tunnel",
+    "Id": 1,
+    "Counters": [
+     {
+      "Name": "wintun.sys",
+      "Type": "Drops",
+      "Inbound": {
+       "Last Drop Reason": "Not specified",
+       "DirectionTag": "Rx",
+       "Packets": 0,
+       "Bytes": 0
+      },
+      "Outbound": {
+       "Last Drop Reason": "Not specified",
+       "DirectionTag": "Tx",
+       "Packets": 0,
+       "Bytes": 0
+      }
+     },
+     {
+      "Name": "Upper",
+      "Type": "Flows",
+      "Inbound": {
+       "DirectionTag": "Rx",
+       "Packets": 0,
+       "Bytes": 0
+      },
+      "Outbound": {
+       "DirectionTag": "Tx",
+       "Packets": 0,
+       "Bytes": 0
+      }
+     }
+    ]
+   }
+  ]
+ }
+]

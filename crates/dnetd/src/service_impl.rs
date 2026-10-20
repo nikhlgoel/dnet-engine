@@ -35,6 +35,10 @@ pub struct DnetService {
     recovery: Result<Recovered, RecoveryError>,
     /// Where connection events are published (T126) and subscribers read them.
     events: EventBus,
+    /// Why the saved configuration was refused at start-up (T124), if it was. While set, every
+    /// mutating request is refused, exactly as after a failed recovery: the service keeps answering
+    /// read-only queries so the user can see why, and it never saves over a file it could not read.
+    config_refusal: Option<String>,
 }
 
 impl DnetService {
@@ -50,7 +54,14 @@ impl DnetService {
             console,
             recovery,
             events: EventBus::new(),
+            config_refusal: None,
         }
+    }
+
+    /// Mark the saved configuration as refused for `reason`. See the field.
+    pub fn with_config_refusal(mut self, reason: Option<String>) -> Self {
+        self.config_refusal = reason;
+        self
     }
 
     /// The bus the connection orchestrator publishes to.
@@ -59,14 +70,34 @@ impl DnetService {
         &self.events
     }
 
-    /// The production service: a seeded store and the real OS console lookup.
+    /// The production service: the saved configuration (or the seeded defaults on a first run) and
+    /// the real OS console lookup.
     #[cfg(windows)]
     pub fn production(recovery: Result<Recovered, RecoveryError>) -> Self {
+        use crate::domain::StartupConfig;
+        use crate::persist::{default_config_path, ConfigStore, TrustedStateFile};
+
+        let store = ConfigStore::new(Box::new(TrustedStateFile::new(default_config_path())));
+        let StartupConfig {
+            state,
+            refusal,
+            notes,
+        } = DomainState::from_load_result(store.load());
+        for note in &notes {
+            tracing::warn!("{note}");
+        }
+        if let Some(reason) = &refusal {
+            tracing::error!(
+                "{reason}; mutating requests are refused until it is corrected or removed ({})",
+                default_config_path().display()
+            );
+        }
         Self::new(
-            DomainState::seeded(),
+            state,
             Box::new(crate::console::active_console_session),
             recovery,
         )
+        .with_config_refusal(refusal)
     }
 
     fn not_available(what: &str) -> Result<String, IpcError> {
@@ -91,6 +122,13 @@ impl Service for DnetService {
             if let Err(e) = &self.recovery {
                 return Err(IpcError::InternalError {
                     detail: e.to_string(),
+                });
+            }
+            if let Some(reason) = &self.config_refusal {
+                return Err(IpcError::InternalError {
+                    detail: format!(
+                        "{reason}. DNet Engine will not connect or change anything until the file                          is corrected or removed, then the service restarted"
+                    ),
                 });
             }
         }
@@ -292,6 +330,66 @@ mod tests {
             Request::GetDiagnostics,
         ] {
             assert!(svc.dispatch(&request).is_ok(), "{request:?}");
+        }
+    }
+
+    fn service_with_refused_config() -> DnetService {
+        service().with_config_refusal(Some(
+            "the saved configuration has an invalid entry (endpoint 0: the host is neither an IP address nor a host name)"
+                .into(),
+        ))
+    }
+
+    #[test]
+    fn a_refused_saved_configuration_refuses_every_mutating_request_with_the_reason() {
+        let svc = service_with_refused_config();
+        for request in mutating_requests() {
+            match svc.dispatch(&request) {
+                Err(IpcError::InternalError { detail }) => {
+                    assert!(detail.contains("endpoint 0"), "{request:?}: {detail}");
+                    assert!(
+                        detail.contains("corrected or removed"),
+                        "{request:?}: {detail}"
+                    );
+                }
+                other => panic!("{request:?} must be refused, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_refused_saved_configuration_still_answers_read_only_queries() {
+        let svc = service_with_refused_config();
+        for request in [
+            Request::GetState,
+            Request::GetSession,
+            Request::ListEndpoints,
+            Request::ListProfiles,
+            Request::ListRules,
+            Request::GetDiagnostics,
+        ] {
+            assert!(svc.dispatch(&request).is_ok(), "{request:?}");
+        }
+    }
+
+    #[test]
+    fn a_good_configuration_does_not_gate_anything_new() {
+        // `service()` has no refusal: the new gate must not change what was already answered.
+        let svc = service().with_config_refusal(None);
+        assert!(matches!(
+            svc.dispatch(&Request::Disconnect),
+            Err(IpcError::InternalError { detail }) if detail.contains("not available")
+        ));
+    }
+
+    #[test]
+    fn a_failed_recovery_is_reported_before_a_refused_configuration() {
+        let svc = unrecovered_service().with_config_refusal(Some("config reason".into()));
+        match svc.dispatch(&Request::Disconnect) {
+            Err(IpcError::InternalError { detail }) => {
+                assert!(detail.contains("could not be undone"), "{detail}");
+            }
+            other => panic!("expected the recovery refusal, got {other:?}"),
         }
     }
 }

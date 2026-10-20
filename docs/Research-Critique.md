@@ -434,13 +434,16 @@ with zero throughput.
 provisional. If T098a fails, §R4 (and possibly D8's dual-core arrangement) is revisited before that
 work is accepted. Gate-independent work is sequenced first. This entry closes when T098a passes. See also BUG-007: the one recorded run (2026-09-11) failed earlier, because the AmneziaWG core cannot create its UAPI pipe from an Administrator shell, so the live run must be made as LocalSystem (`docs/bugs/bug-007-spike-r4-uapi-pipe-owner.md`).
 
-**Update 2026-10-20.** A WSL2-based lab (`testing/spike-r4/Invoke-WslLab.ps1`, README section 6) can
-now supply the off-subnet endpoint the gate needs, and BUG-007's preflight is in the runner. Its first
-elevated run (the same day) returned FAIL without being evidence about the design: the control
-looped, so the instrument can see a loop, but the gate mis-counted the physical adapter and the
-endpoint never answered. This entry stays **OPEN, waived at risk**: a lab `PASS` with a looping
-control would be evidence about the cores' own packets, but whether it substitutes for T098a is an
-owner decision, not made here.
+**Update 2026-10-20.** A WSL2-based lab (`testing/spike-r4/Invoke-WslLab.ps1`, README section 6) now
+supplies the off-subnet endpoint the gate needs, and BUG-007's preflight is in the runner. After two
+failed runs whose causes were in the lab and the gate (a counting defect, replies from the wrong
+address, a missing HTTP origin), the third elevated run returned **PASS** for Profile A: a 20 MB
+transfer with 0 of 185,297 endpoint packets re-entering the TUN, against a control that re-entered
+21,895. It is real evidence that the host route keeps the AmneziaWG core's own packets off the TUN.
+It does not close this entry: the control did not collapse (the §R4 failure mode was not reproduced),
+the host-route rewrite across an interface change was skipped, the path is one virtual NIC in one
+run, and Hysteria 2 has not been run. This entry stays **OPEN, waived at risk**, and whether the
+lab PASS substitutes for T098a is an owner decision, not made here.
 
 ### 6.7 Documentation reconciled with delivery status *(2026-10-16)*
 

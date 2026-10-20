@@ -126,38 +126,12 @@ if (-not $SkipBuild) {
 New-Item -ItemType Directory -Force $Results | Out-Null
 
 # ------------------------------------------------------------------ 2. counting
-# pktmon's counters JSON is walked generically: any object with a string property EXACTLY
-# equal to one of the adapter's names/descriptions contributes its *Packet* counters.
-# A zero sum only counts as zero if the adapter was actually found (Hit) — otherwise the
-# instrument is blind and the verdict is INCONCLUSIVE, never PASS.
-function Measure-Adapter {
-    param($Node, [string[]]$Needles, [bool]$InMatch = $false)
-    $out = @{ Sum = [long]0; Hit = $false }
-    if ($null -eq $Node -or $Node -is [string]) { return $out }
-    if ($Node -is [System.Collections.IEnumerable]) {
-        foreach ($item in $Node) {
-            $r = Measure-Adapter $item $Needles $InMatch
-            $out.Sum += $r.Sum; $out.Hit = $out.Hit -or $r.Hit
-        }
-        return $out
-    }
-    if ($Node -isnot [pscustomobject]) { return $out }
-    $self = $InMatch
-    foreach ($p in $Node.PSObject.Properties) {
-        if ($p.Value -is [string] -and ($Needles -contains $p.Value)) { $self = $true }
-    }
-    $out.Hit = $self
-    foreach ($p in $Node.PSObject.Properties) {
-        $isNumber = $p.Value -is [int] -or $p.Value -is [long] -or $p.Value -is [double] -or $p.Value -is [decimal]
-        if ($self -and $isNumber -and $p.Name -match 'Packet') {
-            $out.Sum += [long]$p.Value
-        } elseif ($p.Value -isnot [string] -and -not $isNumber) {
-            $r = Measure-Adapter $p.Value $Needles $self
-            $out.Sum += $r.Sum; $out.Hit = $out.Hit -or $r.Hit
-        }
-    }
-    return $out
-}
+# pktmon's counters JSON is walked generically (PktmonCount.ps1, tested offline by
+# Test-PktmonCount.ps1 against output from a live run): an adapter is matched by name OR by pktmon
+# component Id, because pktmon can file an adapter's traffic under a sibling component that shares
+# its Id but not its name. A zero sum only counts as zero if the adapter was actually found (Hit);
+# otherwise the instrument is blind and the verdict is INCONCLUSIVE, never PASS.
+. (Join-Path $PSScriptRoot 'PktmonCount.ps1')
 
 function Wait-ForFile([string]$Path, [int]$Seconds, $Proc) {
     $deadline = (Get-Date).AddSeconds($Seconds)
@@ -237,13 +211,14 @@ function Invoke-Mode([string]$Mode) {
         }
         # Snapshot while the adapters still exist; teardown removes them.
         pktmon counters | Set-Content -Encoding utf8 (Join-Path $run 'counters.txt')
-        pktmon list | Set-Content -Encoding utf8 (Join-Path $run 'components.txt')
+        $listText = (pktmon list | Out-String)
+        Set-Content -Encoding utf8 (Join-Path $run 'components.txt') $listText
         $json = (pktmon counters --json --zero | Out-String)
         Set-Content -Encoding utf8 (Join-Path $run 'counters.json') $json
         try {
             $data = $json | ConvertFrom-Json
-            $result.Physical = Measure-Adapter $data $physNeedles
-            $result.Tunnel = Measure-Adapter $data $tunnelNeedles
+            $result.Physical = Measure-Adapter $data $physNeedles (Get-PktmonComponentIds $listText $physNeedles)
+            $result.Tunnel = Measure-Adapter $data $tunnelNeedles (Get-PktmonComponentIds $listText $tunnelNeedles)
         } catch {
             $result.Error = "pktmon counters JSON unreadable: $_"
         }
@@ -252,6 +227,14 @@ function Invoke-Mode([string]$Mode) {
     } finally {
         Stop-Capture
         if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
+        # The generated core configuration (key material, readable only by SYSTEM and Administrators
+        # by design, T049) and the run state are not evidence. Removing them keeps the keys off disk
+        # and keeps the results folder readable by the person who started the run.
+        foreach ($d in 'config', 'state') {
+            try { Remove-Item (Join-Path $run $d) -Recurse -Force -ErrorAction Stop }
+            catch [System.Management.Automation.ItemNotFoundException] { }
+            catch { Say "warning: could not remove $d from the run folder: $($_.Exception.Message)" }
+        }
         try { pktmon etl2pcap (Join-Path $run 'capture.etl') --out (Join-Path $run 'capture.pcapng') 2>&1 | Out-Null } catch {}
     }
     if (Test-Path $report) { $result.Runner = Get-Content $report -Raw | ConvertFrom-Json }

@@ -194,7 +194,7 @@ pub fn reality_outbound(
 }
 
 /// Require the canonical hyphenated form, so the value the core receives is unambiguous.
-fn validate_uuid(uuid: &Secret) -> Result<(), ConfigError> {
+pub(crate) fn validate_uuid(uuid: &Secret) -> Result<(), ConfigError> {
     let text = uuid.expose();
     if text.len() == UUID_TEXT_LEN && uuid::Uuid::try_parse(text).is_ok() {
         Ok(())
@@ -203,7 +203,7 @@ fn validate_uuid(uuid: &Secret) -> Result<(), ConfigError> {
     }
 }
 
-fn validate_short_id(short_id: &Secret) -> Result<(), ConfigError> {
+pub(crate) fn validate_short_id(short_id: &Secret) -> Result<(), ConfigError> {
     let text = short_id.expose();
     let valid = !text.is_empty()
         && text.len() % 2 == 0

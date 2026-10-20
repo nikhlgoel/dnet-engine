@@ -11,10 +11,10 @@
 > (section 2). The earlier 2026-09-11 run failed this way; see
 > [`docs/bugs/bug-007-spike-r4-uapi-pipe-owner.md`](../../docs/bugs/bug-007-spike-r4-uapi-pipe-owner.md).
 
-> **Added 2026-10-20 — a WSL2 lab (section 6) can stand in for the cloud endpoint.** Its first
-> elevated run returned **FAIL** and is not evidence for or against the design: the gate's own
-> counting missed the traffic, and the endpoint never answered (details in section 6). Whether a
-> later PASS may close T055 is the owner's decision.
+> **Added 2026-10-20 — a WSL2 lab (section 6) can stand in for the cloud endpoint.** Its third
+> elevated run returned **PASS** with a looping control (details and limits in section 6). Whether
+> that PASS may close T055, or only reduces the risk until T098a runs against a provisioned
+> endpoint, is the owner's decision.
 
 **What it proves.** With both cores running, Profile A (AmneziaWG) carries real traffic,
 and the tunnel's own encrypted packets to the endpoint leave **only** through the physical
@@ -220,8 +220,10 @@ psexec -accepteula -s -i powershell.exe -NoProfile -ExecutionPolicy Bypass `
 
 For when no cloud VM exists. A WSL2 VM sits behind its own Hyper-V switch, so the script makes the VM
 the host's temporary **default gateway** and gives the endpoint an address (`203.0.113.10`, TEST-NET-3)
-that lives on the VM's loopback, not on the switch's subnet. The host then reaches the endpoint through
-its default route, which is the only way a loop can form.
+that the VM answers for by DNAT to its own address, not one on the switch's subnet. The host then reaches
+the endpoint through its default route, which is the only way a loop can form. (DNAT, because conntrack
+rewrites every reply's source back to the endpoint address by itself; an address on the loopback with an
+SNAT rule, the first version, left replies coming from the VM's own address.)
 
 **How this differs from the unsupported LAN-VM attempt (top of this file).** There the endpoint was a
 bridged VM on a Wi-Fi adapter, where forwarded traffic was dropped and the counting could be bypassed
@@ -248,10 +250,11 @@ adapter it is `INCONCLUSIVE`. Neither is a pass, and neither says anything about
 .\testing\spike-r4\Invoke-WslLab.ps1 -Phase Check
 ```
 
-It runs every preflight, starts the endpoint in the VM for 90 s, checks from inside the VM that the
-endpoint address is the VM's own, the server runs and a UDP listener holds 51820, and exports the
-client parameters to `wsl-lab-awg-client.json` (test keys; gitignored). Exit 0 means the endpoint half
-works; exit 2 lists every problem it found.
+It runs every preflight, starts the endpoint in the VM for 90 s and has the VM check itself before it
+says READY: a NAT self-test (a connected UDP socket must get a reply whose source was rewritten back
+to the endpoint address), the DNAT rule, the server process, a UDP listener on 51820 and the packet
+recorder. It exports the client parameters to `wsl-lab-awg-client.json` (test keys; gitignored). Exit 0
+means the endpoint half works; exit 2 lists every problem it found.
 
 **2. The run (elevated PowerShell).**
 
@@ -294,6 +297,52 @@ default route it adds is not persistent.
   back (host vNIC Rx 0) and the handshake never completed. The server's log held only its startup
   banner. Cause not yet established.
 
-**To do before the next run:** match pktmon components by Id as well as by name, and have the lab
-collect the VM's own view (server log at debug level, packet counters on the UDP port and the reply
-rule) into the results folder, so a failed handshake can be told apart from a dropped reply.
+**Third elevated run, 2026-10-20 17:23: PASS (exit 0), Profile A.**
+
+| | PASS run (host route in force) | CONTROL run (host route withheld) |
+|---|---|---|
+| 20 MB transfer through the tunnel | ok, 144.8 Mbit/s | ok, 216.9 Mbit/s |
+| endpoint packets on the physical adapter | 185,297 | 193,623 |
+| endpoint packets on a tunnel adapter | **0** | **21,895** |
+
+The server's own counters agree (two handshakes, 42 MB sent back, which is the two downloads), and
+restoration left no residue. **What it shows:** with the production loop guard, none of 185,297
+endpoint packets re-entered the TUN, and real traffic flowed; without it, 21,895 did re-enter, so the
+instrument can tell the two cases apart (the gate's own validity condition).
+
+**What it does not show — keep these in view before calling T055 closed:**
+- **The control did not collapse.** With the host route withheld the transfer still succeeded (faster,
+  in fact), so the "successful handshake, zero throughput" failure that §R4 predicts was not
+  reproduced; the re-entering packets were evidently handled and sent on. I infer, but have not tested,
+  that the primary core's `auto_detect_interface` rescued them. The result supports "the host route
+  prevents re-entry", not "re-entry is fatal".
+- **Path change was SKIPPED.** T055 also requires the host-route rewrite across a simulated interface
+  change. This lab has one physical path (the VM); it cannot exercise that.
+- **The physical path is a virtual NIC** (Hyper-V), on one machine, in one run. It says nothing about a
+  real NIC's offloads, MTU or NAT, and one run is not a distribution.
+- **Profile A only.** The Hysteria 2 variant (`-Transport Hy2`) has not been run through the lab.
+- It is not the provisioned endpoint of T098a.
+
+**Second elevated run, 2026-10-20 17:00: FAIL, with the tunnel working.** After the fixes below:
+- The PASS run counted **190 endpoint packets on the physical adapter and 0 on the tunnel adapters**;
+  the control looped (167 on the tunnel adapter). The counting is sound.
+- The handshake completed (`Received handshake response` on the client; initiation, response and
+  keepalives on the server). The DNAT worked: replies left as `203.0.113.10`.
+- The transfer still failed: the core dialled the in-tunnel origin `203.0.113.80:8080` and was refused.
+  The lab endpoint never started the HTTP origin (the Docker image's entrypoint does; this lab replaces
+  that entrypoint). It now starts it and fetches it from inside the VM before reporting READY.
+  Nothing about the routing design is implicated.
+
+**Changes made after the first run** (all exercised by the third run):
+- The gate matches pktmon components by Id as well as by name. `Test-PktmonCount.ps1` replays the
+  first run's real counters (`fixtures/`, hardware addresses removed): 35 physical and 0 tunnel packets
+  for the PASS run, 35 tunnel packets for the control, and 0 for name-only matching, which pins the defect.
+- The VM answers for the endpoint address by DNAT (see above), with a NAT self-test before READY.
+- The VM records the packets on the endpoint port in both directions and runs the server at debug
+  level. After the run, `Launch` saves that, with the NAT counters and the server's view of the peer,
+  to `wsl-lab-vm-diag.txt` and into the results folder as `vm-diag.txt`, so a failed handshake can be
+  told apart from a dropped reply.
+- The gate deletes each run's generated core `config` and `state` folders (key material; readable only
+  by SYSTEM and Administrators by design), and the lab hands the results folder back to the person who
+  started it. `verify-vendor` skips that folder.
+- The HTTP origin is started and self-checked (above).

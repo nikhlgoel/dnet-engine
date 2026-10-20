@@ -19,7 +19,7 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
-windows = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization"] }
+windows = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
