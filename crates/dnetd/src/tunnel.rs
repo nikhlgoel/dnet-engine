@@ -24,7 +24,7 @@ use std::net::IpAddr;
 
 use dnet_core::profile::CoreBinding;
 use dnet_core::session::FailureCause;
-use dnet_netstate::host_route::{bring_up, tear_down, HostRoute, TunnelBringup};
+use dnet_netstate::host_route::{bring_up, move_to_gateway, tear_down, HostRoute, TunnelBringup};
 use dnet_netstate::NetstateError;
 use dnet_supervisor::error::SupervisorError;
 use dnet_supervisor::reap::start_cores;
@@ -169,6 +169,25 @@ impl<H: TunnelHost> Tunnels<H> {
         Ok(())
     }
 
+    /// Point the running tunnel at another gateway: the endpoint host route first, then the rebind
+    /// (AW-03, T083). Only a tunnel with a host route of its own has anything to move; one carried by
+    /// the primary core follows the system's routing and is left alone, which is not an error.
+    ///
+    /// The route the table holds is kept even when the rebind fails after the rewrite succeeded, so a
+    /// later stop removes the route that is really there.
+    pub async fn carry_over(&self, gateway: IpAddr) -> Result<(), NetstateError> {
+        let mut active = self.active.lock().await;
+        let Some(running) = active.as_mut() else {
+            return Err(NetstateError::Operation("no tunnel is up".to_owned()));
+        };
+        let Some((bringup, route)) = &mut running.peer else {
+            return Ok(());
+        };
+        let (installed, outcome) = move_to_gateway(&*bringup, route, gateway).await;
+        *route = installed;
+        outcome
+    }
+
     /// Take the tunnel down. Does nothing if none is up.
     pub async fn stop(&self) {
         if let Some(running) = self.active.lock().await.take() {
@@ -223,6 +242,8 @@ mod tests {
         install_route: bool,
         start_peer: bool,
         kill_primary: bool,
+        rewrite_route: bool,
+        rebind: bool,
     }
 
     struct FakeRuntime {
@@ -274,6 +295,8 @@ mod tests {
     struct FakeBringup {
         log: Log,
         faults: Faults,
+        /// The gateway of every host route removed.
+        removed: Arc<StdMutex<Vec<IpAddr>>>,
     }
 
     impl TunnelBringup for FakeBringup {
@@ -287,8 +310,9 @@ mod tests {
             }
             Ok(())
         }
-        async fn remove_host_route(&self, _: &HostRoute) -> Result<(), NetstateError> {
+        async fn remove_host_route(&self, route: &HostRoute) -> Result<(), NetstateError> {
             note(&self.log, "route-");
+            self.removed.lock().unwrap().push(route.gateway());
             Ok(())
         }
         async fn rewrite_host_route(
@@ -297,6 +321,9 @@ mod tests {
             _: &HostRoute,
         ) -> Result<(), NetstateError> {
             note(&self.log, "route~");
+            if self.faults.rewrite_route {
+                return Err(NetstateError::Operation("denied".into()));
+            }
             Ok(())
         }
         async fn start_tunnel(&self) -> Result<(), NetstateError> {
@@ -312,11 +339,15 @@ mod tests {
         }
         async fn rebind_tunnel(&self, _: IpAddr) -> Result<(), NetstateError> {
             note(&self.log, "rebind");
+            if self.faults.rebind {
+                return Err(NetstateError::Operation("pipe closed".into()));
+            }
             Ok(())
         }
     }
 
     struct FakeHost {
+        removed: Arc<StdMutex<Vec<IpAddr>>>,
         discarded: Arc<StdMutex<u32>>,
         log: Log,
         faults: Faults,
@@ -327,6 +358,7 @@ mod tests {
     impl FakeHost {
         fn new(log: &Log) -> Self {
             Self {
+                removed: Arc::default(),
                 discarded: Arc::default(),
                 log: log.clone(),
                 faults: Faults::default(),
@@ -366,6 +398,7 @@ mod tests {
                 bringup: plan.awg.as_ref().map(|_| FakeBringup {
                     log: self.log.clone(),
                     faults: self.faults.clone(),
+                    removed: Arc::clone(&self.removed),
                 }),
             })
         }
@@ -782,6 +815,127 @@ mod tests {
             "the old tunnel is gone before the new one starts: {log:?}"
         );
         assert!(tunnels.is_up().await);
+    }
+
+    // ------------------------------------------------------------------ moving a running tunnel (T083)
+
+    #[tokio::test]
+    async fn carrying_over_rewrites_the_route_and_only_then_rebinds() {
+        let log = log();
+        let tunnels = Tunnels::new(FakeHost::new(&log));
+        tunnels
+            .start(&plan(CoreBinding::AmneziaWgCore))
+            .await
+            .unwrap();
+        log.lock().unwrap().clear();
+
+        tunnels
+            .carry_over("10.0.0.77".parse().unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(seen(&log), ["route~", "rebind"]);
+        assert!(tunnels.is_up().await);
+    }
+
+    #[tokio::test]
+    async fn stopping_after_a_carry_over_removes_the_route_that_is_now_installed() {
+        let log = log();
+        let host = FakeHost::new(&log);
+        let removed = Arc::clone(&host.removed);
+        let tunnels = Tunnels::new(host);
+        tunnels
+            .start(&plan(CoreBinding::AmneziaWgCore))
+            .await
+            .unwrap();
+        tunnels
+            .carry_over("10.0.0.77".parse().unwrap())
+            .await
+            .unwrap();
+
+        tunnels.stop().await;
+
+        assert_eq!(
+            *removed.lock().unwrap(),
+            ["10.0.0.77".parse::<IpAddr>().unwrap()],
+            "the route to the old router is gone; removing it would leave the new one behind"
+        );
+    }
+
+    /// The case `move_to_gateway` exists for: the table has the new route although the rebind failed.
+    #[tokio::test]
+    async fn a_rebind_that_fails_still_leaves_the_stop_removing_the_new_route() {
+        let log = log();
+        let host = FakeHost::new(&log).with(|f| f.rebind = true);
+        let removed = Arc::clone(&host.removed);
+        let tunnels = Tunnels::new(host);
+        tunnels
+            .start(&plan(CoreBinding::AmneziaWgCore))
+            .await
+            .unwrap();
+
+        let result = tunnels.carry_over("10.0.0.77".parse().unwrap()).await;
+        tunnels.stop().await;
+
+        assert!(result.is_err());
+        assert_eq!(
+            *removed.lock().unwrap(),
+            ["10.0.0.77".parse::<IpAddr>().unwrap()]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rewrite_that_fails_is_not_followed_by_a_rebind_and_keeps_the_old_route() {
+        let log = log();
+        let host = FakeHost::new(&log).with(|f| f.rewrite_route = true);
+        let removed = Arc::clone(&host.removed);
+        let tunnels = Tunnels::new(host);
+        tunnels
+            .start(&plan(CoreBinding::AmneziaWgCore))
+            .await
+            .unwrap();
+        log.lock().unwrap().clear();
+
+        let result = tunnels.carry_over("10.0.0.77".parse().unwrap()).await;
+
+        assert!(result.is_err());
+        assert_eq!(seen(&log), ["route~"], "no rebind against a stale route");
+        tunnels.stop().await;
+        assert_eq!(
+            *removed.lock().unwrap(),
+            ["192.168.1.1".parse::<IpAddr>().unwrap()],
+            "the original route is still the one in the table"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tunnel_carried_by_the_primary_core_has_nothing_to_carry_over() {
+        let log = log();
+        let tunnels = Tunnels::new(FakeHost::new(&log));
+        tunnels
+            .start(&plan(CoreBinding::PrimaryCore))
+            .await
+            .unwrap();
+        log.lock().unwrap().clear();
+
+        tunnels
+            .carry_over("10.0.0.77".parse().unwrap())
+            .await
+            .unwrap();
+
+        assert!(
+            seen(&log).is_empty(),
+            "it follows the routing of the system"
+        );
+    }
+
+    #[tokio::test]
+    async fn carrying_over_with_nothing_up_is_an_error() {
+        let tunnels = Tunnels::new(FakeHost::new(&log()));
+        assert!(tunnels
+            .carry_over("10.0.0.77".parse().unwrap())
+            .await
+            .is_err());
     }
 
     // ------------------------------------------------------------------ the credentials file

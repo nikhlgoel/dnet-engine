@@ -35,6 +35,10 @@ use crate::ids::InterfaceId;
 use crate::path::{NetworkPath, PathRole};
 use crate::quality::{QualityBand, QualityThresholds};
 
+/// How much less loss (an absolute fraction) a poor path must show over a poor carrying path to be
+/// worth a move: below this the difference is noise, and a move costs more than it gains.
+const SAME_BAND_MARGIN: f64 = 0.15;
+
 /// Tunable limits. The defaults are for campus and public Wi-Fi.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FailoverConfig {
@@ -119,11 +123,13 @@ impl FailoverState {
         Self::default()
     }
 
-    /// Start from a path that is already carrying, such as after the service restarts.
-    pub fn carrying_on(path: InterfaceId, now: Instant) -> Self {
+    /// Start from a path that is already carrying, such as after the service restarts or when a
+    /// tunnel was just started on it. Adopting a path is not a move, so it starts no dwell: a path
+    /// found to be dead straight away should not have to be kept for two minutes. (`_now` is kept
+    /// so callers state when they adopted it; nothing depends on it.)
+    pub fn carrying_on(path: InterfaceId, _now: Instant) -> Self {
         Self {
             carrying: Some(path),
-            moved_at: Some(now),
             ..Self::default()
         }
     }
@@ -145,12 +151,14 @@ impl FailoverState {
         let band_of = |p: &NetworkPath| p.quality.band(&cfg.thresholds);
         let usable = |p: &NetworkPath| p.role != PathRole::Unusable;
 
-        // How long each path has been continuously `Good`. A path that is down, or not `Good`,
-        // starts over when it comes back: stability is unbroken time, not total time.
+        // How long each path has been continuously `Good` *and measured*. A path that is down, or
+        // not `Good`, starts over when it comes back: stability is unbroken time, not total time.
+        // A path nobody has measured reads as `Good` but has proven nothing, so its clock does not
+        // run until the first sample.
         next.good_since
             .retain(|id, _| paths.iter().any(|p| p.interface_id == *id && usable(p)));
         for p in paths {
-            if usable(p) && band_of(p) == QualityBand::Good {
+            if usable(p) && band_of(p) == QualityBand::Good && p.quality.is_measured() {
                 next.good_since.entry(p.interface_id).or_insert(now);
             } else {
                 next.good_since.remove(&p.interface_id);
@@ -221,10 +229,26 @@ impl FailoverState {
         let urgent = band == QualityBand::Unusable && held(next.unusable_since, cfg.unusable_for);
         let sustained = urgent || held(next.below_good_since, cfg.degrade_for);
         if band < QualityBand::Good && sustained {
-            // A strictly better path. Normally a proven one; when the carrying path is
-            // `Unusable`, waiting for proof costs more than a poor-but-working path does.
+            // A better path, and a proven one. Better: a higher band, or, among poor paths (as on
+            // a weak connection, where nothing is good), clearly less lossy. Proven: a good path has
+            // been good and measured for `stable_for`; a poor one has at least been measured. When
+            // the carrying path is `Unusable`, waiting for proof costs more than a gamble does.
+            let better = |p: &NetworkPath| {
+                band_of(p) > band
+                    || (band == QualityBand::Poor
+                        && band_of(p) == QualityBand::Poor
+                        && p.quality.is_measured()
+                        && p.quality.loss_ewma + SAME_BAND_MARGIN <= current.quality.loss_ewma)
+            };
+            let proven = |p: &NetworkPath| {
+                if band_of(p) == QualityBand::Good {
+                    stable(p)
+                } else {
+                    p.quality.is_measured()
+                }
+            };
             let ready = |p: &NetworkPath| {
-                p.interface_id != current.interface_id && band_of(p) > band && (urgent || stable(p))
+                p.interface_id != current.interface_id && better(p) && (urgent || proven(p))
             };
             if let Some(to) = best(paths, ready, usable, band_of) {
                 let to = to.interface_id;
@@ -269,14 +293,16 @@ impl FailoverState {
         self.unusable_since = None;
     }
 
-    /// Record a move to `to`. Moves that replaced something that was carrying count against the
-    /// budget; acquiring a first path does not.
+    /// Record a move to `to`. A move that replaced something carrying traffic counts against the
+    /// budget and starts the dwell; acquiring a first path does neither, because it disturbs
+    /// nothing: the dwell and the budget exist to stop an established tunnel from flapping, and a
+    /// first choice that turns out to be dead should be left as soon as the evidence is in.
     fn moved_to(&mut self, to: InterfaceId, now: Instant, counts: bool) {
         self.carrying = Some(to);
-        self.moved_at = Some(now);
         self.below_good_since = None;
         self.unusable_since = None;
         if counts {
+            self.moved_at = Some(now);
             self.moves.push_back(now);
         }
     }
@@ -621,6 +647,112 @@ mod tests {
         assert_eq!(step(&mut s, &paths, c.at(260)), Decision::Stay);
     }
 
+    // ------------------------------------------------------------------ evidence
+
+    /// A path the system lists and nothing has measured.
+    fn fresh(n: u64, preference: i32) -> NetworkPath {
+        NetworkPath {
+            quality: PathQuality::unmeasured(),
+            ..good(n, preference)
+        }
+    }
+
+    /// Nothing says an unmeasured path is bad, so it reads as good; but that is not evidence, and
+    /// a voluntary move needs evidence. Staying on a poor path is the lesser risk than moving to
+    /// one nobody has ever seen carry anything.
+    #[test]
+    fn a_path_nobody_has_measured_is_never_moved_to_voluntarily() {
+        let c = Clock::new();
+        let mut s = FailoverState::carrying_on(id(1), c.at(0));
+        let paths = [poor(1, 0), fresh(2, 0)];
+        for t in [200, 210, 300, 600, 1000, 5000] {
+            assert_eq!(step(&mut s, &paths, c.at(t)), Decision::Stay, "t={t}");
+        }
+    }
+
+    #[test]
+    fn a_path_nobody_has_measured_is_still_taken_when_the_carrying_link_is_lost() {
+        let c = Clock::new();
+        let mut s = FailoverState::carrying_on(id(1), c.at(0));
+        assert_eq!(
+            step(&mut s, &[down(1, 0), fresh(2, 0)], c.at(1)),
+            moved(2, MoveReason::Lost, Some(1)),
+            "with the link gone there is nothing to stay on"
+        );
+    }
+
+    #[test]
+    fn a_path_nobody_has_measured_is_taken_when_the_carrying_one_is_unusable() {
+        let c = Clock::new();
+        let mut s = FailoverState::carrying_on(id(1), c.at(0));
+        let paths = [unusable(1, 0), fresh(2, 0)];
+        step(&mut s, &paths, c.at(200));
+        assert_eq!(
+            step(&mut s, &paths, c.at(204)),
+            moved(2, MoveReason::Degraded, Some(1)),
+            "a dead path is worth a gamble; a merely poor one is not"
+        );
+    }
+
+    /// Thirty seconds of "good" is thirty seconds of *measured* good: a path seen for an hour
+    /// without a single sample has proven nothing, and its clock starts at the first sample.
+    #[test]
+    fn the_stability_proof_counts_from_the_first_measurement_not_from_when_the_path_appeared() {
+        let c = Clock::new();
+        let mut s = FailoverState::carrying_on(id(1), c.at(0));
+        step(&mut s, &[poor(1, 0), fresh(2, 0)], c.at(200));
+        step(&mut s, &[poor(1, 0), fresh(2, 0)], c.at(299));
+        // First measurement of path 2 at t=300.
+        let measured = [poor(1, 0), good(2, 0)];
+        assert_eq!(step(&mut s, &measured, c.at(300)), Decision::Stay);
+        assert_eq!(step(&mut s, &measured, c.at(329)), Decision::Stay);
+        assert_eq!(
+            step(&mut s, &measured, c.at(330)),
+            moved(2, MoveReason::Degraded, Some(1))
+        );
+    }
+
+    // ------------------------------------------------------------------ weak conditions
+
+    /// When every path is poor, as on a weak connection, "no better band" must not mean "stay on
+    /// the worst of them".
+    #[test]
+    fn among_poor_paths_a_clearly_better_one_is_moved_to() {
+        let c = Clock::new();
+        let mut s = FailoverState::carrying_on(id(1), c.at(0));
+        let paths = [path(1, 0, 0.45, 40), path(2, 0, 0.20, 40)];
+        step(&mut s, &paths, c.at(200));
+        assert_eq!(
+            step(&mut s, &paths, c.at(209)),
+            Decision::Stay,
+            "not sustained yet"
+        );
+        assert_eq!(
+            step(&mut s, &paths, c.at(210)),
+            moved(2, MoveReason::Degraded, Some(1))
+        );
+    }
+
+    #[test]
+    fn among_poor_paths_one_only_slightly_better_is_not_worth_a_move() {
+        let c = Clock::new();
+        let mut s = FailoverState::carrying_on(id(1), c.at(0));
+        let paths = [path(1, 0, 0.45, 40), path(2, 0, 0.40, 40)];
+        for t in [200, 300, 600, 3000] {
+            assert_eq!(step(&mut s, &paths, c.at(t)), Decision::Stay, "t={t}");
+        }
+    }
+
+    #[test]
+    fn among_poor_paths_an_unmeasured_one_is_not_assumed_better() {
+        let c = Clock::new();
+        let mut s = FailoverState::carrying_on(id(1), c.at(0));
+        let paths = [path(1, 0, 0.45, 40), fresh(2, 0)];
+        for t in [200, 300, 3000] {
+            assert_eq!(step(&mut s, &paths, c.at(t)), Decision::Stay, "t={t}");
+        }
+    }
+
     // ------------------------------------------------------------------ going back (FR-017)
 
     #[test]
@@ -681,10 +813,14 @@ mod tests {
     #[test]
     fn after_a_move_nothing_voluntary_happens_until_the_dwell_has_passed() {
         let c = Clock::new();
-        // On path 2 since t=1000; it goes poor straight away and 3 has been good all along.
-        let mut s = FailoverState::carrying_on(id(2), c.at(1000));
+        // Path 1 is lost at t=1000 and the machine moves to 2, which goes poor straight away while
+        // 3 has been good all along. The move starts the dwell.
+        let mut s = FailoverState::carrying_on(id(1), c.at(0));
         let paths = [poor(2, 0), good(3, 0)];
-        step(&mut s, &[good(2, 0), good(3, 0)], c.at(1000));
+        assert_eq!(
+            step(&mut s, &[down(1, 0), good(2, 0), good(3, 0)], c.at(1000)),
+            moved(2, MoveReason::Lost, Some(1))
+        );
         step(&mut s, &paths, c.at(1001));
         assert_eq!(
             step(&mut s, &paths, c.at(1100)),
@@ -695,6 +831,36 @@ mod tests {
         assert_eq!(
             step(&mut s, &paths, c.at(1120)),
             moved(3, MoveReason::Degraded, Some(2))
+        );
+    }
+
+    /// Acquiring a first path disturbs nothing, so it owes no dwell and uses no budget: a first
+    /// choice that proves dead is left as soon as the evidence is in.
+    #[test]
+    fn a_first_choice_that_proves_dead_is_left_without_waiting_out_a_dwell() {
+        let c = Clock::new();
+        let mut s = FailoverState::new();
+        assert_eq!(
+            step(&mut s, &[good(1, 0), good(2, 0)], c.at(0)),
+            moved(1, MoveReason::Acquired, None)
+        );
+        let paths = [unusable(1, 0), poor(2, 0)];
+        step(&mut s, &paths, c.at(1));
+        assert_eq!(
+            step(&mut s, &paths, c.at(5)),
+            moved(2, MoveReason::Degraded, Some(1))
+        );
+    }
+
+    #[test]
+    fn a_path_adopted_while_running_owes_no_dwell_either() {
+        let c = Clock::new();
+        let mut s = FailoverState::carrying_on(id(1), c.at(0));
+        let paths = [unusable(1, 0), poor(2, 0)];
+        step(&mut s, &paths, c.at(1));
+        assert_eq!(
+            step(&mut s, &paths, c.at(5)),
+            moved(2, MoveReason::Degraded, Some(1))
         );
     }
 

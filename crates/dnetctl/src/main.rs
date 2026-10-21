@@ -8,6 +8,8 @@
 //! request against who is asking, and prints what the service says. See `cli::USAGE`.
 
 mod cli;
+#[cfg(test)]
+mod fuzz;
 mod render;
 mod run;
 

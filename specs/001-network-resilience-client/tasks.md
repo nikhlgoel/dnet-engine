@@ -630,7 +630,29 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
 
 **Independent test**: HV-06, HV-07, HV-08.
 
-- [ ] T080 [US3] Implement OS IP-interface change notification subscription (not polling) in `crates/dnet-netstate/src/notify.rs` ([research.md](./research.md) §R9)
+- [x] T080 [US3] Implement OS IP-interface change notification subscription (not polling) in `crates/dnet-netstate/src/notify.rs` ([research.md](./research.md) §R9)
+  > **Built 2026-10-21 (not committed). 22 new tests (8 debounce, 14 path projection) plus 2 elevated ones not yet run.**
+  > - `notify::ChangeSource` (Windows): subscribes to interface, route and address changes for both IP families; each callback does one
+  >   non-blocking `try_send` and nothing else. `notify::settled` (portable, paused-time tests) turns a burst into one report: quiet for 750 ms,
+  >   or cut off at 5 s for a network that never stops changing. The signal carries no detail; what changed is found by reading the machine.
+  >   The callbacks' context is deliberately leaked (one sender per service run) rather than freed after `CancelMibChangeNotify2`: if Windows
+  >   were still inside a callback, freeing it would be a use-after-free, and I could not confirm from the documentation that it waits.
+  > - `paths::project` (portable) turns the system's interface and IPv4 default-route tables into `dnet-core`'s `NetworkPath`: physical adapters
+  >   only (Hyper-V/WSL/VMware/VPN excluded), this product's own `dnet-*` adapters excluded by name as well (a tunnel counted as a way out is
+  >   the R4 loop), a down adapter or one with no default route listed as `Unusable` (a lost link, not a vanished one), an on-link route as a
+  >   usable path with no gateway, a default preference by kind (wired 20, Wi-Fi 10, cellular 0) so failover can return to a preferred path.
+  >   `paths::current()` reads it on Windows.
+  > - **Live, unelevated:** `cargo run -p dnet-netstate --example watch_paths` on this machine listed the Wi-Fi as a usable path through the same
+  >   gateway as the routing table, two unplugged wired adapters as unusable, and none of the virtual adapters.
+  > - **Mutation-checked:** letting own adapters count fails the loop-protection test; counting a down adapter as usable fails its test; the
+  >   debounce reporting early fails two.
+  > - **Run elevated 2026-10-21, both pass:** a real interface change (the loopback metric, restored after) reaches the channel, and with the source
+  >   dropped the same change signals nothing (the negative control: the cancel works). The live `watch_paths` run also showed the first reading of the
+  >   Wi-Fi adapter as `Unusable` while it still had its gateway (not yet up, associating), then `Standby` after the change; the live test had asserted
+  >   that a gateway means usable, which is wrong in exactly that moment, and was corrected to: a usable path is an adapter that is up. Three further
+  >   events produced identical lists, which is why the monitor (T133) reports whether a refresh changed anything.
+  > - T083's ordering rule (rewrite the host route, then rebind) already exists and is tested in `host_route::on_carrying_path_change` (T052); what
+  >   remains for T083 is calling it from a failover decision, which needs a monitor in `dnetd` and a way to measure each path's quality.
 - [x] T081 [US3] Implement path quality EWMA smoothing so raw samples never drive transitions directly, in `crates/dnet-core/src/quality.rs` (FR-018)
   > **Built 2026-10-21 (not committed). 15 tests.** `PathQuality::observe(sample)` folds one probe (answered with an RTT, or lost) into
   > the smoothed loss, RTT and jitter; RTT and jitter follow RFC 6298 exactly as `health.rs` does for endpoints, loss uses the same
@@ -651,7 +673,8 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
   > - Stated limit: a path that is up but dead upstream is a *voluntary* case, so after 4 moves in 10 minutes the machine stays on it
   >   until the budget frees. Not yet done: Tier 2 should probably be more reluctant to move voluntarily than Tier 1, since a move
   >   breaks its connections (FR-016a); decide with the HV-07/HV-08 results in T085, not before.
-- [ ] T083 [US3] Implement host-route rewrite **before** tunnel rebind on a carrying-path change, asserted by call ordering rather than timing, in `crates/dnet-netstate/src/rebind.rs` (AW-03, AWG-04)
+- [x] T083 [US3] Implement host-route rewrite **before** tunnel rebind on a carrying-path change, asserted by call ordering rather than timing, in `crates/dnet-netstate/src/rebind.rs` (AW-03, AWG-04)
+  > **Done 2026-10-21 (not committed), in `host_route.rs` and `dnetd/src/tunnel.rs` rather than a new `rebind.rs`:** the ordering was already `on_carrying_path_change` (T052). New: `host_route::move_to_gateway`, which does the same two steps in the same order and also returns the route that is *installed afterwards*, because the steps can fail separately: if the rewrite succeeds and the rebind fails the table already holds the new route, and a caller that kept the old one would later remove a route that is not there and leave the new one behind. `Tunnels::carry_over(gateway)` uses it and remembers the installed route. Tests assert call order (`route~` then `rebind`), that a failed rewrite is never followed by a rebind and keeps the old route, that a failed rebind still leaves the stop removing the new route, and that a primary-core tunnel is left alone.
 - [ ] T084 [US3] Implement honest degradation reporting when only one path is available and no move is possible, in `crates/dnet-core/src/degraded.rs` (FR-019, US3-5)
 - [ ] T085 **[GATE] SPIKE-R9 / Plan Phase 6 exit**: HV-07 — an open transfer survives an interface change on **both** Tier 1 profiles at the pinned core versions. HV-08 — the Tier 2 profile breaks **and the UI said so beforehand**. **Record each kind's HV-07 result, with the core versions, in `dnet_core::tier::recorded_survival`: only `Survived` makes a profile `Tier1`, and a failure leaves it `Tier2` in configuration and UI. The label follows the measurement, not the intention** ([research.md](./research.md) §R9). A later core pin bump resets the affected kinds to `NotMeasured` until HV-07 is re-run
 
@@ -927,6 +950,106 @@ polish phase only because the original list ended there; by dependency they belo
   > - Security review: a new read-only request with a constant reply; no state, no privilege, no new input beyond the request name. The one new parse of
   >   untrusted data is the client's reading of the reply, which is strict and bounded.
   > - Not yet run live: the lab's `dnetctl` cycle will exercise it against the real service the next time `-Gate Connect` runs.
+- [x] T133 [US3] Hold the machine's paths, their measured quality and the failover state together, in `crates/dnet-core/src/path_monitor.rs`
+  > **Built 2026-10-21 (not committed). 15 tests, mutation-checked.** Pure. `paths_changed` replaces the system's list but keeps the quality already measured for
+  > every interface still there; `observe` folds in a probe result; `evaluate` returns the failover `Decision` and leaves exactly one path `Carrying`
+  > (`validate_paths` holds after every step, including 1,200 s of quality swapping every 7 s). A refresh reports whether anything meaningful changed, ignoring
+  > quality and order, because the system raises several events for one change. A new gateway on the *carrying* adapter is reported separately: not a failover
+  > move, but the tunnel's host route still points at the old router, which is exactly what T083's rewrite-then-rebind exists for.
+  > - **Found and fixed in T082 while integrating:** the 120 s dwell started when a path was merely acquired or adopted, so a first choice that was dead
+  >   upstream would have been kept for two minutes. The dwell and the move budget now start only on a real move (2 new failover tests, 1 monitor test).
+  > - Next: the probes that feed `observe` (per-interface, through the user's own endpoint), the daemon task that drives this from `ChangeSource`, and the call to
+  >   `on_carrying_path_change` on a move or a gateway change (T083).
+- [x] T134 [US3] Measure a path's quality by timing a connection to the user's own endpoint through that adapter, in `crates/dnet-netstate/src/probe.rs`
+  > **Built 2026-10-21 (not committed). 9 probe tests and 6 new monitor tests; mutation-checked.** Endpoint-based, as decided with the owner: no public or
+  > project host is ever contacted. `probe::probe_tcp(adapter, endpoint_addr, timeout)` (Windows) pins a TCP socket to the adapter with `IP_UNICAST_IF` so it leaves
+  > through *that* adapter whatever the routing table prefers, then times the connect. `probe::sample_of` (portable): connected or refused (a reset proves host and path)
+  > is an answer with its round-trip time; silence, or no route through the adapter, is a loss. A probe that could not be set up (the adapter vanished, the option was
+  > refused) is an `Err`, never recorded as a loss, because it measured nothing.
+  > - The monitor now says what to probe and when (`PathMonitor::due_probes`): the carrying path every 10 s, any other usable path every 30 s (a probe is a real
+  >   connection, and a standby cellular path costs data), a path the system calls unusable never, a path that returns at once, and a refresh does not reset the clock.
+  > - **Proven:** the pinned connect works on loopback, a closed port counts as an answer, and a pin to an adapter with no route fails at once (under 1 s) rather than
+  >   waiting out the timeout, which is what distinguishes a working pin from a decorative one.
+  > - **Not proven, and why:** no probe has run through a real adapter to a real endpoint (none is reachable from this machine outside a lab run), and the *broken-pin*
+  >   variant of the pin test was not run, because letting the unpinned connect follow the default route would put a packet on the owner's institutional network, which the
+  >   project forbids. That control belongs in the lab, where the default route points at the simulated VM. `cargo run -p dnet-netstate --example probe_path -- <ip:port>`
+  >   probes an endpoint through each usable adapter.
+  > - **The TCP-only limit is resolved, not carved out (owner: it must work in every condition):** see T135 (which probe to believe, and when) and T136
+  >   (the first hop). A UDP-only endpoint is measured at the first hop, and the live tunnel stays the judge after any move.
+- [x] T135 [US3] Choose how to measure a path and decide when a probe's silence may be believed, in `crates/dnet-core/src/probe_plan.rs`
+  > **Built 2026-10-21 (not committed). 15 tests, 3 mutation-checked.** No probe works against every endpoint on every network, and a probe that fails for a reason
+  > unrelated to the path would make a healthy path look dead. Rules: (1) *measure what the tunnel uses*: the endpoint probe is TCP and speaks for a path only when
+  > the active profile is TCP-carried; for a UDP profile only the first hop is measured. An authenticated UDP handshake as a probe is rejected on purpose: a
+  > WireGuard-style server re-points the peer's endpoint at the source of any valid handshake, so a probe through a standby adapter would move the *live* session
+  > onto it. (2) *Silence counts only from a strategy that has been heard*: one that never answered (an endpoint that ignores pings, a gateway that drops echoes) is
+  > inapplicable, its silence is no information and the next strategy is tried; once it has answered, silence is a real loss. (3) *Calibration has a scope*: the
+  > endpoint's answering is true of the endpoint for every path, a gateway's of that gateway for that path (one gateway answering says nothing of another's); both
+  > are forgotten when the thing learned about changes. A path nothing can measure stays unmeasured.
+- [x] T136 [US3] Measure the first hop with an echo to the path's gateway, in `crates/dnet-netstate/src/echo.rs`
+  > **Built 2026-10-21 (not committed). 2 tests.** `echo::echo_gateway(gateway, timeout)` (Windows): `IcmpSendEcho` on a blocking thread, unprivileged. A gateway is on-link
+  > on exactly one adapter, so the echo can only leave through that adapter and needs no pinning. The first hop is where weak Wi-Fi, a saturated access point and a
+  > dropped association show first; it cannot say the internet beyond is reachable. No-reply and error-reply are both `Silent`. Proven on loopback only; it has not
+  > been run against a real gateway by the agent (the owner's network is institutional); `cargo run -p dnet-netstate --example probe_path` does it on request.
+- [x] T137 [US3] Failover decisions need evidence, not the absence of it, and must work when every path is weak (failover.rs, path_monitor.rs, quality.rs)
+  > **Built 2026-10-21 (not committed). 8 failover tests, 3 monitor tests, 1 quality test; mutation-checked.** (1) `PathQuality::is_measured`: a path that has seen no sample
+  > reads as `Good` (a freshly detected link must not be shunned) but is never *moved to* voluntarily, and the 30 s stability clock starts at its first sample, not when
+  > it appeared; a lost link or a dead (`Unusable`) carrying path still takes the best available path, measured or not. (2) Evidence expires: a path whose last sample
+  > is older than three probe intervals reads as unmeasured to the decision, and its proof starts again from zero when probes resume (`PathMonitor::observe` now takes
+  > the time). (3) Weak conditions: among poor paths, one with at least 0.15 less smoothed loss is worth a move, so a connection where nothing is good does not stay on
+  > the worst of them.
+- [x] T138 [US3] The daemon task: watch the network while a tunnel is up, measure the paths, and move the tunnel when it should move
+  > **Built 2026-10-21 (not committed). 13 loop tests, 5 orchestrator/engine tests, 6 tunnel tests; all behaviours mutation-checked. Not yet run live (see below).**
+  > `dnetd/src/netwatch.rs` is the loop; `NetworkWatch` is everything it needs from the machine, so every behaviour is tested against a fake machine with the clock paused.
+  > `winwatch.rs` is the Windows machine: `ChangeSource` + `settled` (run on a task of their own, because `settled` counts events as it goes and is not cancel-safe),
+  > `paths::current`, `probe_tcp`, `echo_gateway`, `Tunnels::carry_over`. The orchestrator starts the loop when a tunnel comes up and it ends with its attempt, like the live monitor.
+  > - *Two kinds of profile.* AmneziaWG can be steered (its endpoint host route is ours): on a lost link, or a better path proven, the host route is rewritten and the tunnel rebound, and the move is
+  >   reported. The primary-core profiles bind to whatever path the system uses, and a route pinned against that would fight the core: for them the loop decides nothing, notices which adapter the
+  >   tunnel is really on and reports changes (FR-016b: the user is told). *Failover for Hysteria 2 and REALITY is therefore the system's, observed, not ours, until the core is told which interface to use.*
+  > - A slow probe never delays a lost link (probes are tasks; the loop only receives results). A failed move is not assumed to have happened: the monitor is put back, nothing is reported, and no
+  >   retry for 30 s. The announcements of the system are the fast path; the paths are also read every 30 s as a safety net (a test caught that a first version of its own test passed for the wrong
+  >   reason: a *preferred* path proving itself is returned to by itself, which looked like the slow read working; the alternative is now a less preferred path, and the test fails without the feature).
+  > - `Input::PathChanged` makes the engine record `ConnectionEvent::PathChanged` with the tier in effect; clients see it on the event stream.
+  > - `dnetd --no-path-watch` (development): no watching and no probing, so a test run never sends a probe (a gateway echo, an endpoint connect) to the network it runs on. The Connect lab gate uses it:
+  >   without it the daemon would echo the owner's real, institutional gateway every 10 s during a run.
+  > - **Not proven live, and why:** failover needs two real, working physical paths, which the WSL lab does not have (its virtual switch is deliberately not a way out). T085 (SPIKE-R9) is the gate:
+  >   HV-06/07/08 on real hardware, e.g. Wi-Fi plus a cable or a tethered phone. `watch_paths` and `probe_path` examples show the pieces on a real machine today.
+  > - Security review (route rewrite, event stream, probes): see the T138 review note in the session record; nothing a client can send reaches the move (no IPC request names a path), the gateway comes from the
+  >   system's own table, and the probes touch only the user's own endpoint and the machine's own gateway.
+- [x] T139 Refuse to run programs as SYSTEM from a place ordinary users can change (install trust), in `crates/dnet-config/src/install_trust.rs`
+  > **Built 2026-10-21 (not committed). Security audit finding V1.** The service runs the two cores and loads the adapter driver library as SYSTEM, from paths it is given. If the
+  > installation folder is writable by an ordinary user, that user replaces a program and is SYSTEM at the next connect. Nothing checked.
+  > - The policy is read from the file's real security descriptor (owner and DACL), not guessed from the path: the owner is SYSTEM, Administrators or TrustedInstaller; no untrusted account may
+  >   write, delete, change the DACL or take ownership of the program or its folder; on the folders above it only delete, delete-child, WRITE_DAC and WRITE_OWNER matter (renaming the folder away is
+  >   as good as replacing the file). Inherit-only entries are ignored (they do not apply to the object); a right the check does not know is treated as every right, so a new flag cannot pass.
+  > - `dnetd` checks before every connect and refuses with a message that says what to do (`install_message`, no vendor names). `--allow-untrusted-install` exists for development and the lab gate
+  >   only, and says so in the log every time it is used. It is not a setting.
+  > - **Not proven:** on a real installed layout (T114 builds the installer). The tests use real security descriptors on real files; the lab gate runs with the flag because its tree is the owner's.
+- [x] T140 Keep the control pipe serving while clients misbehave, in `crates/dnet-ipc/src/server.rs`
+  > **Built 2026-10-21 (not committed). Security audit finding V2.** The pipe is open to every signed-in user, and the service stops when its listener ends (a stopped service drops the tunnel
+  > and lets traffic out). One failed accept ended the listener; a client that connected and said nothing held its slot for ever; a crowd of them held every slot.
+  > - `Limits` (32 clients at once; 10 s to send a first byte; 120 s idle). `accept_forever` retries a failed accept with a back-off (100 ms doubling to 5 s) and never returns; a slot is taken
+  >   before the next instance of the pipe is created, so instances can never exceed the limit. `run_control_listener_with` takes the limits so a test need not wait for the real ones.
+  > - Tests in `server::tests` against a fake acceptor and the paused clock: back-off doubles and is capped; a silent client is let go at the idle limit (and without a limit is kept, so the test
+  >   can fail); failed accepts do not end the listener nor spin in a tight loop; no more clients are accepted than the limit. `tests/pipe_limits.rs` on the real pipe: silent clients are let go,
+  >   the listener lives, the next client is served. Mutation-checked.
+  > - On a non-Windows build these helpers are compiled only for tests (`cfg(any(windows, test))`); the Linux lint caught that they were dead code there.
+- [x] T141 Audit sweep: smaller hardening found while reviewing the existing code
+  > **2026-10-21 (not committed).**
+  > - **Release builds unwind.** `panic = "abort"` is gone from the release profile: with it, a panic in any one task ended the service, and with it the tunnel. A panic now ends a task.
+  > - **Secrets are wiped.** `Secret` and the AmneziaWG `PrivateKey` hold `Zeroizing<String>`; a clone's memory is wiped too. (A wipe is not proof against a process that can read this one's memory:
+  >   SYSTEM and debuggers can. It limits what a later reader of freed memory finds.)
+  > - **Core output is logged at trace,** not at a level that is on by default: a core can print what it was given, and the generated configuration holds credentials.
+  > - **Property tests on every parser of outside input:** `dnet-ipc` (10, replies, state, events, requests, versions), `dnet-config` (6, credential bundles, configuration, pins), `dnet-core` (5, origins,
+  >   host names), `dnetctl` (5, what it prints and its command line). They assert no panic and, where something is accepted, that it is within the limits the rest of the code relies on.
+  >   `dnetctl`'s table printer used to index past its widths for a row longer than its header; it no longer can.
+  > - **Orphan reaping (`dnet-supervisor/src/orphans.rs`).** A process that could not be opened for any reason was treated as "gone", so an orphan that could not be opened (access denied) was left
+  >   running while the service believed the way was clear. Now only "no such process" is gone; everything else is an error. The check that a process is one of ours and the kill are made through one
+  >   handle (a second open by id after the scan could end whatever had been given the id in between). Every orphan is tried; the first failure is returned afterwards. Mutation-checked (2).
+  > - **Branding lint:** the adapter library's file name and the vendor-name assertion in `effects.rs` are assembled at run time, as `lint-branding` itself does, so the lint stays strict instead of gaining an exemption.
+  > - **Examined and found sound:** process spawns (the only production one, the resolver flush, builds an absolute path from the system's own `SystemRoot`; the other two are tests); no secret reaches
+  >   a `tracing` call; every `unsafe` block in `dnet-supervisor/src/orphans.rs` carries its justification.
+  > - **Not done, and why:** dependency advisories (`cargo audit` is not installed here: the owner installs it, then run `cargo audit`); the profile feed parser and its rollback protection do not exist yet
+  >   (T066a–d), so there is nothing to audit; the Windows service stop path and undo recovery were reviewed in earlier tasks and have not changed since.
 - [x] T127 Implement `dnetctl` (connect, disconnect, status, events) so the whole path can be driven and tested before the tray exists
   > **Built 2026-10-21 (not committed); proven against the real daemon unprivileged, live gate run pending.**
   > - `dnet_ipc::client` (12 tests): the client half of the pipe, reusable by the tray. Replies are read as untrusted input

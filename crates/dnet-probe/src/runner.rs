@@ -131,7 +131,7 @@ impl std::fmt::Debug for ProbeJob {
     }
 }
 
-/// A fresh unguessable token, 128 bits from the OS random source.
+/// A fresh unguessable token: a version-4 UUID, 122 random bits from the OS random source.
 fn random_token() -> String {
     uuid::Uuid::new_v4().simple().to_string()
 }

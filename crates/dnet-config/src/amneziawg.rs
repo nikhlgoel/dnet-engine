@@ -17,12 +17,16 @@ use crate::uapi::UapiRequest;
 
 /// A private key that never prints its material. Only `expose_wire` yields the value,
 /// and only the UAPI wire form calls it.
+///
+/// The memory holding it is overwritten when it is dropped, clones included.
 #[derive(Clone, PartialEq, Eq)]
-pub struct PrivateKey(String);
+pub struct PrivateKey(zeroize::Zeroizing<String>);
+
+impl zeroize::ZeroizeOnDrop for PrivateKey {}
 
 impl PrivateKey {
     pub fn new(material: impl Into<String>) -> Self {
-        Self(material.into())
+        Self(zeroize::Zeroizing::new(material.into()))
     }
 
     /// The key material, for writing to the UAPI pipe only.

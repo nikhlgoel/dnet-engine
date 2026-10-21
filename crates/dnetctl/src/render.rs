@@ -128,6 +128,11 @@ pub fn event(view: &EventView) -> String {
 fn table(headers: &[&str], rows: &[Vec<String>]) -> String {
     let mut widths: Vec<usize> = headers.iter().map(|h| h.chars().count()).collect();
     for row in rows {
+        // A row wider than the header would otherwise index past the widths. Callers build fixed
+        // rows, but this prints what the service said, and must not trust a caller to be right.
+        if row.len() > widths.len() {
+            widths.resize(row.len(), 0);
+        }
         for (i, cell) in row.iter().enumerate() {
             widths[i] = widths[i].max(cell.chars().count());
         }
@@ -136,7 +141,12 @@ fn table(headers: &[&str], rows: &[Vec<String>]) -> String {
         cells
             .iter()
             .enumerate()
-            .map(|(i, cell)| format!("{cell:<width$}", width = widths[i]))
+            .map(|(i, cell)| {
+                format!(
+                    "{cell:<width$}",
+                    width = widths.get(i).copied().unwrap_or(0)
+                )
+            })
             .collect::<Vec<_>>()
             .join("  ")
             .trim_end()

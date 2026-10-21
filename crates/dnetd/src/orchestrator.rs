@@ -57,6 +57,8 @@ use dnet_ipc::wire::EventBus;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
+use crate::netwatch::{self, NetworkWatch};
+
 /// The result of a race: the decision and what each probe that reported saw.
 pub type RaceOutcome = (RaceDecision, Vec<(ProfileId, ProfileProbe)>);
 
@@ -100,6 +102,12 @@ pub trait Effects: Send + Sync + 'static {
         &self,
         endpoint: EndpointId,
     ) -> impl Future<Output = EndpointProbeOutcome> + Send;
+
+    /// What watches the network while the tunnel for `profile` is up (T138): it notices that the
+    /// carrying path changed, and where the profile allows it moves the tunnel. `None` when nothing
+    /// can be watched.
+    type Watch: NetworkWatch;
+    fn network_watch(&self, profile: &ProfileId, endpoint: EndpointId) -> Option<Self::Watch>;
 }
 
 /// How often a connected tunnel is checked.
@@ -417,9 +425,46 @@ impl<E: Effects> Actor<E> {
 
         if !was_connected {
             if let Phase::Connected { profile, endpoint } = self.engine.phase().clone() {
-                self.start_monitor(profile, endpoint);
+                self.start_monitor(profile.clone(), endpoint);
+                self.start_path_watch(&profile, endpoint);
             }
         }
+    }
+
+    /// Watch the network while this connection lasts, and tell the engine when the carrying path
+    /// changes. Like the monitor beside it, it ends by itself when the attempt it belongs to is
+    /// replaced.
+    fn start_path_watch(&self, profile: &ProfileId, endpoint: EndpointId) {
+        let Some(watch) = self.effects.network_watch(profile, endpoint) else {
+            return;
+        };
+        let (reports, current, attempt) = (
+            self.reports.clone(),
+            Arc::clone(&self.current),
+            self.attempt,
+        );
+        let (moved, mut moves) = mpsc::channel(8);
+        let alive = {
+            let current = Arc::clone(&current);
+            move || current.load(Ordering::SeqCst) == attempt
+        };
+        tokio::spawn(netwatch::run(
+            watch,
+            netwatch::Settings::default(),
+            alive,
+            moved,
+        ));
+        tokio::spawn(async move {
+            while let Some(netwatch::PathMove { from, to }) = moves.recv().await {
+                if current.load(Ordering::SeqCst) != attempt {
+                    return;
+                }
+                let input = Input::PathChanged { from, to };
+                if reports.send(Msg::Report { attempt, input }).await.is_err() {
+                    return;
+                }
+            }
+        });
     }
 
     /// Watch a connection that has just come up: live checks, and health probes of its endpoint.
@@ -696,6 +741,61 @@ mod tests {
         reach_delay: Mutex<Duration>,
         /// Health probes of this endpoint fail.
         failing_endpoint: Mutex<Option<EndpointId>>,
+        /// The watch handed to the orchestrator when a tunnel comes up, if the test wants one.
+        watch: Mutex<Option<TestWatch>>,
+    }
+
+    /// A watch that only follows: the machine says which adapter carries the tunnel.
+    struct TestWatch {
+        carrying: Arc<Mutex<Option<dnet_core::ids::InterfaceId>>>,
+        changes: mpsc::Receiver<()>,
+    }
+
+    #[derive(Clone)]
+    struct IdleProber;
+
+    impl netwatch::PathProber for IdleProber {
+        async fn observe(
+            &self,
+            _: netwatch::ProbeTarget,
+            _: dnet_core::probe_plan::Strategy,
+        ) -> Option<dnet_core::probe_plan::Observation> {
+            None
+        }
+    }
+
+    impl NetworkWatch for TestWatch {
+        type Prober = IdleProber;
+        fn prober(&self) -> IdleProber {
+            IdleProber
+        }
+        fn changes(&mut self) -> impl Future<Output = Option<()>> + Send {
+            self.changes.recv()
+        }
+        fn paths(&mut self) -> Result<Vec<dnet_core::path::NetworkPath>, String> {
+            Ok(Vec::new())
+        }
+        fn carrying_now(
+            &mut self,
+            _: &[dnet_core::path::NetworkPath],
+        ) -> Option<dnet_core::ids::InterfaceId> {
+            *self.carrying.lock().unwrap()
+        }
+        fn carrier(&self) -> dnet_core::profile::Carrier {
+            dnet_core::profile::Carrier::Udp
+        }
+        fn endpoint_tcp(&self) -> bool {
+            false
+        }
+        fn can_steer(&self) -> bool {
+            false
+        }
+        fn needs_gateway(&self) -> bool {
+            false
+        }
+        async fn carry_over(&mut self, _: &dnet_core::path::NetworkPath) -> Result<(), String> {
+            Err("this watch only follows".to_owned())
+        }
     }
 
     impl Script {
@@ -713,6 +813,7 @@ mod tests {
                 reach_answer: Mutex::new(Reach::Reachable),
                 reach_delay: Mutex::new(Duration::ZERO),
                 failing_endpoint: Mutex::new(None),
+                watch: Mutex::new(None),
             })
         }
         fn record(&self, call: impl Into<String>) {
@@ -776,6 +877,10 @@ mod tests {
                 .unwrap()
                 .pop_front()
                 .unwrap_or(LiveCheck::Passed)
+        }
+        type Watch = TestWatch;
+        fn network_watch(&self, _: &ProfileId, _: EndpointId) -> Option<TestWatch> {
+            self.watch.lock().unwrap().take()
         }
         async fn probe_endpoint(&self, endpoint: EndpointId) -> EndpointProbeOutcome {
             self.record("probe-endpoint");
@@ -909,6 +1014,97 @@ mod tests {
         let names = event_names(&rig.bus);
         assert!(names.contains(&"ProbeStarted".to_string()), "{names:?}");
         assert!(names.contains(&"ProfileSelected".to_string()), "{names:?}");
+    }
+
+    // ---------------------------------------------------------------- the path the tunnel is on (T138)
+
+    /// A rig whose machine reports `carrying` as the adapter the tunnel is on; returns the handles a
+    /// test uses to change that and to say "the network changed".
+    fn rig_watching(
+        carrying: u64,
+    ) -> (
+        Rig,
+        Arc<Mutex<Option<dnet_core::ids::InterfaceId>>>,
+        mpsc::Sender<()>,
+    ) {
+        let script = Script::new();
+        let carrying_now = Arc::new(Mutex::new(Some(dnet_core::ids::InterfaceId::new(carrying))));
+        let (poke, changes) = mpsc::channel(4);
+        *script.watch.lock().unwrap() = Some(TestWatch {
+            carrying: Arc::clone(&carrying_now),
+            changes,
+        });
+        script
+            .races
+            .lock()
+            .unwrap()
+            .push_back(Some(selected("hy2-default")));
+        (rig_with(script, vec![endpoint("home")]), carrying_now, poke)
+    }
+
+    fn path_changes(bus: &EventBus) -> usize {
+        event_names(bus)
+            .iter()
+            .filter(|n| *n == "PathChanged")
+            .count()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_change_of_the_carrying_path_reaches_the_event_stream() {
+        let (rig, carrying, poke) = rig_watching(3);
+        rig.handle.connect(None).unwrap();
+        until(&rig.handle, |s| s.status == ConnectionStatus::Connected).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(path_changes(&rig.bus), 1, "the path found when it came up");
+
+        *carrying.lock().unwrap() = Some(dnet_core::ids::InterfaceId::new(4));
+        poke.send(()).await.unwrap();
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        assert_eq!(path_changes(&rig.bus), 2, "and the move to another adapter");
+        // Not a failure: the connection carries on.
+        assert_eq!(rig.handle.snapshot().status, ConnectionStatus::Connected);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_path_watch_ends_with_the_connection() {
+        let (rig, _carrying, poke) = rig_watching(3);
+        rig.handle.connect(None).unwrap();
+        until(&rig.handle, |s| s.status == ConnectionStatus::Connected).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(!poke.is_closed(), "watching while connected");
+
+        rig.handle.disconnect().unwrap();
+        until(&rig.handle, |s| s.status == ConnectionStatus::Disconnected).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+
+        assert!(
+            poke.is_closed(),
+            "the watch was dropped with the connection"
+        );
+        let before = path_changes(&rig.bus);
+        let _ = poke.send(()).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(
+            path_changes(&rig.bus),
+            before,
+            "nothing is reported after it"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn nothing_is_watched_when_the_effects_offer_nothing() {
+        let rig = rig();
+        rig.script
+            .races
+            .lock()
+            .unwrap()
+            .push_back(Some(selected("hy2-default")));
+        rig.handle.connect(None).unwrap();
+        until(&rig.handle, |s| s.status == ConnectionStatus::Connected).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+
+        assert_eq!(path_changes(&rig.bus), 0);
     }
 
     #[tokio::test(start_paused = true)]

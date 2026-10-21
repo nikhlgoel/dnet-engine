@@ -24,6 +24,8 @@ pub mod credentials;
 pub mod endpoint_bypass;
 pub mod error;
 pub mod hysteria2;
+#[cfg(windows)]
+pub mod install_trust;
 pub mod persist;
 pub mod primary;
 pub mod probe;
@@ -31,7 +33,6 @@ pub mod reality;
 pub mod secret;
 pub mod secret_store;
 pub mod tls;
-#[cfg(windows)]
 pub mod trusted_file;
 pub mod uapi;
 pub mod uapi_pipe;

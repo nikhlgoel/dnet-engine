@@ -104,6 +104,16 @@ impl PathQuality {
         next
     }
 
+    /// Whether any sample has ever been folded in. An answer sets the round-trip estimate and a
+    /// loss raises the loss estimate, so a path that has seen either is measured; one that has seen
+    /// neither is only a path the system lists. The difference matters for decisions: such a path
+    /// reads as [`QualityBand::Good`] (nothing says otherwise, and a freshly detected link must not
+    /// be shunned), but "nothing says otherwise" is not evidence, and nothing may *move to* a path
+    /// on that basis.
+    pub fn is_measured(&self) -> bool {
+        self.rtt_ewma.is_some() || self.loss_ewma > 0.0
+    }
+
     /// The band this quality falls in. Loss decides `Unusable`; loss or round-trip time decides
     /// `Poor`. A path with no estimates yet is `Good`: nothing says otherwise, and treating an
     /// unmeasured path as bad would stop a freshly detected link from ever being chosen.
@@ -192,6 +202,23 @@ mod tests {
     }
 
     // ------------------------------------------------------------------ bands
+
+    #[test]
+    fn a_path_is_measured_once_it_has_seen_an_answer_or_a_loss() {
+        assert!(!PathQuality::unmeasured().is_measured());
+        assert!(PathQuality::unmeasured()
+            .observe(answered(40))
+            .is_measured());
+        assert!(PathQuality::unmeasured()
+            .observe(PathSample::Lost)
+            .is_measured());
+        // And stays so however long the answers run: the round-trip estimate remains.
+        let recovered = fold(
+            PathQuality::unmeasured().observe(PathSample::Lost),
+            &[answered(40); 300],
+        );
+        assert!(recovered.is_measured());
+    }
 
     #[test]
     fn a_path_nothing_is_known_about_is_good() {

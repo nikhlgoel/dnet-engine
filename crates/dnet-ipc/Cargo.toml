@@ -19,5 +19,5 @@ windows = { workspace = true, features = ["Win32_Foundation", "Win32_Security", 
 tracing = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "test-util"] }
 proptest = { workspace = true }

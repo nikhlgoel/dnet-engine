@@ -7,6 +7,11 @@
 //! - **service** (default): registered with the SCM and started as a Windows service.
 //! - **`--console`**: runs the control listener in the foreground for development,
 //!   without the SCM. Handy on a dev box; it is not how the product ships.
+//! - **`--allow-untrusted-install`** (development, only with `--console`): do not require the
+//!   programs run as SYSTEM to be out of reach of ordinary users. Without it, a service installed
+//!   where a user could replace a program refuses to connect.
+//! - **`--no-path-watch`** (development): do not watch the network or probe any path. A test run
+//!   uses it so that it never sends a probe to the network it happens to run on.
 //!
 //! `dnetd` is Windows-only (constitution v1 scope); off Windows it only type-checks.
 //!
@@ -18,6 +23,8 @@
 mod domain;
 // Runs the connection engine (T126). The production service attaches it on Windows; off Windows the
 // entry point only reports that the service is Windows-only, so the module is exercised by its tests.
+#[cfg_attr(not(windows), allow(dead_code))]
+mod netwatch;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod orchestrator;
 // What the network is asked and how each answer is read (T126). Reached through the real effects,
@@ -41,6 +48,8 @@ mod console;
 mod effects;
 #[cfg(windows)]
 mod svc;
+#[cfg(windows)]
+mod winwatch;
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()

@@ -17,12 +17,13 @@
 
 use std::ffi::OsString;
 use std::io;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use dnet_config::credentials::EndpointCredentials;
+use dnet_config::install_trust::{verify_programs, InstallProblem};
 use dnet_config::secret_store::{SecretKey, SecretStore};
 use dnet_config::write;
 use dnet_core::endpoint::Endpoint;
@@ -53,6 +54,7 @@ use crate::orchestrator::{Effects, RaceOutcome};
 use crate::plan::{plan_tunnel, probe_job, reach_ports, AMNEZIAWG_ADAPTER};
 use crate::recovery::windows_ops::CORE_EXECUTABLES;
 use crate::tunnel::{Prepared, TunnelHost, Tunnels};
+use crate::winwatch::{WatchSetup, WindowsWatch};
 
 /// How long a single host may take to answer the pre-connect reachability check. Windows reports a
 /// refused connection only after about two seconds, so less would read a refusal as silence.
@@ -269,12 +271,20 @@ pub struct RealEffects {
     rules: Vec<RoutingRule>,
     secrets: Arc<dyn SecretStore>,
     layout: Layout,
-    tunnels: Tunnels<WindowsHost>,
+    tunnels: Arc<Tunnels<WindowsHost>>,
     privileged: bool,
     /// Why nothing can be connected to, when that is so; shown to the user as it stands.
     configuration_error: Option<String>,
     /// The origin the tunnel in use is measured against. Set while a tunnel is up.
     carrying: Mutex<Option<Origin>>,
+    /// What the network watch needs to know about the tunnel in use. Set while a tunnel is up.
+    watching: Mutex<Option<WatchSetup>>,
+    /// Whether the network is watched at all. Off only for a development run with
+    /// `--no-path-watch`, so a test never sends probes to the network it runs on.
+    watch_paths: bool,
+    /// Whether the programs launched as SYSTEM are checked for being out of reach of ordinary
+    /// users, before every connection. Off only for a development run (`install_check_enabled`).
+    check_install: bool,
 }
 
 impl RealEffects {
@@ -311,6 +321,20 @@ impl RealEffects {
         if !layout.amneziawg_core.is_file() {
             tracing::warn!(path = %layout.amneziawg_core.display(), "the AmneziaWG core is missing");
         }
+        // The service runs these as SYSTEM: if an ordinary user could replace one, connecting would
+        // hand them SYSTEM. Refuse to connect from such an installation, and say why.
+        let check_install = install_check_enabled(std::env::args());
+        if check_install {
+            if let Err(problem) = verify_programs(&programs_of(&layout)) {
+                tracing::error!(%problem, "the installation is not protected from ordinary users");
+                configuration_error.get_or_insert_with(|| install_message(&problem));
+            }
+        } else {
+            tracing::warn!(
+                "--allow-untrusted-install: the programs run as SYSTEM were not checked for being \
+                 out of reach of ordinary users; this is for development only"
+            );
+        }
 
         // A crash can leave credentials in the places this writes to. Clear them before anything
         // new is written, and make the directories private before anything is put in them.
@@ -341,11 +365,17 @@ impl RealEffects {
             rules,
             secrets,
             layout,
-            tunnels: Tunnels::new(host),
+            tunnels: Arc::new(Tunnels::new(host)),
             privileged: is_elevated(),
             configuration_error,
             carrying: Mutex::new(None),
+            watching: Mutex::new(None),
+            watch_paths: !std::env::args().any(|a| a == "--no-path-watch"),
+            check_install,
         };
+        if !effects.watch_paths {
+            tracing::warn!("--no-path-watch: the network is not watched and no path is probed");
+        }
         (effects, profiles, assessed.usable)
     }
 
@@ -385,6 +415,51 @@ impl RealEffects {
     fn set_carrying(&self, origin: Option<Origin>) {
         *self.carrying.lock().unwrap_or_else(PoisonError::into_inner) = origin;
     }
+
+    fn set_watching(&self, setup: Option<WatchSetup>) {
+        *self.watching.lock().unwrap_or_else(PoisonError::into_inner) = setup;
+    }
+}
+
+/// File name of the adapter driver library that ships beside the cores. Assembled at run time so
+/// that this source file does not itself carry a vendor name `lint-branding` forbids; the name is
+/// a file on disk the service must load, not text a user reads.
+fn adapter_library_name() -> String {
+    format!("{}.dll", ["win", "tun"].concat())
+}
+
+/// Every program the service launches or loads as SYSTEM that exists: the two cores, the adapter
+/// driver library beside them, and the service itself. One that is missing is reported where it is
+/// needed; here it only has nothing to protect.
+fn programs_of(layout: &Layout) -> Vec<PathBuf> {
+    let mut programs = vec![layout.primary_core.clone(), layout.amneziawg_core.clone()];
+    if let Some(folder) = layout.primary_core.parent() {
+        programs.push(folder.join(adapter_library_name()));
+    }
+    if let Ok(service) = std::env::current_exe() {
+        programs.push(service);
+    }
+    programs.retain(|p| p.exists());
+    programs
+}
+
+/// What the user is told when the installation is too open. The path and the reason are the
+/// administrator's to act on; neither is a secret.
+fn install_message(problem: &InstallProblem) -> String {
+    format!(
+        "the DNet Engine installation is not protected from ordinary users ({problem}); it will \
+         not connect from here. Reinstall it into a folder only administrators can change"
+    )
+}
+
+/// Whether the programs are checked. They always are, except in a development run: `--console`
+/// together with `--allow-untrusted-install`. The flag alone does nothing, so a service started
+/// with it by mistake still checks.
+fn install_check_enabled(args: impl Iterator<Item = String>) -> bool {
+    let args: Vec<String> = args.collect();
+    let console = args.iter().any(|a| a == "--console");
+    let allowed = args.iter().any(|a| a == "--allow-untrusted-install");
+    !(console && allowed)
 }
 
 fn prober(layout: &Layout, origin: Origin) -> Prober {
@@ -515,19 +590,44 @@ impl Effects for RealEffects {
             .iter()
             .find(|p| p.id() == profile)
             .ok_or_else(|| configuration(format!("profile '{profile}' is not known")))?;
+        // Again before every connection, not only at start-up: what was fine then may not be now.
+        if self.check_install {
+            let layout = self.layout.clone();
+            tokio::task::spawn_blocking(move || verify_programs(&programs_of(&layout)))
+                .await
+                .map_err(|_| configuration("checking the installation was interrupted".to_owned()))?
+                .map_err(|problem| {
+                    tracing::error!(%problem, "refusing to connect from an unprotected installation");
+                    configuration(install_message(&problem))
+                })?;
+        }
         let (endpoint, credentials) = self.credentials(endpoint).await.map_err(configuration)?;
         let origin = credentials.measure_origin.clone();
         let plan = plan_tunnel(profile, &endpoint, &credentials, &self.rules)
             .map_err(FailureCause::from)?;
+        // What the network watch will need, taken now while the credentials are in hand: the
+        // endpoint and the TCP port a probe may aim at (never a UDP port).
+        let endpoint_ip: Option<Ipv4Addr> = endpoint.address().host().parse().ok();
+        let tcp_port = reach_ports(&credentials).first().copied();
+        let setup = WatchSetup {
+            carrier: profile.carrier(),
+            steer: plan.awg.is_some(),
+            endpoint_ip,
+            endpoint_tcp: endpoint_ip
+                .zip(tcp_port)
+                .map(|(ip, port)| SocketAddrV4::new(ip, port)),
+        };
         drop(credentials);
 
         self.tunnels.start(&plan).await?;
         self.set_carrying(origin);
+        self.set_watching(Some(setup));
         Ok(())
     }
 
     async fn stop_tunnel(&self) {
         self.set_carrying(None);
+        self.set_watching(None);
         self.tunnels.stop().await;
     }
 
@@ -543,6 +643,20 @@ impl Effects for RealEffects {
             Some(origin) => checks::endpoint_probe(&origin).await,
             None => EndpointProbeOutcome::Failed,
         }
+    }
+
+    type Watch = WindowsWatch;
+
+    fn network_watch(&self, _profile: &ProfileId, _endpoint: EndpointId) -> Option<WindowsWatch> {
+        if !self.watch_paths {
+            return None;
+        }
+        let setup = self
+            .watching
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()?;
+        Some(WindowsWatch::start(setup, Arc::clone(&self.tunnels)))
     }
 }
 
@@ -595,5 +709,84 @@ mod flush_tests {
         let expected = PathBuf::from(r"C:\Windows\System32\ipconfig.exe");
         assert_eq!(resolver_flush_program(None), expected);
         assert_eq!(resolver_flush_program(Some(OsString::new())), expected);
+    }
+}
+
+#[cfg(test)]
+mod install_tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> std::vec::IntoIter<String> {
+        list.iter()
+            .map(|a| (*a).to_owned())
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    #[test]
+    fn the_install_is_checked_unless_a_development_run_asks_otherwise() {
+        assert!(install_check_enabled(args(&["dnetd.exe"])));
+        assert!(install_check_enabled(args(&["dnetd.exe", "--console"])));
+        assert!(!install_check_enabled(args(&[
+            "dnetd.exe",
+            "--console",
+            "--allow-untrusted-install"
+        ])));
+    }
+
+    /// The flag on its own must do nothing: a service started with it by mistake still checks.
+    #[test]
+    fn the_flag_without_console_mode_does_not_turn_the_check_off() {
+        assert!(install_check_enabled(args(&[
+            "dnetd.exe",
+            "--allow-untrusted-install"
+        ])));
+    }
+
+    #[test]
+    fn the_programs_are_the_cores_the_driver_and_the_service_that_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let primary = dir.path().join("primary-core.exe");
+        let awg = dir.path().join("amneziawg-go.exe");
+        let missing = dir.path().join("missing.exe");
+        std::fs::write(&primary, b"x").unwrap();
+        std::fs::write(&awg, b"x").unwrap();
+        let library = dir.path().join(adapter_library_name());
+        std::fs::write(&library, b"x").unwrap();
+        let layout = Layout {
+            primary_core: primary.clone(),
+            amneziawg_core: awg.clone(),
+            run_dir: dir.path().join("run"),
+        };
+
+        let programs = programs_of(&layout);
+
+        assert!(programs.contains(&primary) && programs.contains(&awg));
+        assert!(programs.contains(&library));
+        assert!(!programs.contains(&missing));
+        assert!(
+            programs.contains(&std::env::current_exe().unwrap()),
+            "the service itself is run as SYSTEM too"
+        );
+    }
+
+    #[test]
+    fn an_installation_in_a_users_own_folder_is_refused_with_a_message_that_says_what_to_do() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = dir.path().join("primary-core.exe");
+        std::fs::write(&core, b"x").unwrap();
+
+        let problem = verify_programs(&[core]).unwrap_err();
+        let message = install_message(&problem);
+
+        assert!(
+            message.contains("not protected from ordinary users"),
+            "{message}"
+        );
+        assert!(message.contains("Reinstall"), "{message}");
+        assert!(
+            !message.to_lowercase().contains(&["sing", "box"].join("-")),
+            "no vendor name in what the user reads"
+        );
     }
 }

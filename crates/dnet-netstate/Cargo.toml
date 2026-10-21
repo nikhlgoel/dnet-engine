@@ -14,7 +14,7 @@ dnet-config = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros", "net"] }
 windows = { workspace = true, features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock"] }
 tracing = { workspace = true }
 
@@ -25,7 +25,7 @@ dnet-supervisor = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "net", "io-util"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "net", "io-util", "test-util", "signal"] }
 tracing-subscriber = { workspace = true }
 
 # The runner's pure helpers (profile selection, parameter parsing, the negative control) have

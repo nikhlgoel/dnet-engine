@@ -59,7 +59,10 @@ fn forward_output<R>(
     tokio::spawn(async move {
         let mut lines = BufReader::new(reader).lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            tracing::debug!(?core, stream, "{line}");
+            // `trace`, not `debug`: what a core prints includes the places the user is connecting
+            // to, and `debug` is what gets switched on when something needs diagnosing. Those
+            // names must not reach a log by that route (FR-035); asking for `trace` is deliberate.
+            tracing::trace!(?core, stream, "{line}");
             if marker.as_deref().is_some_and(|m| line.contains(m)) {
                 if let Some(tx) = signal.lock().expect("ready signal mutex poisoned").take() {
                     let _ = tx.send(());

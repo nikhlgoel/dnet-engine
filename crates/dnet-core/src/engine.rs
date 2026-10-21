@@ -41,7 +41,7 @@ use crate::endpoint::Endpoint;
 use crate::endpoint_health::rank;
 use crate::failure::{classify, Reach, Situation};
 use crate::health::{HealthConfig, ProbeOutcome as EndpointProbeOutcome};
-use crate::ids::{EndpointId, ProfileId};
+use crate::ids::{EndpointId, InterfaceId, ProfileId};
 use crate::migrate::{plan_migration, Migration};
 use crate::probe::{judge, ProfileProbe, RaceDecision, Unusable, Verdict};
 use crate::profile::{ConnectionProfile, Viability};
@@ -125,6 +125,12 @@ pub enum Input {
         outcome: EndpointProbeOutcome,
     },
     Environment(Environment),
+    /// The path carrying the tunnel changed (T133): it moved to another adapter, or the first one
+    /// was found. Only meaningful while connected.
+    PathChanged {
+        from: Option<InterfaceId>,
+        to: InterfaceId,
+    },
     /// Direct reachability of each endpoint, in endpoint order, made outside any profile. A connect
     /// forgets earlier reach (it describes the network the last attempt ran on), so report it
     /// after `Connect`, before the race result.
@@ -227,6 +233,7 @@ impl Engine {
                 self.environment = environment;
                 Vec::new()
             }
+            Input::PathChanged { from, to } => self.path_changed(from, to),
             Input::Reach(reach) => {
                 self.reach = reach;
                 Vec::new()
@@ -427,6 +434,28 @@ impl Engine {
             self.phase = Phase::Connected { profile, endpoint };
         }
         Vec::new()
+    }
+
+    /// Record that the carrying path changed, with the failover tier in effect: that tier says
+    /// whether established connections survived the move (data-model §5.1). Not a failure, and it
+    /// changes nothing else.
+    fn path_changed(&mut self, from: Option<InterfaceId>, to: InterfaceId) -> Vec<Action> {
+        let Phase::Connected { profile, .. } = &self.phase else {
+            return Vec::new();
+        };
+        let Some(tier) = self
+            .profiles
+            .iter()
+            .find(|p| p.id() == profile)
+            .map(ConnectionProfile::tier)
+        else {
+            return Vec::new();
+        };
+        vec![Action::Emit(ConnectionEvent::PathChanged {
+            from,
+            to,
+            tier_at_time: tier,
+        })]
     }
 
     fn live_check(&mut self, check: LiveCheck, now: Instant) -> Vec<Action> {
@@ -798,6 +827,55 @@ mod tests {
         step(&mut e, Input::TunnelUp);
         assert!(matches!(e.phase(), Phase::Connected { .. }));
         (e, eid)
+    }
+
+    // ------------------------------------------------------------ the carrying path
+
+    #[test]
+    fn a_path_change_while_connected_is_recorded_with_the_tier_in_effect() {
+        let (mut e, _) = connected();
+        let from = Some(InterfaceId::new(3));
+        let to = InterfaceId::new(9);
+
+        let actions = step(&mut e, Input::PathChanged { from, to });
+
+        assert_eq!(
+            events(&actions),
+            [&ConnectionEvent::PathChanged {
+                from,
+                to,
+                tier_at_time: FailoverTier::Tier2
+            }]
+        );
+        assert!(
+            matches!(e.phase(), Phase::Connected { .. }),
+            "a move of the carrying path is not a failure"
+        );
+    }
+
+    #[test]
+    fn the_first_carrying_path_is_recorded_too() {
+        let (mut e, _) = connected();
+        let to = InterfaceId::new(4);
+        let actions = step(&mut e, Input::PathChanged { from: None, to });
+        assert!(matches!(
+            events(&actions)[..],
+            [ConnectionEvent::PathChanged { from: None, .. }]
+        ));
+    }
+
+    #[test]
+    fn a_path_change_when_nothing_is_connected_is_ignored() {
+        let (mut e, _) = engine();
+        let actions = step(
+            &mut e,
+            Input::PathChanged {
+                from: None,
+                to: InterfaceId::new(1),
+            },
+        );
+        assert!(actions.is_empty(), "late reports are normal, not errors");
+        assert_eq!(e.phase(), &Phase::Idle);
     }
 
     // ------------------------------------------------------------ connecting

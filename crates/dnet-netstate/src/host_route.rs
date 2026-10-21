@@ -99,8 +99,157 @@ pub async fn on_carrying_path_change<T: TunnelBringup>(
     current: &HostRoute,
     new_gateway: IpAddr,
 ) -> Result<HostRoute, NetstateError> {
+    let (route, outcome) = move_to_gateway(ops, current, new_gateway).await;
+    outcome.map(|()| route)
+}
+
+/// [`on_carrying_path_change`] for a caller that has to keep track of the routing table: it also
+/// says which route is installed afterwards.
+///
+/// The two steps can fail separately. If the rewrite fails nothing changed and the route is still
+/// `current`. If the rewrite succeeded and the rebind then failed, the table already holds the new
+/// route, and a caller that believed the old one would later try to remove a route that is not
+/// there and leave the new one behind. So the route returned is always the one installed.
+pub async fn move_to_gateway<T: TunnelBringup>(
+    ops: &T,
+    current: &HostRoute,
+    new_gateway: IpAddr,
+) -> (HostRoute, Result<(), NetstateError>) {
     let updated = current.via(new_gateway);
-    ops.rewrite_host_route(current, &updated).await?;
-    ops.rebind_tunnel(new_gateway).await?;
-    Ok(updated)
+    if let Err(error) = ops.rewrite_host_route(current, &updated).await {
+        return (current.clone(), Err(error));
+    }
+    let outcome = ops.rebind_tunnel(new_gateway).await;
+    (updated, outcome)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::*;
+
+    /// Records the order of operations, and can fail either step.
+    struct Recorder {
+        log: Mutex<Vec<String>>,
+        fail_rewrite: bool,
+        fail_rebind: bool,
+    }
+
+    impl Recorder {
+        fn new(fail_rewrite: bool, fail_rebind: bool) -> Self {
+            Self {
+                log: Mutex::new(Vec::new()),
+                fail_rewrite,
+                fail_rebind,
+            }
+        }
+        fn log(&self) -> Vec<String> {
+            self.log.lock().unwrap().clone()
+        }
+    }
+
+    impl TunnelBringup for Recorder {
+        async fn install_host_route(&self, _: &HostRoute) -> Result<(), NetstateError> {
+            Ok(())
+        }
+        async fn remove_host_route(&self, _: &HostRoute) -> Result<(), NetstateError> {
+            Ok(())
+        }
+        async fn rewrite_host_route(
+            &self,
+            _: &HostRoute,
+            to: &HostRoute,
+        ) -> Result<(), NetstateError> {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("rewrite:{}", to.gateway()));
+            if self.fail_rewrite {
+                Err(NetstateError::Operation("denied".into()))
+            } else {
+                Ok(())
+            }
+        }
+        async fn start_tunnel(&self) -> Result<(), NetstateError> {
+            Ok(())
+        }
+        async fn stop_tunnel(&self) -> Result<(), NetstateError> {
+            Ok(())
+        }
+        async fn rebind_tunnel(&self, gateway: IpAddr) -> Result<(), NetstateError> {
+            self.log.lock().unwrap().push(format!("rebind:{gateway}"));
+            if self.fail_rebind {
+                Err(NetstateError::Operation("pipe closed".into()))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn route(gateway: &str) -> HostRoute {
+        let address = dnet_core::endpoint::EndpointAddress::new("203.0.113.10", 51820).unwrap();
+        HostRoute::for_endpoint(
+            &ActiveEndpointBypass::new(&address),
+            gateway.parse().unwrap(),
+        )
+    }
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_route_is_rewritten_before_the_tunnel_is_rebound() {
+        let ops = Recorder::new(false, false);
+        let (now, outcome) = move_to_gateway(&ops, &route("10.0.0.1"), ip("10.0.0.9")).await;
+
+        assert!(outcome.is_ok());
+        assert_eq!(ops.log(), ["rewrite:10.0.0.9", "rebind:10.0.0.9"]);
+        assert_eq!(now.gateway(), ip("10.0.0.9"));
+    }
+
+    #[tokio::test]
+    async fn a_rewrite_that_fails_changes_nothing_and_never_rebinds() {
+        let ops = Recorder::new(true, false);
+        let (now, outcome) = move_to_gateway(&ops, &route("10.0.0.1"), ip("10.0.0.9")).await;
+
+        assert!(outcome.is_err());
+        assert_eq!(
+            ops.log(),
+            ["rewrite:10.0.0.9"],
+            "no rebind against a stale route"
+        );
+        assert_eq!(
+            now.gateway(),
+            ip("10.0.0.1"),
+            "the table still holds the old route"
+        );
+    }
+
+    /// The gap this function exists to close: the table already has the new route.
+    #[tokio::test]
+    async fn a_rebind_that_fails_still_reports_the_route_that_is_now_installed() {
+        let ops = Recorder::new(false, true);
+        let (now, outcome) = move_to_gateway(&ops, &route("10.0.0.1"), ip("10.0.0.9")).await;
+
+        assert!(outcome.is_err());
+        assert_eq!(now.gateway(), ip("10.0.0.9"), "the rewrite had succeeded");
+    }
+
+    #[tokio::test]
+    async fn the_older_helper_still_returns_the_new_route_or_the_error() {
+        let ok = Recorder::new(false, false);
+        let updated = on_carrying_path_change(&ok, &route("10.0.0.1"), ip("10.0.0.9"))
+            .await
+            .unwrap();
+        assert_eq!(updated.gateway(), ip("10.0.0.9"));
+
+        let bad = Recorder::new(false, true);
+        assert!(
+            on_carrying_path_change(&bad, &route("10.0.0.1"), ip("10.0.0.9"))
+                .await
+                .is_err()
+        );
+    }
 }

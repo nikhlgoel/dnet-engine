@@ -555,6 +555,10 @@ mod tests {
             async fn live_check(&self, _: &ProfileId) -> LiveCheck {
                 LiveCheck::Passed
             }
+            type Watch = crate::netwatch::NoWatch;
+            fn network_watch(&self, _: &ProfileId, _: EndpointId) -> Option<Self::Watch> {
+                None
+            }
             async fn probe_endpoint(&self, _: EndpointId) -> ProbeOutcome {
                 ProbeOutcome::Ok {
                     rtt: Duration::from_millis(30),

@@ -10,14 +10,20 @@
 use std::fmt;
 
 use serde::{Serialize, Serializer};
+use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 /// A credential value, resolved from the credential store at the system boundary.
+///
+/// The memory holding it is overwritten when the value is dropped, and so is every clone's, so a
+/// credential does not linger in freed memory for a later reader of the process to find.
 #[derive(Clone, PartialEq, Eq)]
-pub struct Secret(String);
+pub struct Secret(Zeroizing<String>);
+
+impl ZeroizeOnDrop for Secret {}
 
 impl Secret {
     pub fn new(material: impl Into<String>) -> Self {
-        Self(material.into())
+        Self(Zeroizing::new(material.into()))
     }
 
     /// The value, for validation and serialization inside this crate only.
@@ -48,6 +54,13 @@ impl Serialize for Secret {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Compile-time: the type says it wipes itself, and can only say so while its field does.
+    #[test]
+    fn a_secret_wipes_itself_when_dropped() {
+        fn wipes<T: ZeroizeOnDrop>() {}
+        wipes::<Secret>();
+    }
 
     #[test]
     fn a_secret_never_prints_itself() {

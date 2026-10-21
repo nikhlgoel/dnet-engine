@@ -91,7 +91,7 @@ Say "staged under $stage"
 
 # A private %PROGRAMDATA%, for this script's processes only.
 $env:ProgramData = $pd
-$env:RUST_LOG = 'info,dnetd=debug,dnet_supervisor=debug,dnet_netstate=debug,dnet_probe=debug'
+$env:RUST_LOG = 'info,dnetd=debug,dnet_supervisor=trace,dnet_netstate=debug,dnet_probe=debug'
 
 # ------------------------------------------------------------------ import the lab endpoint
 $importLog = Join-Path $Results 'import.log'
@@ -103,7 +103,7 @@ if ($LASTEXITCODE -ne 0) { Stop-Gate "importing the lab endpoint failed (exit $L
 $exe = Join-Path $stage 'dnetd.exe'
 $out = Join-Path $Results 'dnetd.out.log'
 $err = Join-Path $Results 'dnetd.err.log'
-$daemon = Start-Process -FilePath $exe -ArgumentList '--console' -PassThru -WindowStyle Hidden `
+$daemon = Start-Process -FilePath $exe -ArgumentList '--console', '--no-path-watch', '--allow-untrusted-install' -PassThru -WindowStyle Hidden `
     -RedirectStandardOutput $out -RedirectStandardError $err
 Say "dnetd started (pid $($daemon.Id)); logs: $out"
 

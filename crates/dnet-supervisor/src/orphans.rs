@@ -62,7 +62,11 @@ mod win {
     fn full_image_path(pid: u32) -> Option<PathBuf> {
         // SAFETY: OpenProcess with a limited query right; the handle is closed by Owned.
         let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
-        let handle = Owned(handle);
+        image_path_of(&Owned(handle))
+    }
+
+    /// The full image path of the process an open handle refers to.
+    fn image_path_of(handle: &Owned) -> Option<PathBuf> {
         let mut buf = vec![0u16; 32_768];
         let mut size = buf.len() as u32;
         // SAFETY: `buf` holds `size` UTF-16 units; `size` is updated to the length written.
@@ -78,6 +82,13 @@ mod win {
         Some(PathBuf::from(String::from_utf16_lossy(
             &buf[..size as usize],
         )))
+    }
+
+    /// Whether a failure to open a process means it no longer exists. Only `ERROR_INVALID_PARAMETER`
+    /// does; access denied and the rest mean it may well be running and out of reach.
+    pub(super) fn is_gone(error: &windows::core::Error) -> bool {
+        const ERROR_INVALID_PARAMETER: u32 = 87;
+        error.code() == windows::core::HRESULT::from_win32(ERROR_INVALID_PARAMETER)
     }
 
     /// Process ids whose full image path matches one of `images`, excluding this process.
@@ -117,26 +128,78 @@ mod win {
         Ok(found)
     }
 
-    /// Terminate a process by id. A process that has already exited is not an error.
+    /// Terminate a process by id. A process that has already exited is not an error; one that
+    /// cannot be opened for any other reason is, because it may still be running.
     pub fn terminate(pid: u32) -> Result<(), SupervisorError> {
         // SAFETY: OpenProcess for termination; the handle is closed by Owned.
         let handle = match unsafe { OpenProcess(PROCESS_TERMINATE, false, pid) } {
             Ok(h) => Owned(h),
-            Err(_) => return Ok(()), // gone already
+            Err(e) if is_gone(&e) => return Ok(()),
+            Err(e) => {
+                return Err(SupervisorError::Runtime(format!(
+                    "opening pid {pid} to end it: {e}"
+                )))
+            }
         };
         // SAFETY: the handle carries PROCESS_TERMINATE.
         unsafe { TerminateProcess(handle.0, 1) }
             .map_err(|e| SupervisorError::Runtime(format!("terminating pid {pid}: {e}")))
     }
 
-    /// Find and terminate every orphaned core. Returns the ids that were terminated.
-    pub fn reap(images: &[PathBuf]) -> Result<Vec<u32>, SupervisorError> {
-        let pids = find_by_image(images)?;
-        for &pid in &pids {
-            terminate(pid)?;
-            tracing::warn!(pid, "reaped an orphaned core left by a previous run");
+    /// End `pid` if, and only if, it is still one of `images`. The check and the kill are made
+    /// through one handle: opening a second time by id after the scan would end whatever had been
+    /// given the id in between. `Ok(false)` is a process that is gone or is no longer ours.
+    pub(super) fn terminate_if_image(
+        pid: u32,
+        images: &[PathBuf],
+    ) -> Result<bool, SupervisorError> {
+        let rights = PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE;
+        // SAFETY: OpenProcess for query and termination; the handle is closed by Owned.
+        let handle = match unsafe { OpenProcess(rights, false, pid) } {
+            Ok(h) => Owned(h),
+            Err(e) if is_gone(&e) => return Ok(false),
+            Err(e) => {
+                return Err(SupervisorError::Runtime(format!(
+                    "opening pid {pid} to end it: {e}"
+                )))
+            }
+        };
+        let ours = image_path_of(&handle)
+            .is_some_and(|path| images.iter().any(|image| same_image(&path, image)));
+        if !ours {
+            return Ok(false);
         }
-        Ok(pids)
+        // SAFETY: the handle carries PROCESS_TERMINATE.
+        unsafe { TerminateProcess(handle.0, 1) }
+            .map_err(|e| SupervisorError::Runtime(format!("terminating pid {pid}: {e}")))?;
+        Ok(true)
+    }
+
+    /// Find and terminate every orphaned core. Returns the ids that were terminated.
+    ///
+    /// Every orphan is tried even if one cannot be ended: an orphan left running holds the adapter
+    /// or a port, and another one that could have been ended must not be left beside it. The first
+    /// failure is returned once all have been tried.
+    pub fn reap(images: &[PathBuf]) -> Result<Vec<u32>, SupervisorError> {
+        let mut reaped = Vec::new();
+        let mut first_failure = None;
+        for pid in find_by_image(images)? {
+            match terminate_if_image(pid, images) {
+                Ok(true) => {
+                    tracing::warn!(pid, "reaped an orphaned core left by a previous run");
+                    reaped.push(pid);
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::error!(pid, %error, "an orphaned core could not be ended");
+                    first_failure.get_or_insert(error);
+                }
+            }
+        }
+        match first_failure {
+            Some(error) => Err(error),
+            None => Ok(reaped),
+        }
     }
 }
 
@@ -157,6 +220,56 @@ mod tests {
             Path::new(r"C:\Program Files\DNet Engine\core.exe"),
             Path::new(r"C:\Other\core.exe"),
         ));
+    }
+
+    /// Only "there is no such process" means the orphan is gone. Every other refusal (access
+    /// denied above all) means it may still be running, and saying "gone" would leave it holding
+    /// the adapter and the ports while the service believes the way is clear.
+    #[cfg(windows)]
+    #[test]
+    fn only_no_such_process_means_gone() {
+        use windows::core::{Error, HRESULT};
+        let win32 = |code: u32| Error::from(HRESULT::from_win32(code));
+        assert!(
+            win::is_gone(&win32(87)),
+            "ERROR_INVALID_PARAMETER: no such pid"
+        );
+        assert!(
+            !win::is_gone(&win32(5)),
+            "ERROR_ACCESS_DENIED: still running"
+        );
+        assert!(!win::is_gone(&win32(6)));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ending_a_process_that_does_not_exist_is_not_an_error() {
+        // 0xFFFFFFF0 is not a process id any system hands out.
+        terminate(0xFFFF_FFF0).expect("a process that is gone is not an error");
+    }
+
+    /// The id may have been given to another program since the scan. Whatever has it now is not
+    /// ours to end, however the id came to be asked about.
+    #[cfg(windows)]
+    #[test]
+    fn a_process_that_is_not_one_of_ours_is_left_alone() {
+        let mut bystander = std::process::Command::new("cmd")
+            .args(["/C", "ping -n 30 127.0.0.1 > nul"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let someone_elses = [std::path::PathBuf::from(
+            r"C:\Program Files\DNet Engine\core.exe",
+        )];
+
+        let ended = win::terminate_if_image(bystander.id(), &someone_elses).unwrap();
+
+        let still_running = bystander.try_wait().unwrap().is_none();
+        let _ = bystander.kill();
+        let _ = bystander.wait();
+        assert!(!ended, "reported as ended");
+        assert!(still_running, "a process that is not one of ours was ended");
     }
 
     /// Helper process for the reaping test: a copy of this test binary runs only this
