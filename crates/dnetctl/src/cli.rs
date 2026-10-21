@@ -29,6 +29,8 @@ pub enum Command {
     },
     Profiles,
     Endpoints,
+    /// Which versions of the protocol this program and the service speak.
+    Version,
     Help,
 }
 
@@ -55,6 +57,7 @@ commands:
   events                 show what the service did and why (--follow to keep watching)
   profiles               list the connection profiles
   endpoints              list the configured endpoints
+  version                show this program's version and the service's, and whether they match
   help                   show this text
 
 options:
@@ -70,7 +73,7 @@ options:
                          or an administrator. Without it a process posing as the service is refused.
 
 exit codes: 0 done | 1 refused or failed | 2 usage | 3 service not reachable | 4 timed out |
-            5 unexpected reply";
+            5 unexpected reply | 6 this program and the service cannot talk (update one)";
 
 fn command_named(name: &str) -> Option<Command> {
     Some(match name {
@@ -84,6 +87,7 @@ fn command_named(name: &str) -> Option<Command> {
         "events" => Command::Events { follow: false },
         "profiles" => Command::Profiles,
         "endpoints" => Command::Endpoints,
+        "version" | "--version" | "-V" => Command::Version,
         "help" | "--help" | "-h" => Command::Help,
         _ => return None,
     })

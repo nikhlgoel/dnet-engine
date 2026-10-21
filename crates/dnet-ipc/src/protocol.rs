@@ -37,6 +37,8 @@ pub enum RequestClass {
 /// means "choose for me", the single-control path (FR-036).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
+    /// The protocol versions the service speaks (T132). Answered by the dispatch itself.
+    GetVersion,
     GetState,
     GetSession,
     ListEndpoints,
@@ -71,9 +73,8 @@ impl Request {
     pub fn class(&self) -> RequestClass {
         use Request::*;
         match self {
-            GetState | GetSession | ListEndpoints | ListProfiles | ListRules | GetDiagnostics => {
-                RequestClass::ReadOnly
-            }
+            GetVersion | GetState | GetSession | ListEndpoints | ListProfiles | ListRules
+            | GetDiagnostics => RequestClass::ReadOnly,
             Subscribe => RequestClass::Stream,
             Connect { .. }
             | Disconnect
@@ -630,6 +631,7 @@ pub fn decode_request(wire: &str) -> Result<Request, IpcError> {
         .ok_or_else(|| invalid("missing `request`"))?;
 
     let request = match name {
+        "GetVersion" => Request::GetVersion,
         "GetState" => Request::GetState,
         "GetSession" => Request::GetSession,
         "ListEndpoints" => Request::ListEndpoints,
@@ -666,6 +668,7 @@ pub fn decode_request(wire: &str) -> Result<Request, IpcError> {
 /// encodes here decodes to the same value.
 pub fn encode_request(request: &Request) -> String {
     let name = match request {
+        Request::GetVersion => "GetVersion",
         Request::GetState => "GetState",
         Request::GetSession => "GetSession",
         Request::ListEndpoints => "ListEndpoints",

@@ -11,6 +11,7 @@ pub mod frame;
 pub mod protocol;
 pub mod server;
 pub mod service;
+pub mod version;
 pub mod wire;
 
 #[cfg(windows)]

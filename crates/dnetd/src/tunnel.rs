@@ -19,6 +19,7 @@
 //!
 //! Everything the OS does is behind [`TunnelHost`], whose real implementation is Windows-only.
 
+use std::future::Future;
 use std::net::IpAddr;
 
 use dnet_core::profile::CoreBinding;
@@ -51,6 +52,13 @@ pub trait TunnelHost: Send + Sync + 'static {
     /// Called after every attempt to start the cores, whatever the outcome, and when stopping.
     /// Removing what is not there is not an error.
     fn discard_config(&self);
+
+    /// Drop the system resolver's cache (T130). The primary core answers name lookups with fake
+    /// addresses and remembers which name each one stands for, in memory; that table dies with the
+    /// core, but the system resolver keeps the fake addresses it was told. A cached one then leads an
+    /// application to an address the next tunnel cannot answer for, or has given to a different
+    /// name. Best effort: a failure is logged and never stops a start or a stop.
+    fn flush_resolver_cache(&self) -> impl Future<Output = ()> + Send;
 }
 
 /// The objects one connection runs on.
@@ -134,19 +142,23 @@ impl<H: TunnelHost> Tunnels<H> {
             peer_touched: false,
         };
 
+        // Nothing the resolver learned before this point can be answered for by the core about to
+        // start: the previous tunnel is gone, or a daemon that died never got to clean up.
+        self.host.flush_resolver_cache().await;
+
         let started = start_cores(&running.runtime, plan.core).await;
         // Read by the core by now, or never going to be.
         self.host.discard_config();
         if let Err(error) = started {
             tracing::error!(%error, "the cores did not start");
-            take_down(running).await;
+            self.down(running).await;
             return Err(cause_of(&error, plan.core));
         }
         if let Some((bringup, route)) = &running.peer {
             running.peer_touched = true;
             if let Err(error) = bring_up(bringup, route).await {
                 tracing::error!(%error, "the tunnel peer could not be configured");
-                take_down(running).await;
+                self.down(running).await;
                 // The peer is configured through the AmneziaWG core's control pipe.
                 return Err(FailureCause::CoreFailedPersistently {
                     core: CoreBinding::AmneziaWgCore,
@@ -160,9 +172,16 @@ impl<H: TunnelHost> Tunnels<H> {
     /// Take the tunnel down. Does nothing if none is up.
     pub async fn stop(&self) {
         if let Some(running) = self.active.lock().await.take() {
-            take_down(running).await;
+            self.down(running).await;
             self.host.discard_config();
         }
+    }
+
+    /// [`take_down`], then forget the fake addresses the cores handed out. After, not before: while
+    /// a core is alive it can still answer lookups with new ones.
+    async fn down(&self, running: Running<H::Runtime, H::Bringup>) {
+        take_down(running).await;
+        self.host.flush_resolver_cache().await;
     }
 }
 
@@ -333,6 +352,9 @@ mod tests {
             note(&self.log, "discard");
             *self.discarded.lock().unwrap() += 1;
         }
+        async fn flush_resolver_cache(&self) {
+            note(&self.log, "flush");
+        }
         fn prepare(&self, plan: &TunnelPlan) -> Result<Prepared<FakeRuntime, FakeBringup>, String> {
             note(&self.log, "prepare");
             self.prepare.clone()?;
@@ -406,6 +428,7 @@ mod tests {
             [
                 "gateway",
                 "prepare",
+                "flush",
                 "reap",
                 "spawn:AmneziaWgCore",
                 "adapter",
@@ -430,7 +453,14 @@ mod tests {
 
         assert_eq!(
             seen(&log),
-            ["gateway", "prepare", "reap", "spawn:PrimaryCore", "discard"]
+            [
+                "gateway",
+                "prepare",
+                "flush",
+                "reap",
+                "spawn:PrimaryCore",
+                "discard"
+            ]
         );
     }
 
@@ -496,7 +526,13 @@ mod tests {
         let start = log.iter().position(|e| e == "spawn:PrimaryCore").unwrap();
         assert_eq!(
             &log[start + 1..],
-            ["discard", "kill:PrimaryCore", "kill:AmneziaWgCore", "undo"]
+            [
+                "discard",
+                "kill:PrimaryCore",
+                "kill:AmneziaWgCore",
+                "undo",
+                "flush"
+            ]
         );
         assert!(!tunnels.is_up().await);
     }
@@ -526,7 +562,8 @@ mod tests {
                 "route-",
                 "kill:PrimaryCore",
                 "kill:AmneziaWgCore",
-                "undo"
+                "undo",
+                "flush"
             ]
         );
         assert!(!tunnels.is_up().await);
@@ -587,10 +624,112 @@ mod tests {
                 "kill:PrimaryCore",
                 "kill:AmneziaWgCore",
                 "undo",
+                "flush",
                 "discard"
             ]
         );
         assert!(!tunnels.is_up().await);
+    }
+
+    // ------------------------------------------------------------------ the resolver cache (T130)
+
+    fn count(log: &Log, what: &str) -> usize {
+        seen(log).iter().filter(|e| *e == what).count()
+    }
+
+    /// The core's FakeIP table dies with it, but the system resolver keeps handing out the fake
+    /// addresses it learned. Left alone, an application would be sent to an address nothing in the
+    /// next tunnel can answer for, or one the new table has given to a different name.
+    #[tokio::test]
+    async fn stopping_flushes_the_resolver_cache_after_the_cores_are_gone() {
+        let log = log();
+        let tunnels = Tunnels::new(FakeHost::new(&log));
+        tunnels
+            .start(&plan(CoreBinding::PrimaryCore))
+            .await
+            .unwrap();
+        log.lock().unwrap().clear();
+
+        tunnels.stop().await;
+
+        let log = seen(&log);
+        let kill = log.iter().position(|e| e == "kill:PrimaryCore").unwrap();
+        let flush = log.iter().position(|e| e == "flush").unwrap();
+        assert!(
+            flush > kill,
+            "flushed while the core could still answer: {log:?}"
+        );
+    }
+
+    /// A daemon that died mid-session leaves fake addresses in the cache and never got to flush.
+    #[tokio::test]
+    async fn starting_flushes_the_resolver_cache_before_any_core_is_started() {
+        let log = log();
+        let tunnels = Tunnels::new(FakeHost::new(&log));
+
+        tunnels
+            .start(&plan(CoreBinding::PrimaryCore))
+            .await
+            .unwrap();
+
+        let log = seen(&log);
+        let flush = log.iter().position(|e| e == "flush").unwrap();
+        let reap = log.iter().position(|e| e == "reap").unwrap();
+        assert!(flush < reap, "{log:?}");
+    }
+
+    #[tokio::test]
+    async fn a_start_that_fails_after_the_core_ran_flushes_again() {
+        let log = log();
+        let tunnels = Tunnels::new(FakeHost::new(&log).with(|f| f.start_peer = true));
+
+        tunnels
+            .start(&plan(CoreBinding::AmneziaWgCore))
+            .await
+            .unwrap_err();
+
+        let log_now = seen(&log);
+        assert_eq!(count(&log, "flush"), 2, "{log_now:?}");
+        let last_kill = log_now
+            .iter()
+            .rposition(|e| e.starts_with("kill:"))
+            .unwrap();
+        let last_flush = log_now.iter().rposition(|e| e == "flush").unwrap();
+        assert!(last_flush > last_kill, "{log_now:?}");
+    }
+
+    #[tokio::test]
+    async fn starting_over_a_running_tunnel_flushes_once_not_twice() {
+        let log = log();
+        let tunnels = Tunnels::new(FakeHost::new(&log));
+        tunnels
+            .start(&plan(CoreBinding::PrimaryCore))
+            .await
+            .unwrap();
+        log.lock().unwrap().clear();
+
+        tunnels
+            .start(&plan(CoreBinding::PrimaryCore))
+            .await
+            .unwrap();
+
+        assert_eq!(count(&log, "flush"), 1, "{:?}", seen(&log));
+    }
+
+    #[tokio::test]
+    async fn nothing_is_flushed_when_nothing_was_started() {
+        let log = log();
+        let mut host = FakeHost::new(&log);
+        host.gateway = Err(NetstateError::Operation("no route".into()));
+        let tunnels = Tunnels::new(host);
+
+        tunnels
+            .start(&plan(CoreBinding::PrimaryCore))
+            .await
+            .unwrap_err();
+        tunnels.stop().await;
+
+        assert_eq!(count(&log, "flush"), 0);
     }
 
     #[tokio::test]

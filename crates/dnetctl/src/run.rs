@@ -6,7 +6,12 @@
 //! **What an exit code means** (the scripts' view of the same answer the prose gives):
 //! 0 done; 1 the service refused or the connection failed; 2 usage; 3 the service cannot be
 //! reached; 4 timed out waiting (the work carries on in the service); 5 the reply was not one this
-//! client understands.
+//! client understands; 6 this program and the service do not speak a common protocol version.
+//!
+//! **Every command starts by asking the service which protocol it speaks** (T132) and goes no
+//! further if the two cannot talk, because anything sent after that would be read by a service that
+//! may not mean what this program means. `dnetctl version` is the exception: it is how a person
+//! finds out why, so it reports the mismatch instead of stopping at it.
 //!
 //! Waiting is polling `GetState`, not a subscription: it needs no second connection, works with
 //! the subscriber limit reached, and a state is an answer where an event is only a hint.
@@ -15,10 +20,11 @@ use std::future::Future;
 use std::time::Duration;
 
 use dnet_core::ids::ProfileId;
-use dnet_ipc::client::{ClientError, Connection, Reply};
+use dnet_ipc::client::{check_version, ClientError, Connection, Reply, VersionCheck};
 use dnet_ipc::protocol::{
     decode_request, decode_state_snapshot, encode_request, ConnectionStatus, Request, StateSnapshot,
 };
+use dnet_ipc::version::{self, ServiceVersion};
 use dnet_ipc::wire::decode_event_view;
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -34,6 +40,7 @@ pub mod exit {
     pub const UNREACHABLE: i32 = 3;
     pub const TIMED_OUT: i32 = 4;
     pub const UNEXPECTED: i32 = 5;
+    pub const INCOMPATIBLE: i32 = 6;
 }
 
 /// How long one request may wait for its answer.
@@ -72,7 +79,102 @@ fn problem(sink: &mut dyn Sink, error: &ClientError) -> i32 {
     sink.err(&format!("dnetctl: {}", render::plain(&error.to_string())));
     match error {
         ClientError::Unreachable(_) => exit::UNREACHABLE,
+        ClientError::Incompatible(_) => exit::INCOMPATIBLE,
         _ => exit::UNEXPECTED,
+    }
+}
+
+/// Ask which protocol the service speaks and stop unless this program can talk to it. `Err` is the
+/// exit code, with the reason already printed.
+async fn negotiate<S: AsyncRead + AsyncWrite + Unpin>(
+    connection: &mut Connection<S>,
+    sink: &mut dyn Sink,
+) -> Result<ServiceVersion, i32> {
+    let reply = version_reply(connection)
+        .await
+        .map_err(|e| problem(sink, &e))?;
+    match check_version(reply) {
+        Ok(VersionCheck::Compatible(service)) => Ok(service),
+        Ok(VersionCheck::Refused(r)) => Err(refusal(sink, &r)),
+        Err(e) => Err(problem(sink, &e)),
+    }
+}
+
+async fn version_reply<S: AsyncRead + AsyncWrite + Unpin>(
+    connection: &mut Connection<S>,
+) -> Result<Reply, ClientError> {
+    match tokio::time::timeout(REQUEST_TIMEOUT, connection.call(&Request::GetVersion)).await {
+        Err(_) => Err(ClientError::Io(
+            "the service did not answer in time".to_string(),
+        )),
+        Ok(reply) => reply,
+    }
+}
+
+/// `dnetctl version`: both ends' versions, and whether they can talk. A mismatch is reported, not
+/// refused, because finding out about it is what this command is for.
+async fn version<S: AsyncRead + AsyncWrite + Unpin>(
+    connection: &mut Connection<S>,
+    json: bool,
+    sink: &mut dyn Sink,
+) -> i32 {
+    let reply = match version_reply(connection).await {
+        Ok(reply) => reply,
+        Err(e) => return problem(sink, &e),
+    };
+    let value = match reply {
+        Reply::Done(value) => value,
+        // An older service answers `InvalidRequest`; anything else is an ordinary refusal.
+        Reply::Refused(r) => {
+            return match check_version(Reply::Refused(r)) {
+                Ok(VersionCheck::Refused(r)) => refusal(sink, &r),
+                Ok(VersionCheck::Compatible(_)) => unreachable!("a refusal is not compatible"),
+                Err(e) => problem(sink, &e),
+            };
+        }
+    };
+    let service = match version::decode(&value) {
+        Ok(service) => service,
+        Err(why) => return problem(sink, &ClientError::Malformed(why)),
+    };
+    let verdict = version::check(version::PROTOCOL_VERSION, &service);
+    if json {
+        sink.out(&pretty(&serde_json::json!({
+            "client": {
+                "version": env!("CARGO_PKG_VERSION"),
+                "protocol_version": version::PROTOCOL_VERSION,
+            },
+            "service": {
+                "version": service.service,
+                "protocol_version": service.protocol,
+                "min_protocol_version": service.min_protocol,
+            },
+            "compatible": verdict.is_ok(),
+        })));
+    } else {
+        sink.out(&format!(
+            "dnetctl:  {} (speaks protocol {})",
+            env!("CARGO_PKG_VERSION"),
+            version::PROTOCOL_VERSION
+        ));
+        sink.out(&format!(
+            "service:  {} (speaks protocol {} to {})",
+            render::plain(&service.service),
+            service.min_protocol,
+            service.protocol
+        ));
+    }
+    match verdict {
+        Ok(()) => {
+            if !json {
+                sink.out("They can talk to each other.");
+            }
+            exit::OK
+        }
+        Err(e) => {
+            sink.err(&format!("dnetctl: {e}"));
+            exit::INCOMPATIBLE
+        }
     }
 }
 
@@ -162,8 +264,16 @@ pub async fn run<C: Connector>(
         Err(e) => return problem(sink, &e),
     };
 
+    if invocation.command == Command::Version {
+        return version(&mut connection, invocation.json, sink).await;
+    }
+    if let Err(code) = negotiate(&mut connection, sink).await {
+        return code;
+    }
+
     match invocation.command {
         Command::Help => unreachable!("handled above"),
+        Command::Version => unreachable!("handled above"),
         Command::Status => status(&mut connection, invocation.json, sink).await,
         Command::Profiles => list(&mut connection, Request::ListProfiles, &invocation, sink).await,
         Command::Endpoints => {

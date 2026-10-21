@@ -52,12 +52,23 @@ pub fn dispatch_frame(
 ) -> String {
     match decode_request(payload) {
         Ok(request) => match authorize(request.class(), identity, console) {
-            Ok(()) => service
-                .dispatch(&request)
-                .unwrap_or_else(|e| encode_ipc_error(&e)),
+            Ok(()) => answered_here(&request).unwrap_or_else(|| {
+                service
+                    .dispatch(&request)
+                    .unwrap_or_else(|e| encode_ipc_error(&e))
+            }),
             Err(e) => encode_ipc_error(&e),
         },
         Err(e) => encode_ipc_error(&e),
+    }
+}
+
+/// The requests the server answers itself, because the answer depends on no state: the protocol
+/// version (T132). Only reached for a caller already authorized to ask.
+fn answered_here(request: &Request) -> Option<String> {
+    match request {
+        Request::GetVersion => Some(crate::version::reply()),
+        _ => None,
     }
 }
 
@@ -92,6 +103,9 @@ pub fn dispatch_request(
             Ok(subscription) => Reply::Stream(subscription),
             Err(e) => Reply::Response(encode_ipc_error(&e)),
         };
+    }
+    if let Some(answer) = answered_here(&request) {
+        return Reply::Response(answer);
     }
     Reply::Response(
         service

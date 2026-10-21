@@ -22,7 +22,7 @@ dnet-netstate = { workspace = true }
 dnet-probe = { workspace = true }
 dnet-provision = { workspace = true }
 anyhow = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time", "sync", "net"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time", "sync", "net", "process"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 serde_json = { workspace = true }

@@ -216,6 +216,48 @@ impl TunnelHost for WindowsHost {
             }
         }
     }
+
+    async fn flush_resolver_cache(&self) {
+        let program = resolver_flush_program(std::env::var_os("SystemRoot"));
+        let mut command = tokio::process::Command::new(&program);
+        command
+            .arg("/flushdns")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            // A flush that overruns is abandoned, and must not outlive the wait for it.
+            .kill_on_drop(true);
+        match tokio::time::timeout(RESOLVER_FLUSH_TIMEOUT, command.status()).await {
+            Ok(Ok(status)) if status.success() => {
+                tracing::debug!("flushed the system resolver cache");
+            }
+            Ok(Ok(status)) => {
+                tracing::warn!(code = ?status.code(), "the system resolver cache was not flushed");
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(kind = ?error.kind(), "the system resolver cache could not be flushed");
+            }
+            Err(_) => tracing::warn!("flushing the system resolver cache took too long"),
+        }
+    }
+}
+
+/// How long the resolver flush may take. It is instant on a healthy machine; a stuck DNS Client
+/// service must not hold up a tunnel stop, which has a deadline of its own.
+const RESOLVER_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// `CREATE_NO_WINDOW`: no console window for a helper started by the service.
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// The program that flushes the resolver cache, by absolute path. A service running as SYSTEM must
+/// not find it by searching `PATH` or its working directory. `SystemRoot` is a machine-wide
+/// setting only an administrator can change; if it is missing the default location is used.
+fn resolver_flush_program(system_root: Option<OsString>) -> PathBuf {
+    let root = system_root
+        .filter(|root| !root.is_empty())
+        .map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from);
+    root.join("System32").join("ipconfig.exe")
 }
 
 // ------------------------------------------------------------------ the effects
@@ -533,5 +575,25 @@ fn is_elevated() -> bool {
         .is_ok();
         let _ = CloseHandle(token);
         ok && elevation.TokenIsElevated != 0
+    }
+}
+
+#[cfg(test)]
+mod flush_tests {
+    use super::*;
+
+    #[test]
+    fn the_flush_program_is_an_absolute_path_under_the_system_directory() {
+        assert_eq!(
+            resolver_flush_program(Some(OsString::from(r"D:\Win"))),
+            PathBuf::from(r"D:\Win\System32\ipconfig.exe")
+        );
+    }
+
+    #[test]
+    fn a_missing_or_empty_system_root_falls_back_to_the_default_location() {
+        let expected = PathBuf::from(r"C:\Windows\System32\ipconfig.exe");
+        assert_eq!(resolver_flush_program(None), expected);
+        assert_eq!(resolver_flush_program(Some(OsString::new())), expected);
     }
 }

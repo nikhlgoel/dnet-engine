@@ -141,6 +141,24 @@ function Get-Problems([bool]$NeedElevation) {
         $p.Add("A /32 route to $EndpointIp already exists; it would mask a loop.")
     }
 
+    # A run that died before it restored leaves the real adapter on the fixed metric the lab sets.
+    # The next run would then save that as the "original" and put it back, for ever: found when a
+    # Wi-Fi adapter stayed at 9000 after a stuck run.
+    $stuck = Get-NetIPInterface -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+        Where-Object { $_.ConnectionState -eq 'Connected' -and $_.AutomaticMetric -eq 'Disabled' -and
+            $_.InterfaceMetric -ge 9000 -and $_.InterfaceAlias -notlike $SwitchPat }
+    foreach ($i in $stuck) {
+        $p.Add("Interface '$($i.InterfaceAlias)' has a fixed metric of $($i.InterfaceMetric), which the lab sets and an earlier run did not undo. " +
+               "Put it back first (elevated): Set-NetIPInterface -InterfaceIndex $($i.ifIndex) -AddressFamily IPv4 -AutomaticMetric Enabled")
+    }
+
+    # The endpoint Launch starts is a wsl.exe process holding this file open. One left over from an
+    # interrupted run makes the next Launch fail with a sharing violation; Restore stops it.
+    $emptyIn = Join-Path ([IO.Path]::GetTempPath()) 'wsl-lab-empty.in'
+    try { [IO.File]::Open($emptyIn, 'OpenOrCreate', 'ReadWrite', 'None').Dispose() }
+    catch [System.IO.IOException] { $p.Add("An endpoint from an earlier run is still running (it holds $emptyIn). Run -Phase Restore, which stops it.") }
+    catch { }
+
     $distros = (Invoke-Wsl @('-l', '-q')) -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ }
     if ($distros -notcontains $Distro) { $p.Add("WSL distro '$Distro' is not installed (wsl -l -q shows: $($distros -join ', ')).") }
 
@@ -340,7 +358,8 @@ switch ($Phase) {
         $problems = @(Get-Problems $true)
         if ($problems.Count) { $problems | ForEach-Object { Write-Host "PROBLEM: $_" -ForegroundColor Red }; exit 2 }
         Remove-LabTasks
-        Remove-Item $LogFile -Force -ErrorAction SilentlyContinue
+        # Kept, not deleted: a run that fails is the one whose log is wanted.
+        if (Test-Path $LogFile) { Move-Item $LogFile "$LogFile.prev" -Force -ErrorAction SilentlyContinue }
         $mySid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
         Repair-Results $mySid
 
@@ -379,6 +398,20 @@ switch ($Phase) {
                 Tee-Object -FilePath (Join-Path $Here 'wsl-lab-connect-driver.log') | ForEach-Object { Log "driver: $_" }
             $driverExit = $LASTEXITCODE
             Log "driver exit code $driverExit"
+            # The gate never came up: waiting out the watchdog (10 minutes) tells the person nothing
+            # and leaves the host offline. Stop now, put networking back, and say what to read.
+            if ($driverExit -ne 0 -and -not (Test-Path $ReadyFile)) {
+                Log 'launch: the gate never signalled ready; stopping the lab now instead of waiting for the watchdog'
+                Stop-ScheduledTask -TaskName $RunTask -ErrorAction SilentlyContinue
+                try { Invoke-Restore } catch { Log "ERROR while restoring: $_" }
+                try { [void](Save-VmDiagnostics) } catch { }
+                $ep.Process.Kill()
+                Invoke-Wsl @('--terminate', $Distro) | Out-Null
+                Remove-LabTasks
+                Repair-Results $mySid
+                Write-Host "The gate never became ready, so the lab was stopped and networking put back. Read $LogFile for the step that stalled." -ForegroundColor Red
+                exit 5
+            }
         }
 
         if ($NoWait) { Write-Host "Not waiting. Follow $LogFile; the line '$Finished' marks the end."; break }
@@ -410,6 +443,8 @@ switch ($Phase) {
 
     'Run' {
         try {
+            # Every step is timestamped by `Log`, so a stall shows where it was.
+            Log 'run: started as SYSTEM'
             if (-not (Test-System)) { throw 'Run must execute as LocalSystem (BUG-007); it is started by Launch.' }
             $wsl = Get-Switch
             if (-not $wsl) { throw 'No "vEthernet (WSL" adapter; is the WSL VM running?' }
@@ -428,6 +463,7 @@ switch ($Phase) {
             # The record is durable BEFORE the first change, so any later failure can be undone.
             [IO.File]::WriteAllText($StateFile, ($state | ConvertTo-Json -Depth 4), $Utf8NoBom)
 
+            Log 'run: network state recorded; changing the default route'
             # Every other default route loses to the VM by metric; none is deleted.
             foreach ($i in $state.Interfaces) {
                 if ($i.Index -ne $wsl.ifIndex) { Set-NetIPInterface -InterfaceIndex $i.Index -AddressFamily IPv4 -InterfaceMetric 9000 }
@@ -438,6 +474,7 @@ switch ($Phase) {
             $via = Find-NetRoute -RemoteIPAddress $EndpointIp | Where-Object { $_.PSObject.Properties['NextHop'] -and $_.NextHop } | Select-Object -First 1
             Log "route to $EndpointIp : $($via.DestinationPrefix) via $($via.NextHop) on ifIndex $($via.InterfaceIndex)"
 
+            Log "run: checking that $EndpointIp answers"
             $ok = Test-Connection -ComputerName $EndpointIp -Count 2 -Quiet
             if (-not $ok) { throw "$EndpointIp does not answer through the VM; not running the gate." }
             Log 'endpoint answers through the VM; running the gate as SYSTEM'
@@ -481,6 +518,10 @@ switch ($Phase) {
         if (-not (Test-Role Administrator)) { throw 'Restore needs an elevated PowerShell.' }
         Stop-ScheduledTask -TaskName $RunTask -ErrorAction SilentlyContinue
         Invoke-Restore
+        # The endpoint Launch started is a wsl.exe process; an interrupted Launch cannot stop it, and it
+        # would hold the lab's input file and block the next run. The distro is the lab's alone.
+        Invoke-Wsl @('--terminate', $Distro) | Out-Null
+        Log "restore: stopped the lab endpoint ($Distro)"
         Repair-Results ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value)
         Remove-LabTasks
     }

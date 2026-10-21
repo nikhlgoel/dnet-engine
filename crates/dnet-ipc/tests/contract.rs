@@ -74,6 +74,7 @@ fn framed(payload: &[u8]) -> Vec<u8> {
 fn ipc01_request_classes_match_the_contract_table() {
     use Request::*;
     for r in [
+        GetVersion,
         GetState,
         GetSession,
         ListEndpoints,
@@ -633,4 +634,77 @@ async fn ipc09_undecodable_frame_ends_the_connection() {
         .expect("server kept the connection open after an undecodable frame");
     assert!(joined.is_ok(), "server task panicked: {joined:?}");
     drop(client);
+}
+
+// ---------------------------------------------------------------------------------------------
+// IPC-15 — the protocol version (T132)
+// ---------------------------------------------------------------------------------------------
+
+/// A service that must not be asked: `GetVersion` is answered by the dispatch itself.
+struct MustNotBeAsked;
+
+impl dnet_ipc::service::Service for MustNotBeAsked {
+    fn console_session(&self) -> Option<ConsoleSession> {
+        Some(console())
+    }
+    fn dispatch(
+        &self,
+        request: &dnet_ipc::protocol::Request,
+    ) -> Result<String, dnet_ipc::protocol::IpcError> {
+        panic!("the service was asked for {request:?}");
+    }
+}
+
+#[test]
+fn ipc15_get_version_is_answered_for_any_authenticated_caller_without_asking_the_service() {
+    for identity in [console_client(), other_session_client()] {
+        let reply = dnet_ipc::server::dispatch_frame(
+            r#"{"request":"GetVersion"}"#,
+            &identity,
+            Some(&console()),
+            &MustNotBeAsked,
+        );
+        let value: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        let version = dnet_ipc::version::decode(&value).expect("a valid version reply");
+        assert_eq!(version.protocol, dnet_ipc::version::PROTOCOL_VERSION);
+        assert_eq!(
+            version.min_protocol,
+            dnet_ipc::version::MIN_PROTOCOL_VERSION
+        );
+    }
+}
+
+#[test]
+fn ipc15_get_version_is_not_told_to_an_unauthenticated_caller() {
+    let stranger = ClientIdentity {
+        authenticated: false,
+        ..other_session_client()
+    };
+    let reply = dnet_ipc::server::dispatch_frame(
+        r#"{"request":"GetVersion"}"#,
+        &stranger,
+        Some(&console()),
+        &MustNotBeAsked,
+    );
+    assert!(reply.contains("\"error\":\"Unauthorized\""), "{reply}");
+    assert!(!reply.contains("protocol_version"), "{reply}");
+}
+
+#[test]
+fn ipc15_the_version_reply_is_within_the_contract_shape() {
+    let value: serde_json::Value = serde_json::from_str(&dnet_ipc::version::reply()).unwrap();
+    let keys: HashSet<&str> = value
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        HashSet::from([
+            "protocol_version",
+            "min_protocol_version",
+            "service_version"
+        ])
+    );
 }

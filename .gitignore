@@ -123,6 +123,8 @@ $RECYCLE.BIN/
 testing/spike-r4/results/
 # The WSL lab's saved routing state and the client parameters it exports (test keys only).
 testing/spike-r4/wsl-lab-*
+# The lab's log, and the previous run's copy, which names the account that ran it.
+testing/spike-r4/wsl-lab.log*
 
 # ---------- AI assistant files: local tooling, not part of the project ----------
 # Skills, agent instructions and workflow scaffolding used while working on the project with an AI

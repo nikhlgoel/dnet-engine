@@ -225,7 +225,29 @@ impl Connector for Nobody {
     }
 }
 
-/// A connector whose daemon sends back whatever bytes it is told to.
+/// A connector whose daemon sends back whatever bytes it is told to, in answer to the first request
+/// it receives. Every command starts with a version check (T132), so this is the version stage.
+struct RawScripted(Vec<u8>);
+
+impl Connector for RawScripted {
+    type Stream = DuplexStream;
+    fn connect(
+        &self,
+        _trust_any_service: bool,
+    ) -> impl Future<Output = Result<Connection<DuplexStream>, ClientError>> {
+        let (client, mut server) = duplex(64 * 1024);
+        let bytes = self.0.clone();
+        tokio::spawn(async move {
+            let mut sink = [0u8; 512];
+            let _ = server.read(&mut sink).await;
+            let _ = server.write_all(&bytes).await;
+        });
+        std::future::ready(Ok(Connection::new(client)))
+    }
+}
+
+/// A connector whose daemon passes the version check and then sends back whatever bytes it is told
+/// to in answer to the next request: for the stage after the handshake.
 struct Scripted(Vec<u8>);
 
 impl Connector for Scripted {
@@ -239,7 +261,71 @@ impl Connector for Scripted {
         tokio::spawn(async move {
             let mut sink = [0u8; 512];
             let _ = server.read(&mut sink).await;
+            let version = frame::encode(&dnet_ipc::version::reply()).unwrap();
+            let _ = server.write_all(&version).await;
+            let _ = server.read(&mut sink).await;
             let _ = server.write_all(&bytes).await;
+        });
+        std::future::ready(Ok(Connection::new(client)))
+    }
+}
+
+/// A daemon that reports a given version reply, then answers anything else with `{}`, recording
+/// the name of each request it receives.
+struct Versioned {
+    reply: String,
+    seen: Arc<Mutex<Vec<String>>>,
+}
+
+impl Versioned {
+    fn reporting(min: u32, newest: u32) -> Self {
+        Self {
+            reply: format!(
+                r#"{{"protocol_version":{newest},"min_protocol_version":{min},"service_version":"9.9.9"}}"#
+            ),
+            seen: Arc::default(),
+        }
+    }
+}
+
+impl Connector for Versioned {
+    type Stream = DuplexStream;
+    fn connect(
+        &self,
+        _trust_any_service: bool,
+    ) -> impl Future<Output = Result<Connection<DuplexStream>, ClientError>> {
+        let (client, mut server) = duplex(64 * 1024);
+        let reply = self.reply.clone();
+        let seen = Arc::clone(&self.seen);
+        tokio::spawn(async move {
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 1024];
+            loop {
+                match frame::decode(&buf) {
+                    Ok(Some(found)) => {
+                        buf.drain(..found.consumed);
+                        let name = serde_json::from_str::<serde_json::Value>(&found.payload)
+                            .ok()
+                            .and_then(|v| v["request"].as_str().map(str::to_owned))
+                            .unwrap_or_default();
+                        let answer = if name == "GetVersion" {
+                            reply.clone()
+                        } else {
+                            "{}".to_owned()
+                        };
+                        seen.lock().unwrap().push(name);
+                        let bytes = frame::encode(&answer).unwrap();
+                        if server.write_all(&bytes).await.is_err() {
+                            return;
+                        }
+                    }
+                    Ok(None) => match server.read(&mut chunk).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    },
+                    Err(_) => return,
+                }
+            }
         });
         std::future::ready(Ok(Connection::new(client)))
     }
@@ -726,4 +812,148 @@ async fn an_event_stream_that_is_refused_says_why() {
         "{}",
         shown.err()
     );
+}
+
+// ------------------------------------------------------------------ the protocol version (T132)
+
+#[tokio::test(start_paused = true)]
+async fn a_service_that_cannot_talk_to_this_program_is_exit_6_and_nothing_else_is_sent() {
+    let service = Versioned::reporting(5, 7);
+
+    let (code, shown) = go_with(&["connect"], &service, pending()).await;
+
+    assert_eq!(code, exit::INCOMPATIBLE);
+    assert!(
+        shown.err().contains("Update this program"),
+        "{}",
+        shown.err()
+    );
+    assert!(shown.out.is_empty());
+    // The connect was never sent: a service that may not mean what we mean is not asked to act.
+    assert_eq!(*service.seen.lock().unwrap(), ["GetVersion"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn every_command_asks_for_the_version_before_anything_else() {
+    for args in [
+        &["status"][..],
+        &["profiles"],
+        &["endpoints"],
+        &["connect", "--no-wait"],
+        &["disconnect", "--no-wait"],
+        &["events"],
+    ] {
+        let service = Versioned::reporting(1, 1);
+        let _ = go_with(args, &service, pending()).await;
+        let seen = service.seen.lock().unwrap().clone();
+        assert_eq!(
+            seen.first().map(String::as_str),
+            Some("GetVersion"),
+            "{args:?}: {seen:?}"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_service_that_predates_version_checks_is_exit_6_and_says_to_update_it() {
+    let old = frame::encode(
+        r#"{"error":"InvalidRequest","detail":"invalid request: unknown request \"GetVersion\"","retryable":false}"#,
+    )
+    .unwrap();
+
+    let (code, shown) = go_with(&["status"], &RawScripted(old), pending()).await;
+
+    assert_eq!(code, exit::INCOMPATIBLE);
+    assert!(
+        shown.err().contains("Update the DNet Engine service"),
+        "{}",
+        shown.err()
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_version_reply_that_makes_no_sense_is_exit_5_and_is_not_echoed() {
+    let nonsense = frame::encode(
+        r#"{"protocol_version":1,"min_protocol_version":1,"service_version":"SECRET WORDS"}"#,
+    )
+    .unwrap();
+
+    let (code, shown) = go_with(&["status"], &RawScripted(nonsense), pending()).await;
+
+    assert_eq!(code, exit::UNEXPECTED);
+    assert!(!shown.err().contains("SECRET"), "{}", shown.err());
+    assert!(shown.out.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_busy_service_refuses_the_version_check_with_its_reason() {
+    let busy =
+        frame::encode(r#"{"error":"ServiceBusy","detail":"try later","retryable":true}"#).unwrap();
+
+    let (code, shown) = go_with(&["status"], &RawScripted(busy), pending()).await;
+
+    assert_eq!(code, exit::REFUSED);
+    assert!(shown.err().contains("try later"), "{}", shown.err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn version_shows_both_ends_and_says_they_can_talk() {
+    let stub = Stub::new(vec![]);
+
+    let (code, shown) = go(&["version"], &stub).await;
+
+    assert_eq!(code, exit::OK);
+    let text = shown.out();
+    assert!(text.contains("dnetctl:"), "{text}");
+    assert!(text.contains("service:"), "{text}");
+    assert!(text.contains("They can talk to each other."), "{text}");
+    assert!(
+        stub.log().is_empty(),
+        "the version never reaches the service's own code"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn version_as_json_is_one_object_a_script_can_read() {
+    let stub = Stub::new(vec![]);
+
+    let (code, shown) = go(&["version", "--json"], &stub).await;
+
+    assert_eq!(code, exit::OK);
+    let value: serde_json::Value = serde_json::from_str(&shown.out()).unwrap();
+    assert_eq!(value["compatible"], true);
+    assert_eq!(
+        value["client"]["protocol_version"],
+        dnet_ipc::version::PROTOCOL_VERSION
+    );
+    assert!(value["service"]["version"].is_string());
+}
+
+#[tokio::test(start_paused = true)]
+async fn version_reports_a_mismatch_instead_of_stopping_at_it() {
+    let service = Versioned::reporting(5, 7);
+
+    let (code, shown) = go_with(&["version"], &service, pending()).await;
+
+    assert_eq!(code, exit::INCOMPATIBLE);
+    assert!(
+        shown.out().contains("speaks protocol 5 to 7"),
+        "{}",
+        shown.out()
+    );
+    assert!(
+        shown.err().contains("Update this program"),
+        "{}",
+        shown.err()
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_conventional_version_flags_work() {
+    for flag in ["--version", "-V"] {
+        let stub = Stub::new(vec![]);
+        let (code, shown) = go(&[flag], &stub).await;
+        assert_eq!(code, exit::OK, "{flag}");
+        assert!(shown.out().contains("dnetctl:"), "{flag}");
+    }
 }

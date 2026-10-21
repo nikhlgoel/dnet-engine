@@ -139,6 +139,29 @@ finally {
     } else {
         Say 'residue: none (no dnet adapter, no endpoint host route)'
     }
+
+    # T130. The primary core's FakeIP table dies with it, so the system resolver's cache is flushed
+    # around every tunnel. Two checks, because the second means nothing without the first: the flush
+    # ran and did not fail, and no connection arrived for a fake address the core had forgotten.
+    $logs = @($out, $err) | Where-Object { Test-Path $_ }
+    $flushed  = @($logs | ForEach-Object { Select-String -Path $_ -Pattern 'flushed the system resolver cache' -SimpleMatch }).Count
+    $notFlush = @($logs | ForEach-Object { Select-String -Path $_ -Pattern 'resolver cache could not be flushed', 'resolver cache was not flushed', 'resolver cache took too long' -SimpleMatch }).Count
+    $forgotten = @($logs | ForEach-Object { Select-String -Path $_ -Pattern 'missing fakeip record' -SimpleMatch }).Count
+    if ($flushed -eq 0 -or $notFlush -gt 0) {
+        Say "FAKEIP: the resolver cache was not flushed as expected ($flushed flushed, $notFlush failed or overran); the check below proves nothing"
+        $code = 6
+    } elseif ($forgotten -gt [math]::Floor($flushed / 4)) {
+        Say "FAKEIP: $forgotten connection(s) used a fake address the core no longer knew, more than 1 per 4 flushes ($flushed flushed)"
+        $code = 6
+    } else {
+        # Not zero by design. A program that keeps a resolved address in its own memory (a browser
+        # does, for about a minute) can still dial one from the previous session; the system cache
+        # is empty by then and nothing can reach into the program. The failed attempt is the safe
+        # outcome: the core refuses it and the program resolves the name again. Without the flush
+        # the first live run saw 3 in 4 cycles (about 0.75 per cycle), so a rate above 1 per 4
+        # flushes means the flush is not doing its job.
+        Say "fakeip: $flushed resolver flush(es), $forgotten stale-address connection(s) from programs holding old addresses (limit $([math]::Floor($flushed / 4)))"
+    }
     Say "daemon logs kept in $Results"
 }
 exit $code

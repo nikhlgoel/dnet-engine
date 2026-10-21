@@ -631,8 +631,26 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
 **Independent test**: HV-06, HV-07, HV-08.
 
 - [ ] T080 [US3] Implement OS IP-interface change notification subscription (not polling) in `crates/dnet-netstate/src/notify.rs` ([research.md](./research.md) §R9)
-- [ ] T081 [US3] Implement path quality EWMA smoothing so raw samples never drive transitions directly, in `crates/dnet-core/src/quality.rs` (FR-018)
-- [ ] T082 [US3] Implement the failover state machine with hysteresis and oscillation damping in `crates/dnet-core/src/failover.rs` (FR-016, FR-017, SC-007)
+- [x] T081 [US3] Implement path quality EWMA smoothing so raw samples never drive transitions directly, in `crates/dnet-core/src/quality.rs` (FR-018)
+  > **Built 2026-10-21 (not committed). 15 tests.** `PathQuality::observe(sample)` folds one probe (answered with an RTT, or lost) into
+  > the smoothed loss, RTT and jitter; RTT and jitter follow RFC 6298 exactly as `health.rs` does for endpoints, loss uses the same
+  > 1/8 weight. A lost sample never touches the RTT estimate. `band()` names the result `Good`, `Poor` or `Unusable` (defaults:
+  > loss ≥ 15 % or RTT ≥ 300 ms is Poor, loss ≥ 50 % is Unusable; one stray loss reads 12.5 % and is still Good, six in a row make
+  > a path Unusable). A band is memoryless on purpose and a signal sitting on a threshold can cross it on noise (a test says so);
+  > damping is the failover machine's job, not this module's.
+- [x] T082 [US3] Implement the failover state machine with hysteresis and oscillation damping in `crates/dnet-core/src/failover.rs` (FR-016, FR-017, SC-007)
+  > **Built 2026-10-21 (not committed). 27 tests, all mutation-checked.** Pure: paths and a time in, new state and a `Decision`
+  > (`Stay`, `Move{from,to,reason}`, `NoPath`) out. Nothing here acts on the decision (T083), and there is no way to express a direct route.
+  > - *Forced*: a link that is gone (role `Unusable`, or vanished) moves at once, ignoring every limit.
+  > - *Voluntary*: the carrying path must stay below Good for 10 s (Unusable: 4 s), the path moved to must have been Good for 30 s
+  >   unbroken (FR-017's "remains stable"; waived only when the carrying path is Unusable), 120 s must have passed since the last
+  >   move, and no more than 4 moves may have happened in the last 600 s. The last is SC-007 enforced directly, counting forced moves.
+  > - Property test: two paths swapping quality at nine different periods for an hour, with the real smoothing in the loop; no
+  >   600 s window holds more than 4 moves. **Negative control:** with the dwell and the budget removed the same test fails (120 moves in
+  >   10 minutes at a 5 s period). Dropping the stability proof fails 5 tests; making a lost link wait for the dwell fails 6.
+  > - Stated limit: a path that is up but dead upstream is a *voluntary* case, so after 4 moves in 10 minutes the machine stays on it
+  >   until the budget frees. Not yet done: Tier 2 should probably be more reluctant to move voluntarily than Tier 1, since a move
+  >   breaks its connections (FR-016a); decide with the HV-07/HV-08 results in T085, not before.
 - [ ] T083 [US3] Implement host-route rewrite **before** tunnel rebind on a carrying-path change, asserted by call ordering rather than timing, in `crates/dnet-netstate/src/rebind.rs` (AW-03, AWG-04)
 - [ ] T084 [US3] Implement honest degradation reporting when only one path is available and no move is possible, in `crates/dnet-core/src/degraded.rs` (FR-019, US3-5)
 - [ ] T085 **[GATE] SPIKE-R9 / Plan Phase 6 exit**: HV-07 — an open transfer survives an interface change on **both** Tier 1 profiles at the pinned core versions. HV-08 — the Tier 2 profile breaks **and the UI said so beforehand**. **Record each kind's HV-07 result, with the core versions, in `dnet_core::tier::recorded_survival`: only `Survived` makes a profile `Tier1`, and a failure leaves it `Tier2` in configuration and UI. The label follows the measurement, not the intention** ([research.md](./research.md) §R9). A later core pin bump resets the affected kinds to `NotMeasured` until HV-07 is re-run
@@ -863,7 +881,52 @@ polish phase only because the original list ended there; by dependency they belo
   >   The review closed two defects in the new code: private directories were not checked for a pre-planted owner or junction
   >   (now `dnet_config::write::prepare_private_dir`, refused before any change is made), and the reachability check sent TCP
   >   to UDP-only ports, a recognisable burst (now only TCP-carried ports, `plan::reach_ports`).
-- [ ] T130 FakeIP mappings do not survive a tunnel restart (see the T126 finding). Decide persist vs flush, implement, add a lab step that reconnects and checks the log stays free of `missing fakeip record`
+- [x] T130 FakeIP mappings do not survive a tunnel restart (see the T126 finding). Decide persist vs flush, implement, add a lab step that reconnects and checks the log stays free of `missing fakeip record`
+  > **Built and run live 2026-10-21 (`-Gate Connect`): driver PASS, 10 resolver flushes, 0 failed, 1 stale-address connection.**
+  > - **Decision: flush, not persist.** `experimental.cache_file` with `store_fakeip` would write every name the user looked up to
+  >   a file on disk, which is exactly what the diagnostics rules keep out (FR-035: no browsing destinations). It would also
+  >   bring back address-to-name pairs that a fresh pool can hand to a different name. The mappings are meant to die with the
+  >   core; what must not outlive it is the system resolver's copy of the fake addresses. No change to `contracts/core-config.md`.
+  > - `TunnelHost::flush_resolver_cache`: called after the cores are down on every stop and every failed start (never before:
+  >   a live core can still answer with new fake addresses), and before the cores start (a daemon that died mid-session
+  >   never flushed). Replacing a running tunnel flushes once, not twice. Nothing is flushed when nothing was started.
+  >   Best effort: a failure is a warning and never stops a start or a stop.
+  > - Windows: `%SystemRoot%\System32\ipconfig.exe /flushdns` by absolute path (no `PATH` or working-directory lookup from a
+  >   SYSTEM service), no console window, killed after 5 s. The underlying call (`DnsFlushResolverCache`) has no binding in
+  >   `windows`/`windows-sys`, and loading `dnsapi.dll` by name from a service would add a DLL-search risk, so the supported
+  >   command is used instead.
+  > - Tests (5 new in `tunnel`, 2 in `effects`): flush after the cores are gone, before any core starts, again after a failed
+  >   start, once when replacing a tunnel, never when nothing started. Mutation-checked: flushing before the teardown fails
+  >   5 tests, dropping the start-time flush fails 5.
+  > - Lab: `Invoke-ConnectGate.ps1` now judges the daemon log after the run. It fails if no flush was logged or any failed (so the
+  >   second check cannot pass vacuously), and if `missing fakeip record` appears more than once per four flushes.
+  > - **Live result, stated plainly.** The one miss left (`198.18.0.3`, 1.4 s after a flush) was `sync-v2.brave.com` in the
+  >   *previous* session; the new session had issued only `.2`. A browser keeps resolved addresses in its own memory, which no
+  >   system-wide flush can reach, so this residue is expected and the core's refusal is the safe outcome. **The baseline is too
+  >   noisy to claim an effect size:** earlier runs without a flush logged 8, 2 and 0 misses. What is firm is the mechanism: every
+  >   flush ran and none failed, and the one miss traces to a program's own cache. The threshold (1 per 4 flushes) is a guard
+  >   against the flush silently doing nothing, not a measured improvement.
+  > - **Residual risk, not fixed (T131):** every session's pool starts at `198.18.0.2`, so an address a program remembers can
+  >   later belong to a *different* name. Over HTTPS the certificate check stops it; over plain HTTP the program would reach the
+  >   wrong host, and the name it meant is revealed to it. Alternating the pool between `198.18.0.0/16` and `198.19.0.0/16` per
+  >   tunnel would turn that into the same harmless miss. It changes `contracts/core-config.md` (CC-02) and the deterministic
+  >   output (CC-09), so it needs its own task and a decision.
+- [ ] T131 Stop a remembered fake address from aliasing a different name in the next session: alternate the FakeIP pool between the two /16 halves of `198.18.0.0/15` (and the IPv6 pool) per tunnel start, keeping config generation deterministic for a given input (CC-09). Update `contracts/core-config.md` CC-02, the bypass-overlap guard test, and add a lab check that a stale address from the previous session is refused, not answered with another name
+- [x] T132 Give the control protocol a version and make every client check it (IPC-15)
+  > **Built 2026-10-21 (not committed). Found while sorting the product shape (ADR-0006): the protocol had no version at all.** A GUI or any other
+  > client is updated separately from the service, as with Docker Desktop and Docker Engine, so each must be able to tell whether the other still
+  > speaks its language. New read-only `GetVersion`, answered by `dnet-ipc`'s dispatch itself (after authorization, never reaching the service):
+  > `{protocol_version, min_protocol_version, service_version}`. A client speaking `c` can talk when `min <= c <= protocol_version`; outside that it stops
+  > and says which end to update. `dnet_ipc::version` holds the rule and a strict parser (integers from 1, `min <= newest`, the build string limited to 64
+  > plain characters, nothing echoed in errors). `dnet_ipc::client::check_version` judges the reply; a service that answers `InvalidRequest` predates the
+  > request and counts as incompatible, not as fine. `dnetctl` now asks first on every command and goes no further on a mismatch (new exit code 6), and
+  > has `dnetctl version` / `--version` / `-V` / `--json`, which reports a mismatch instead of stopping at it.
+  > - Tests: 8 in `version`, 6 in the client, 3 contract (IPC-15), 9 in `dnetctl`; the fakes that stood in for the daemon now pass the handshake, so the
+  >   tests that follow it still test the stage they were written for. **Mutation-checked:** answering before authorizing fails the unauthenticated test;
+  >   skipping the check in `dnetctl` fails 4 tests.
+  > - Security review: a new read-only request with a constant reply; no state, no privilege, no new input beyond the request name. The one new parse of
+  >   untrusted data is the client's reading of the reply, which is strict and bounded.
+  > - Not yet run live: the lab's `dnetctl` cycle will exercise it against the real service the next time `-Gate Connect` runs.
 - [x] T127 Implement `dnetctl` (connect, disconnect, status, events) so the whole path can be driven and tested before the tray exists
   > **Built 2026-10-21 (not committed); proven against the real daemon unprivileged, live gate run pending.**
   > - `dnet_ipc::client` (12 tests): the client half of the pipe, reusable by the tray. Replies are read as untrusted input

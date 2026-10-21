@@ -142,6 +142,7 @@ fn ipc10_consent_must_be_a_real_boolean() {
 #[test]
 fn ipc10_every_request_round_trips() {
     let all = [
+        Request::GetVersion,
         Request::GetState,
         Request::GetSession,
         Request::ListEndpoints,

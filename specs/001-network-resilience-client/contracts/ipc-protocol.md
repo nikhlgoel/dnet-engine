@@ -32,13 +32,35 @@ The privilege boundary lives here. `dnet-tray` is unprivileged; `dnetd` is Local
 
 | Class | Requests | Authorization |
 |---|---|---|
-| **Read-only** | `GetState`, `GetSession`, `ListEndpoints`, `ListProfiles`, `ListRules`, `GetDiagnostics` | Authenticated caller |
+| **Read-only** | `GetVersion`, `GetState`, `GetSession`, `ListEndpoints`, `ListProfiles`, `ListRules`, `GetDiagnostics` | Authenticated caller |
 | **Mutating** | `Connect`, `Disconnect`, `AddEndpoint`, `RemoveEndpoint`, `SetEndpointEnabled`, `AddRule`, `RemoveRule`, `SetProfileParams`, `EnableBrutal`, `SetEncryptedDnsHandling`, `StartProvisioning`, `CancelProvisioning` | Interactive console user |
 | **Stream** | `Subscribe` | Authenticated caller |
 
 ---
 
 ## Core messages
+
+### `GetVersion → ProtocolVersion` (T132)
+
+The first thing a client asks. The service answers it itself, to any authenticated caller, without
+consulting any state:
+
+```jsonc
+{ "protocol_version": 1, "min_protocol_version": 1, "service_version": "0.1.0" }
+```
+
+- `protocol_version` is the newest version the service speaks; `min_protocol_version` the oldest
+  client it still serves. A client speaking `c` can talk to it when `min_protocol_version <= c <=
+  protocol_version`; outside that range the client stops and tells the user which end to update.
+- `protocol_version` goes up when a change would break an existing client (a request or field removed
+  or changed in meaning, a rule an old client would trip over). Adding a request, or an optional field
+  a client may ignore, does not change it. `service_version` is for people, never for deciding.
+- Both numbers are integers from 1; `service_version` is at most 64 characters of letters, digits and
+  `. - + _`. A client treats the reply as untrusted input and refuses anything else.
+- A service that answers `GetVersion` with `InvalidRequest` predates this request; a client treats
+  it as incompatible rather than assuming it is fine.
+- This is the same idea as Docker's engine API version negotiation: the engine and the programs that
+  drive it are updated separately, and must be able to tell whether they still understand each other.
 
 ### `GetState → StateSnapshot`
 
@@ -158,3 +180,4 @@ defect.
 | IPC-12 | Every `ConnectionEvent` encodes with a `because` that explains it; a producer that supplies none is an error, not a blank. |
 | IPC-13 | The event bus replays the session, bounds its memory, numbers events and caps subscribers. |
 | IPC-14 | A subscription is one-way, bounded and ends when the client goes; verified over a real pipe in `pipe_stream.rs`. |
+| IPC-15 | `GetVersion` is answered by the dispatch itself for any authenticated caller, never reaches the service, and tells an unauthenticated caller nothing; the reply has exactly the contracted keys; a client refuses a reply that is malformed, out of range, or from a service that predates the request. |

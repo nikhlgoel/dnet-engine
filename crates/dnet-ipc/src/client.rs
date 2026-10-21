@@ -14,6 +14,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::frame;
 use crate::protocol::{encode_request, Request};
+use crate::version::ServiceVersion;
 
 /// Why a request could not be made or its reply not read. None of these carries more than a short
 /// description: no payload is echoed, because a reply may hold anything the daemon chose to say.
@@ -31,6 +32,9 @@ pub enum ClientError {
     /// The reply was not a frame this client accepts.
     #[error("the service sent something this client cannot read ({0})")]
     Malformed(String),
+    /// The service speaks a protocol this client cannot (T132). The text says which end to update.
+    #[error("{0}")]
+    Incompatible(String),
 }
 
 /// SYSTEM and Administrators: the accounts the service runs as (the first when installed, the
@@ -105,6 +109,41 @@ pub fn classify_reply(payload: &str) -> Result<Reply, ClientError> {
                     .unwrap_or(false),
             }))
         }
+    }
+}
+
+/// What asking for the service's protocol version came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VersionCheck {
+    /// This client's protocol version lies in the range the service serves.
+    Compatible(ServiceVersion),
+    /// The service declined to say (busy, not authorized): nothing is known about compatibility.
+    Refused(Refusal),
+}
+
+/// Judge the reply to `GetVersion` (T132). A client does this first, before anything else it sends
+/// depends on what the service understands.
+///
+/// - A version outside this client's range, or one the service reports in a shape this client does
+///   not accept, is an error that says what to do.
+/// - A service that does not know `GetVersion` (an `InvalidRequest` refusal) predates version
+///   checks and is reported as incompatible rather than assumed to be fine.
+pub fn check_version(reply: Reply) -> Result<VersionCheck, ClientError> {
+    match reply {
+        Reply::Done(value) => {
+            let service = crate::version::decode(&value).map_err(ClientError::Malformed)?;
+            crate::version::check(crate::version::PROTOCOL_VERSION, &service)
+                .map_err(|e| ClientError::Incompatible(e.to_string()))?;
+            Ok(VersionCheck::Compatible(service))
+        }
+        Reply::Refused(refusal) if refusal.code == "InvalidRequest" => {
+            Err(ClientError::Incompatible(
+                "the installed service is older than this program and does not report its \
+                 protocol version. Update the DNet Engine service."
+                    .to_owned(),
+            ))
+        }
+        Reply::Refused(refusal) => Ok(VersionCheck::Refused(refusal)),
     }
 }
 
@@ -528,5 +567,87 @@ mod tests {
             reply,
             Reply::Done(serde_json::json!({ "status": "Connected" }))
         );
+    }
+
+    // -------------------------------------------------- the protocol version (T132)
+
+    fn refused(code: &str, retryable: bool) -> Reply {
+        Reply::Refused(Refusal {
+            code: code.into(),
+            detail: "x".into(),
+            retryable,
+        })
+    }
+
+    /// The stub answers every request with a state object, so a version reply can only have come
+    /// from the server dispatch itself: the service was never asked.
+    #[tokio::test]
+    async fn the_server_answers_get_version_itself_and_this_client_accepts_it() {
+        let mut connection = daemon(stub(Ok("{}".into())), true);
+        let reply = connection.call(&Request::GetVersion).await.unwrap();
+        match check_version(reply).unwrap() {
+            VersionCheck::Compatible(v) => {
+                assert_eq!(v.protocol, crate::version::PROTOCOL_VERSION);
+                assert_eq!(v.min_protocol, crate::version::MIN_PROTOCOL_VERSION);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unauthenticated_caller_is_not_told_the_version() {
+        let mut connection = daemon(stub(Ok("{}".into())), false);
+        let reply = connection.call(&Request::GetVersion).await.unwrap();
+        assert!(matches!(
+            check_version(reply),
+            Ok(VersionCheck::Refused(r)) if r.code == "Unauthorized"
+        ));
+    }
+
+    #[test]
+    fn a_service_that_serves_only_newer_clients_is_incompatible_and_says_who_updates() {
+        let reply = Reply::Done(serde_json::json!({
+            "protocol_version": 7, "min_protocol_version": 5, "service_version": "9.9.9"
+        }));
+        match check_version(reply) {
+            Err(ClientError::Incompatible(text)) => assert!(text.contains("Update this program")),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_service_that_predates_version_checks_is_incompatible_not_assumed_fine() {
+        match check_version(refused("InvalidRequest", false)) {
+            Err(ClientError::Incompatible(text)) => {
+                assert!(text.contains("Update the DNet Engine service"), "{text}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_busy_service_is_a_refusal_not_an_incompatibility() {
+        assert!(matches!(
+            check_version(refused("ServiceBusy", true)),
+            Ok(VersionCheck::Refused(r)) if r.retryable
+        ));
+    }
+
+    #[test]
+    fn a_version_reply_that_makes_no_sense_is_not_trusted() {
+        for nonsense in [
+            serde_json::json!({}),
+            serde_json::json!({"status": "Disconnected"}),
+            serde_json::json!({"protocol_version": 1, "min_protocol_version": 1, "service_version": "bad\u{1b}[0m"}),
+            serde_json::json!([1, 2]),
+        ] {
+            assert!(
+                matches!(
+                    check_version(Reply::Done(nonsense.clone())),
+                    Err(ClientError::Malformed(_))
+                ),
+                "{nonsense}"
+            );
+        }
     }
 }

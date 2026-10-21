@@ -208,6 +208,9 @@ impl Service for DnetService {
         }
         let state = self.state.lock().expect("domain state mutex poisoned");
         match request {
+            // The dispatch in `dnet-ipc` answers this before the service is asked (T132); the same
+            // answer here keeps the match complete and any other caller of `dispatch` honest.
+            Request::GetVersion => Ok(dnet_ipc::version::reply()),
             // Fully served now.
             Request::GetState => match &self.orchestrator {
                 Some(orchestrator) => encode_state_snapshot(&orchestrator.snapshot()),
@@ -425,6 +428,7 @@ mod tests {
     fn after_a_failed_recovery_read_only_queries_still_answer() {
         let svc = unrecovered_service();
         for request in [
+            Request::GetVersion,
             Request::GetState,
             Request::GetSession,
             Request::ListEndpoints,
@@ -464,6 +468,7 @@ mod tests {
     fn a_refused_saved_configuration_still_answers_read_only_queries() {
         let svc = service_with_refused_config();
         for request in [
+            Request::GetVersion,
             Request::GetState,
             Request::GetSession,
             Request::ListEndpoints,
