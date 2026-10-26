@@ -1,0 +1,168 @@
+/*
+ * DNet Engine — design tokens. The single source of truth for the tray application's look.
+ * apps/dnet-tray imports this file (T099); nothing else may define a colour, a size or a duration.
+ *
+ * Every pair of colours below is checked against WCAG 2.2 (docs/design/design-system.md §4) and the
+ * check is repeated live on docs/design/preview.html. Change a value only together with that check.
+ *
+ * Reading the palette:  ink (the surfaces) · paper (the one action colour) · lamps (state, and only state).
+ * Dark is the default; the light theme follows the system setting unless data-theme says otherwise.
+ */
+
+:root {
+  color-scheme: dark light;
+
+  /* ---- type ------------------------------------------------------------------------------
+   * Stand-ins that exist on every Windows 11 machine. The shipped faces are a decision for the owner
+   * (design-system.md §5); these keep working if the bundled fonts fail to load. */
+  --font-ui: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "Noto Sans", sans-serif;
+  /* The "instrument" voice: state words, labels, the wordmark. Bahnschrift is a DIN-style variable face
+   * that ships with Windows 10/11, so it costs no payload; elsewhere the fallback is the UI face. */
+  --font-display: Bahnschrift, "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+  --font-num: "Cascadia Mono", "Cascadia Code", ui-monospace, "SFMono-Regular", Consolas, monospace;
+  --fs-xs: 12px;
+  --fs-sm: 13px;
+  --fs-md: 14px;
+  --fs-lg: 16px;
+  --fs-xl: 20px;
+  --fs-2xl: 28px;
+  --lh-tight: 1.2;
+  --lh-body: 1.5;
+
+  /* ---- space, shape, size ------------------------------------------------------------------ */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 24px;
+  --s-6: 32px;
+  --s-7: 48px;
+  --r-ctl: 6px;
+  --r-card: 10px;
+  --r-pill: 999px;
+  --hit: 36px; /* smallest interactive target; WCAG 2.5.8 asks for 24 */
+  --rail-w: 188px;
+  --rail-w-narrow: 56px;
+
+  /* ---- motion ------------------------------------------------------------------------------ */
+  --dur-1: 90ms;
+  --dur-2: 160ms;
+  --dur-3: 240ms;
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --probe-period: 1.6s;
+}
+
+/* ---- dark: the default ---------------------------------------------------------------------- */
+:root,
+:root[data-theme="dark"] {
+  --c-base: #1b2523;
+  --c-card: #222e2b;
+  --c-raised: #2a3834;
+  --c-line: #34453f; /* separators: decoration, not a control edge */
+  --c-line-strong: #71897e; /* the edge of anything you can operate (3:1, WCAG 1.4.11) */
+  --c-text: #eef3f0;
+  --c-text-2: #b8c7c0;
+  --c-text-3: #9bafa7;
+  --c-paper: #f1ebdd; /* the action colour: filled buttons and the switch */
+  --c-on-paper: #14201c;
+  --c-focus: #f1ebdd;
+  --c-ok: #4fdcb0; /* connected */
+  --c-probe: #ecc95e; /* probing */
+  --c-warn: #f5a55c; /* degraded */
+  --c-fail: #ff8478; /* failed */
+  --c-scrim: rgb(5 8 8 / 0.62);
+  --shadow-dialog: 0 24px 64px rgb(0 0 0 / 0.5);
+  --shadow-dock: 0 8px 28px rgb(0 0 0 / 0.14);
+}
+
+/* ---- light: bone paper and ink, not white ---------------------------------------------------- */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --c-base: #f7f5ef;
+    --c-card: #fdfcf9;
+    --c-raised: #ffffff;
+    --c-line: #e6e2d8;
+    --c-line-strong: #7e8c85;
+    --c-text: #16221e;
+    --c-text-2: #4a5a53;
+    --c-text-3: #566660;
+    --c-paper: #14201c;
+    --c-on-paper: #f7f5ef;
+    --c-focus: #14201c;
+    --c-ok: #0a7556;
+    --c-probe: #7a5c00;
+    --c-warn: #a24e00;
+    --c-fail: #b3261e;
+    --c-scrim: rgb(20 32 28 / 0.36);
+    --shadow-dialog: 0 24px 64px rgb(20 32 28 / 0.22);
+    --shadow-dock: 0 8px 28px rgb(20 32 28 / 0.12);
+  }
+}
+
+:root[data-theme="light"] {
+  --c-base: #f7f5ef;
+  --c-card: #fdfcf9;
+  --c-raised: #ffffff;
+  --c-line: #e6e2d8;
+  --c-line-strong: #7e8c85;
+  --c-text: #16221e;
+  --c-text-2: #4a5a53;
+  --c-text-3: #566660;
+  --c-paper: #14201c;
+  --c-on-paper: #f7f5ef;
+  --c-focus: #14201c;
+  --c-ok: #0a7556;
+  --c-probe: #7a5c00;
+  --c-warn: #a24e00;
+  --c-fail: #b3261e;
+  --c-scrim: rgb(20 32 28 / 0.36);
+  --shadow-dialog: 0 24px 64px rgb(20 32 28 / 0.22);
+  --shadow-dock: 0 8px 28px rgb(20 32 28 / 0.12);
+}
+
+/* Soft backgrounds for a state, derived so they can never drift from the lamp colour. */
+:root {
+  --c-ok-bg: color-mix(in srgb, var(--c-ok) 12%, var(--c-card));
+  --c-probe-bg: color-mix(in srgb, var(--c-probe) 12%, var(--c-card));
+  --c-warn-bg: color-mix(in srgb, var(--c-warn) 12%, var(--c-card));
+  --c-fail-bg: color-mix(in srgb, var(--c-fail) 12%, var(--c-card));
+}
+
+/* The ambient tint: the whole stage takes a faint wash of the current lamp colour, so the state is felt
+ * before it is read. Capped at 6 % so that text on it keeps its contrast (checked on preview.html). */
+:root {
+  --ambient-strength: 6%;
+  --dot-grid: color-mix(in srgb, var(--c-text) 8%, transparent);
+  --dot-grid-step: 22px;
+}
+
+/* ---- reduced motion: nothing moves; state is carried by shape and words --------------------- */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-1: 0ms;
+    --dur-2: 0ms;
+    --dur-3: 0ms;
+    --probe-period: 0s;
+  }
+}
+
+/* ---- Windows high contrast / forced colours: the system's colours, our shapes ----------------- */
+@media (forced-colors: active) {
+  :root {
+    --c-base: Canvas;
+    --c-card: Canvas;
+    --c-raised: Canvas;
+    --c-line: GrayText;
+    --c-line-strong: ButtonText;
+    --c-text: CanvasText;
+    --c-text-2: CanvasText;
+    --c-text-3: GrayText;
+    --c-paper: ButtonText;
+    --c-on-paper: ButtonFace;
+    --c-focus: Highlight;
+    --c-ok: CanvasText;
+    --c-probe: CanvasText;
+    --c-warn: CanvasText;
+    --c-fail: CanvasText;
+  }
+}

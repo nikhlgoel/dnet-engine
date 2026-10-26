@@ -444,10 +444,10 @@ mod tests {
         assert_eq!(ports.len(), 16);
         assert_eq!(ports.iter().collect::<HashSet<_>>().len(), 16);
         assert!(ports.iter().all(|p| *p != 0));
-        // They really were free: each can be bound again.
-        for port in ports {
-            TcpListener::bind((Ipv4Addr::LOCALHOST, port)).unwrap();
-        }
+        // That they are free *afterwards* is not asserted: between the listeners being released and
+        // the test binding again, another test running in parallel may take the port (Linux hands out
+        // a just-released port readily), and the doc comment above says as much about the real gap.
+        // What the function promises, and this checks, is that the batch is distinct.
     }
 
     #[tokio::test]

@@ -4,6 +4,9 @@
 //! dependency would be one more thing to audit for licence and supply chain in a tool that talks
 //! to a privileged service. An unknown option is an error, never ignored: a mistyped `--profile`
 //! that silently connected with the default would be worse than a refusal.
+//!
+//! **Credentials are never typed on the command line.** `add-endpoint` reads them from a file or from
+//! standard input: an argument is kept in shell history and visible to every process on the machine.
 
 use std::time::Duration;
 
@@ -12,6 +15,14 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The longest `--timeout` accepted, in seconds.
 pub const MAX_TIMEOUT_SECS: u64 = 3600;
+
+/// Where the credentials for a new endpoint are read from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CredentialsSource {
+    /// A file the person prepared. Named by path; its content is never printed.
+    File(String),
+    Stdin,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -29,9 +40,51 @@ pub enum Command {
     },
     Profiles,
     Endpoints,
+    /// The networks, which one carries the connection, and how good each is.
+    Paths,
+    /// What the product did during this connection.
+    Stats,
     /// Which versions of the protocol this program and the service speak.
     Version,
+    /// Add a server the person controls.
+    AddEndpoint {
+        label: String,
+        host: String,
+        source: CredentialsSource,
+    },
+    RemoveEndpoint {
+        endpoint: String,
+    },
+    /// `enable-endpoint` and `disable-endpoint`.
+    SetEndpointEnabled {
+        endpoint: String,
+        enabled: bool,
+    },
+    /// Block (`true`, the default) or allow (`false`) programs' own encrypted name lookups.
+    EncryptedDns {
+        block: bool,
+    },
+    /// Ask the service to check now for updated connection method definitions.
+    CheckUpdates,
+    /// Hand the service signed profile-feed documents from files (an offline import).
+    ImportFeed {
+        keys: Option<String>,
+        feed: Option<String>,
+    },
     Help,
+}
+
+impl Command {
+    /// Whether the command takes one word that is not an option: a label, an id, a choice.
+    fn takes_positional(&self) -> bool {
+        matches!(
+            self,
+            Command::AddEndpoint { .. }
+                | Command::RemoveEndpoint { .. }
+                | Command::SetEndpointEnabled { .. }
+                | Command::EncryptedDns { .. }
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,8 +110,23 @@ commands:
   events                 show what the service did and why (--follow to keep watching)
   profiles               list the connection profiles
   endpoints              list the configured endpoints
+  paths                  show the networks, which one carries the connection, and how good each is
+  stats                  show what the product did during this connection (counts, never a comparison)
   version                show this program's version and the service's, and whether they match
+  add-endpoint <label>   add a server: --host <address> and --credentials-file <path> (or
+                         --credentials-stdin)
+  remove-endpoint <id>   remove an endpoint and forget its credentials
+  enable-endpoint <id>   let an endpoint be used again
+  disable-endpoint <id>  keep an endpoint but do not use it
+  encrypted-dns <block|allow>
+                         block (the default) or allow programs' own encrypted name lookups
+  check-updates          check now for updated connection methods (through the tunnel if one is up,
+                         directly over your network if you are disconnected: only because you asked)
+  import-feed            hand the service signed profile updates from files: --keys-file <path>
+                         and/or --feed-file <path>. The service checks signatures; nothing here does.
   help                   show this text
+
+Endpoints and the encrypted-DNS choice can be changed only while disconnected.
 
 options:
   --json                 print the service's answers as JSON (for scripts)
@@ -67,6 +135,13 @@ options:
   --accept-tier2         connect: consent to a profile whose connections may break when the
                          network interface changes
   --no-wait              connect/disconnect: return as soon as the service accepts the request
+  --host <address>       add-endpoint: the server's IP address or host name
+  --credentials-file <path>
+                         add-endpoint: a file holding the connection details. Delete it afterwards:
+                         it holds the keys. They are never accepted on the command line.
+  --credentials-stdin    add-endpoint: read the connection details from standard input
+  --keys-file <path>     import-feed: a signed keys document (taken first, if both are given)
+  --feed-file <path>     import-feed: a signed profile feed
   -f, --follow           events: keep watching until interrupted
   --allow-unprivileged-service
                          DEVELOPMENT ONLY: also talk to a service that is not running as SYSTEM
@@ -87,14 +162,66 @@ fn command_named(name: &str) -> Option<Command> {
         "events" => Command::Events { follow: false },
         "profiles" => Command::Profiles,
         "endpoints" => Command::Endpoints,
+        "paths" => Command::Paths,
+        "stats" => Command::Stats,
         "version" | "--version" | "-V" => Command::Version,
+        // Filled in from the words that follow; `parse` refuses the command if any are missing.
+        "add-endpoint" => Command::AddEndpoint {
+            label: String::new(),
+            host: String::new(),
+            source: CredentialsSource::Stdin,
+        },
+        "remove-endpoint" => Command::RemoveEndpoint {
+            endpoint: String::new(),
+        },
+        "enable-endpoint" => Command::SetEndpointEnabled {
+            endpoint: String::new(),
+            enabled: true,
+        },
+        "disable-endpoint" => Command::SetEndpointEnabled {
+            endpoint: String::new(),
+            enabled: false,
+        },
+        "encrypted-dns" => Command::EncryptedDns { block: true },
+        "check-updates" => Command::CheckUpdates,
+        "import-feed" => Command::ImportFeed {
+            keys: None,
+            feed: None,
+        },
         "help" | "--help" | "-h" => Command::Help,
         _ => return None,
     })
 }
 
+/// The options that mean the same for every command. They may come before the command or after it:
+/// `dnetctl --json status` and `dnetctl status --json` are the same.
+fn move_global_options_after_the_command(args: &[String]) -> Vec<String> {
+    let mut leading = Vec::new();
+    let mut rest = args.iter().peekable();
+    while let Some(arg) = rest.peek() {
+        match arg.as_str() {
+            "--json" | "--allow-unprivileged-service" => leading.push(rest.next().unwrap().clone()),
+            // Its value goes with it; a missing value is left for the parser to complain about.
+            "--timeout" => {
+                leading.push(rest.next().unwrap().clone());
+                if let Some(value) = rest.next() {
+                    leading.push(value.clone());
+                }
+            }
+            _ => break,
+        }
+    }
+    let mut ordered: Vec<String> = rest.cloned().collect();
+    // With nothing but options there is no command, which is what is then said.
+    if !ordered.is_empty() {
+        ordered.extend(leading);
+    }
+    ordered
+}
+
 /// Parse the arguments after the program name. `Err` is a message for the user.
 pub fn parse(args: &[String]) -> Result<Invocation, String> {
+    let args = &move_global_options_after_the_command(args);
     let Some(first) = args.first() else {
         return Err(format!("no command given\n\n{USAGE}"));
     };
@@ -104,10 +231,25 @@ pub fn parse(args: &[String]) -> Result<Invocation, String> {
     let mut trust_any_service = false;
     let mut timeout = DEFAULT_TIMEOUT;
     let mut seen: Vec<&str> = Vec::new();
+    let mut word: Option<String> = None;
+    let mut host: Option<String> = None;
+    let mut credentials_file: Option<String> = None;
+    let mut credentials_stdin = false;
 
     let mut rest = args[1..].iter();
     while let Some(option) = rest.next() {
         let name = option.as_str();
+        if !name.starts_with('-') && command.takes_positional() {
+            if word.is_some() {
+                return Err(format!(
+                    "'{}' is one word too many for '{}'\n\n{USAGE}",
+                    shown(name),
+                    shown(first)
+                ));
+            }
+            word = Some(name.to_owned());
+            continue;
+        }
         if seen.contains(&name) {
             return Err(format!("'{}' was given twice", shown(name)));
         }
@@ -150,6 +292,35 @@ pub fn parse(args: &[String]) -> Result<Invocation, String> {
                 *wait = false;
             }
             ("-f" | "--follow", Command::Events { follow }) => *follow = true,
+            ("--host", Command::AddEndpoint { .. }) => {
+                host = Some(
+                    rest.next()
+                        .ok_or_else(|| "--host needs an address".to_string())?
+                        .clone(),
+                );
+            }
+            ("--credentials-file", Command::AddEndpoint { .. }) => {
+                credentials_file = Some(
+                    rest.next()
+                        .ok_or_else(|| "--credentials-file needs a path".to_string())?
+                        .clone(),
+                );
+            }
+            ("--credentials-stdin", Command::AddEndpoint { .. }) => credentials_stdin = true,
+            ("--keys-file", Command::ImportFeed { keys, .. }) => {
+                *keys = Some(
+                    rest.next()
+                        .ok_or_else(|| "--keys-file needs a path".to_string())?
+                        .clone(),
+                );
+            }
+            ("--feed-file", Command::ImportFeed { feed, .. }) => {
+                *feed = Some(
+                    rest.next()
+                        .ok_or_else(|| "--feed-file needs a path".to_string())?
+                        .clone(),
+                );
+            }
             (other, _) => {
                 return Err(format!(
                     "'{}' is not an option of '{}'\n\n{USAGE}",
@@ -158,6 +329,55 @@ pub fn parse(args: &[String]) -> Result<Invocation, String> {
                 ))
             }
         }
+    }
+    match &mut command {
+        Command::AddEndpoint {
+            label,
+            host: address,
+            source,
+        } => {
+            *label =
+                word.ok_or("add-endpoint needs a label, e.g. 'dnetctl add-endpoint home ...'")?;
+            *address = host.ok_or("add-endpoint needs --host <address>")?;
+            *source = match (credentials_file, credentials_stdin) {
+                (Some(path), false) => CredentialsSource::File(path),
+                (None, true) => CredentialsSource::Stdin,
+                (Some(_), true) => return Err(
+                    "give the credentials by --credentials-file or --credentials-stdin, not both"
+                        .to_string(),
+                ),
+                (None, false) => {
+                    return Err(
+                        "add-endpoint needs --credentials-file <path> or --credentials-stdin; \
+                         credentials are never accepted on the command line"
+                            .to_string(),
+                    )
+                }
+            };
+        }
+        Command::RemoveEndpoint { endpoint } | Command::SetEndpointEnabled { endpoint, .. } => {
+            *endpoint = word.ok_or_else(|| {
+                format!(
+                    "{} needs an endpoint id (see 'dnetctl endpoints')",
+                    shown(first)
+                )
+            })?;
+        }
+        Command::ImportFeed { keys, feed } => {
+            if keys.is_none() && feed.is_none() {
+                return Err(
+                    "import-feed needs --keys-file <path>, --feed-file <path>, or both".to_string(),
+                );
+            }
+        }
+        Command::EncryptedDns { block } => {
+            *block = match word.as_deref() {
+                Some("block") => true,
+                Some("allow") => false,
+                _ => return Err("encrypted-dns needs 'block' or 'allow'".to_string()),
+            };
+        }
+        _ => {}
     }
     Ok(Invocation {
         command,
@@ -314,6 +534,243 @@ mod tests {
     fn an_option_given_twice_is_refused() {
         let error = parsed(&["connect", "--no-wait", "--no-wait"]).unwrap_err();
         assert!(error.contains("twice"), "{error}");
+    }
+
+    // ------------------------------------------------------------ configuration commands
+
+    #[test]
+    fn add_endpoint_takes_a_label_an_address_and_a_credentials_source() {
+        assert_eq!(
+            command(&[
+                "add-endpoint",
+                "home",
+                "--host",
+                "203.0.113.9",
+                "--credentials-file",
+                "creds.json"
+            ]),
+            Command::AddEndpoint {
+                label: "home".into(),
+                host: "203.0.113.9".into(),
+                source: CredentialsSource::File("creds.json".into()),
+            }
+        );
+        // The label may come after the options.
+        assert_eq!(
+            command(&[
+                "add-endpoint",
+                "--host",
+                "h.example.net",
+                "--credentials-stdin",
+                "home"
+            ]),
+            Command::AddEndpoint {
+                label: "home".into(),
+                host: "h.example.net".into(),
+                source: CredentialsSource::Stdin,
+            }
+        );
+    }
+
+    #[test]
+    fn add_endpoint_refuses_what_is_missing_and_says_which() {
+        let cases: [(&[&str], &str); 5] = [
+            (
+                &["add-endpoint", "--host", "h", "--credentials-stdin"],
+                "label",
+            ),
+            (&["add-endpoint", "home", "--credentials-stdin"], "--host"),
+            (
+                &["add-endpoint", "home", "--host", "h"],
+                "--credentials-file",
+            ),
+            (
+                &[
+                    "add-endpoint",
+                    "home",
+                    "--host",
+                    "h",
+                    "--credentials-file",
+                    "f",
+                    "--credentials-stdin",
+                ],
+                "not both",
+            ),
+            (&["add-endpoint", "home", "--host"], "needs an address"),
+        ];
+        for (args, expected) in cases {
+            let error = parsed(args).unwrap_err();
+            assert!(error.contains(expected), "{args:?}: {error}");
+        }
+    }
+
+    #[test]
+    fn credentials_are_not_accepted_as_an_argument() {
+        for option in ["--credentials", "--password", "--key", "--auth"] {
+            let error = parsed(&[
+                "add-endpoint",
+                "home",
+                "--host",
+                "h",
+                "--credentials-stdin",
+                option,
+                "secret-value",
+            ])
+            .unwrap_err();
+            assert!(error.contains("not an option"), "{option}: {error}");
+            assert!(!error.contains("secret-value"), "{error}");
+        }
+    }
+
+    #[test]
+    fn the_endpoint_commands_take_one_id() {
+        assert_eq!(
+            command(&["remove-endpoint", "abc"]),
+            Command::RemoveEndpoint {
+                endpoint: "abc".into()
+            }
+        );
+        assert_eq!(
+            command(&["enable-endpoint", "abc"]),
+            Command::SetEndpointEnabled {
+                endpoint: "abc".into(),
+                enabled: true
+            }
+        );
+        assert_eq!(
+            command(&["disable-endpoint", "abc"]),
+            Command::SetEndpointEnabled {
+                endpoint: "abc".into(),
+                enabled: false
+            }
+        );
+        for name in ["remove-endpoint", "enable-endpoint", "disable-endpoint"] {
+            assert!(parsed(&[name])
+                .unwrap_err()
+                .contains("needs an endpoint id"));
+            assert!(parsed(&[name, "a", "b"])
+                .unwrap_err()
+                .contains("one word too many"));
+        }
+    }
+
+    #[test]
+    fn encrypted_dns_takes_block_or_allow_and_nothing_else() {
+        assert_eq!(
+            command(&["encrypted-dns", "block"]),
+            Command::EncryptedDns { block: true }
+        );
+        assert_eq!(
+            command(&["encrypted-dns", "allow"]),
+            Command::EncryptedDns { block: false }
+        );
+        for bad in [
+            &["encrypted-dns"][..],
+            &["encrypted-dns", "yes"],
+            &["encrypted-dns", "Block"],
+        ] {
+            assert!(
+                parsed(bad).unwrap_err().contains("'block' or 'allow'"),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn import_feed_takes_one_or_both_files() {
+        assert_eq!(
+            command(&["import-feed", "--feed-file", "f.json"]),
+            Command::ImportFeed {
+                keys: None,
+                feed: Some("f.json".into())
+            }
+        );
+        assert_eq!(
+            command(&["import-feed", "--keys-file", "k", "--feed-file", "f"]),
+            Command::ImportFeed {
+                keys: Some("k".into()),
+                feed: Some("f".into())
+            }
+        );
+        assert!(parsed(&["import-feed"])
+            .unwrap_err()
+            .contains("--keys-file"));
+        assert!(parsed(&["import-feed", "--feed-file"])
+            .unwrap_err()
+            .contains("needs a path"));
+        assert!(parsed(&["import-feed", "--host", "x"])
+            .unwrap_err()
+            .contains("not an option"));
+        assert!(parsed(&["status", "--feed-file", "x"])
+            .unwrap_err()
+            .contains("not an option"));
+    }
+
+    #[test]
+    fn global_options_may_come_before_the_command() {
+        let before = parsed(&[
+            "--allow-unprivileged-service",
+            "--json",
+            "--timeout",
+            "30",
+            "status",
+        ])
+        .unwrap();
+        let after = parsed(&[
+            "status",
+            "--allow-unprivileged-service",
+            "--json",
+            "--timeout",
+            "30",
+        ])
+        .unwrap();
+        assert_eq!(before, after);
+        assert!(before.trust_any_service && before.json);
+        assert_eq!(before.timeout, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn options_before_a_command_do_not_hide_a_mistake() {
+        // An option only some commands take is still refused for the others.
+        assert!(parsed(&["--profile", "x", "status"])
+            .unwrap_err()
+            .contains("unknown command"));
+        assert!(parsed(&["--json"]).unwrap_err().contains("no command"));
+        assert!(parsed(&["--timeout"]).unwrap_err().contains("no command"));
+        // Given twice, wherever.
+        assert!(parsed(&["--json", "status", "--json"])
+            .unwrap_err()
+            .contains("twice"));
+        // And help is still help.
+        assert_eq!(command(&["--help"]), Command::Help);
+    }
+
+    #[test]
+    fn a_word_is_refused_by_a_command_that_takes_none() {
+        for args in [
+            &["status", "extra"][..],
+            &["connect", "now"],
+            &["profiles", "x"],
+        ] {
+            assert!(
+                parsed(args).unwrap_err().contains("not an option"),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_new_options_belong_to_add_endpoint_alone() {
+        for args in [
+            &["connect", "--host", "h"][..],
+            &["remove-endpoint", "a", "--credentials-stdin"],
+            &["status", "--credentials-file", "f"],
+        ] {
+            assert!(
+                parsed(args).unwrap_err().contains("not an option"),
+                "{args:?}"
+            );
+        }
     }
 
     /// What was typed is printed back; it must not be able to drive the terminal.

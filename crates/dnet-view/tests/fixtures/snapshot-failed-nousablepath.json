@@ -1,0 +1,25 @@
+{
+  "activeEndpoint": null,
+  "activeProfile": null,
+  "failure": {
+    "action": "Connect to Wi-Fi or mobile data, then try again.",
+    "cause": "NoUsablePath",
+    "detail": "None of this computer's network connections can carry traffic right now.",
+    "title": "No network connection is available"
+  },
+  "lastBecause": null,
+  "paths": {
+    "asOfMs": 1730000000000,
+    "degraded": null,
+    "paths": [],
+    "watching": false
+  },
+  "posture": {
+    "kind": "FailClosed"
+  },
+  "stats": {
+    "connected": false
+  },
+  "status": "Failed",
+  "warnings": []
+}

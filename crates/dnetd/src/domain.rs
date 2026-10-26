@@ -5,8 +5,12 @@
 //! `dnet-core` types; this store is the application-level state that owns a set of
 //! them and will later be backed by persisted configuration.
 
-use dnet_core::builtin_rules::{builtin_rules, validate_builtin_rules_present};
+use dnet_core::builtin_rules::{builtin_rules_for, validate_builtin_rules_present};
 use dnet_core::catalogue::BUNDLED_PROFILES;
+use dnet_core::doh_block::{
+    blocking_rules, validate_block_matches_policy, validate_block_outranks_user_rules,
+};
+use dnet_core::doh_consent::{ConsentState, OptOut};
 use dnet_core::endpoint::Endpoint;
 use dnet_core::error::DomainError;
 use dnet_core::health::HealthState;
@@ -31,10 +35,17 @@ pub struct StartupConfig {
 }
 
 /// Everything the daemon knows about endpoints, profiles, and routing.
+///
+/// `Clone` so a change that fails half way can put the store back as it was (`configure`).
+#[derive(Clone)]
 pub struct DomainState {
     endpoints: Vec<Endpoint>,
     profiles: Vec<ConnectionProfile>,
     rules: Vec<RoutingRule>,
+    /// Whether encrypted DNS is blocked and whether the person has been told (T070/T071). Kept in
+    /// memory only until the saved configuration carries it: a restart returns to the protective
+    /// default (block, disclosure shown again), never to an opt-out nobody confirmed.
+    consent: ConsentState,
 }
 
 impl DomainState {
@@ -49,10 +60,12 @@ impl DomainState {
                 ConnectionProfile::new(ProfileId::new(entry.id), entry.kind, ProfileParams::new())
             })
             .collect();
+        let consent = ConsentState::new();
         Self {
             endpoints: Vec::new(),
             profiles,
-            rules: builtin_rules(None),
+            rules: builtin_rules_for(None, consent.policy()),
+            consent,
         }
     }
 
@@ -82,6 +95,13 @@ impl DomainState {
         for endpoint in loaded.endpoints {
             state
                 .add_endpoint(endpoint)
+                .map_err(|e| PersistError::Invalid(e.to_string()))?;
+        }
+        // The person's encrypted-DNS choice (T071). A file that never recorded one leaves the protective
+        // default the seeded store already has.
+        if let Some(saved) = loaded.encrypted_dns {
+            state
+                .apply_consent(saved)
                 .map_err(|e| PersistError::Invalid(e.to_string()))?;
         }
         Ok(state)
@@ -122,10 +142,11 @@ impl DomainState {
     }
 
     /// The configuration in its stored form.
-    // Saving has no caller until configuration requests carry payloads (Phase 9, T126); tests cover it.
-    #[allow(dead_code)]
     pub fn to_config_bytes(&self) -> Result<Vec<u8>, PersistError> {
-        dnet_config::persist::encode(&self.endpoints, &self.profiles)
+        // Written only once the person has chosen or been told something; otherwise the file is as it
+        // always was.
+        let chosen = (self.consent != ConsentState::new()).then_some(self.consent);
+        dnet_config::persist::encode_full(&self.endpoints, &self.profiles, chosen)
     }
 
     // ----------------------------------------------------------- wire responses
@@ -134,15 +155,20 @@ impl DomainState {
     /// reports `Disconnected` with nothing active. `FailClosed` is the engine's decided posture
     /// for "no tunnel"; no component enforces it at the OS yet.
     pub fn state_snapshot_json(&self) -> String {
-        encode_state_snapshot(&StateSnapshot {
+        encode_state_snapshot(&self.idle_snapshot())
+            .expect("the idle snapshot is consistent by construction")
+    }
+
+    /// The state when nothing is connected and no orchestrator is attached.
+    pub fn idle_snapshot(&self) -> StateSnapshot {
+        StateSnapshot {
             status: ConnectionStatus::Disconnected,
             active_profile: None,
             active_endpoint: None,
             failure: None,
             warnings: Vec::new(),
             posture: RoutingPosture::FailClosed,
-        })
-        .expect("the idle snapshot is consistent by construction")
+        }
     }
 
     pub fn endpoints_json(&self) -> String {
@@ -192,7 +218,17 @@ impl DomainState {
                 })
             })
             .collect();
-        json!({ "rules": items }).to_string()
+        // The encrypted-DNS choice rides along: it is a setting about the rule set (the block is a set of
+        // built-in rules), and the window needs it to show the switch and to know whether the first-run
+        // disclosure is still owed. No request of its own was warranted for two booleans.
+        json!({
+            "rules": items,
+            "encrypted_dns": {
+                "block": self.consent.policy() == dnet_core::doh_block::Policy::Block,
+                "needs_disclosure": self.consent.needs_disclosure(),
+            },
+        })
+        .to_string()
     }
 
     /// A `GetSession` response. There is no active session until connect lands.
@@ -248,6 +284,22 @@ impl DomainState {
         self.endpoints.len() != before
     }
 
+    /// The endpoint with `id`, if there is one.
+    pub fn endpoint(&self, id: EndpointId) -> Option<&Endpoint> {
+        self.endpoints.iter().find(|e| e.id() == id)
+    }
+
+    /// Enable or disable an endpoint. `false` if there is no such endpoint.
+    pub fn set_endpoint_enabled(&mut self, id: EndpointId, enabled: bool) -> bool {
+        match self.endpoints.iter_mut().find(|e| e.id() == id) {
+            Some(endpoint) => {
+                endpoint.set_enabled(enabled);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Add a user rule, rejecting a precedence collision across the whole set (FR-022)
     /// and any change that would weaken DNS-leak protection (the DNS-capture rule must
     /// remain present and top-priority).
@@ -274,12 +326,70 @@ impl DomainState {
 
     /// Every rule-set mutation goes through here, so no mutation can break an invariant.
     fn replace_rules(&mut self, candidate: Vec<RoutingRule>) -> Result<(), DomainError> {
+        Self::check_rules(&candidate, &self.consent)?;
+        self.rules = candidate;
+        Ok(())
+    }
+
+    fn check_rules(candidate: &[RoutingRule], consent: &ConsentState) -> Result<(), DomainError> {
         // Checked first, so deleting a built-in reports exactly that. No endpoint is
         // active in the store until connect lands (Phases 4-6).
-        validate_builtin_rules_present(&candidate, None)?;
-        validate_rule_set(&candidate)?;
-        validate_dns_leak_protection(&candidate)?;
+        validate_builtin_rules_present(candidate, None)?;
+        // The encrypted-DNS block goes only with the person's opt-out, never with a rule edit.
+        validate_block_matches_policy(candidate, consent.policy())?;
+        validate_rule_set(candidate)?;
+        validate_dns_leak_protection(candidate)?;
+        validate_block_outranks_user_rules(candidate)?;
+        Ok(())
+    }
+
+    pub fn consent(&self) -> &ConsentState {
+        &self.consent
+    }
+
+    /// The first-run flow showed the disclosure.
+    pub fn acknowledge_encrypted_dns_disclosure(&mut self) {
+        self.consent.acknowledge_disclosure();
+    }
+
+    /// Opt out of the encrypted-DNS block in one action (FR-025a). Returns the consequence the
+    /// interface must show. Nothing changes if the resulting rule set would be invalid.
+    pub fn opt_out_of_encrypted_dns_block(&mut self) -> Result<OptOut, DomainError> {
+        let mut next = self.consent;
+        let out = next.opt_out();
+        self.apply_consent(next)?;
+        Ok(out)
+    }
+
+    /// Turn the block back on. Needs no consent.
+    pub fn restore_encrypted_dns_block(&mut self) -> Result<(), DomainError> {
+        let mut next = self.consent;
+        next.restore();
+        self.apply_consent(next)
+    }
+
+    /// Choosing the block (the default) is how the first-run flow records that the person was shown the
+    /// disclosure and went on: the choice is only offered next to it. Opting out records it already
+    /// (`ConsentState::opt_out`).
+    pub fn choose_encrypted_dns_block(&mut self) -> Result<(), DomainError> {
+        let mut next = self.consent;
+        next.restore();
+        next.acknowledge_disclosure();
+        self.apply_consent(next)
+    }
+
+    /// Swap the blocking rules for the ones `next` calls for, keeping every other rule.
+    fn apply_consent(&mut self, next: ConsentState) -> Result<(), DomainError> {
+        let mut candidate: Vec<RoutingRule> = self
+            .rules
+            .iter()
+            .filter(|r| r.action() != dnet_core::rule::RuleAction::Reject)
+            .cloned()
+            .collect();
+        candidate.extend(blocking_rules(next.policy()));
+        Self::check_rules(&candidate, &next)?;
         self.rules = candidate;
+        self.consent = next;
         Ok(())
     }
 }
@@ -320,6 +430,7 @@ fn rule_action_name(action: dnet_core::rule::RuleAction) -> &'static str {
         dnet_core::rule::RuleAction::Tunnel => "Tunnel",
         dnet_core::rule::RuleAction::Bypass => "Bypass",
         dnet_core::rule::RuleAction::Capture => "Capture",
+        dnet_core::rule::RuleAction::Reject => "Reject",
     }
 }
 
@@ -464,6 +575,161 @@ mod tests {
         assert_eq!(state.rules().len(), DomainState::seeded().rules().len());
     }
 
+    fn blocks(state: &DomainState) -> usize {
+        state
+            .rules()
+            .iter()
+            .filter(|r| r.action() == RuleAction::Reject)
+            .count()
+    }
+
+    #[test]
+    fn a_fresh_store_blocks_encrypted_dns_and_still_has_to_tell_the_person() {
+        let state = DomainState::seeded();
+        assert!(blocks(&state) > 0);
+        assert!(state.consent().needs_disclosure());
+        assert_eq!(
+            state.consent().policy(),
+            dnet_core::doh_block::Policy::Block
+        );
+    }
+
+    #[test]
+    fn the_block_cannot_be_removed_by_editing_rules_only_by_the_opt_out() {
+        let mut state = DomainState::seeded();
+        let before = state.rules().len();
+        let reject_ids: Vec<RuleId> = state
+            .rules()
+            .iter()
+            .filter(|r| r.action() == RuleAction::Reject)
+            .map(RoutingRule::id)
+            .collect();
+        assert!(!reject_ids.is_empty());
+        for id in reject_ids {
+            assert!(matches!(
+                state.remove_rule(id),
+                Err(DomainError::BuiltinRuleMissing(_))
+            ));
+        }
+        assert_eq!(state.rules().len(), before);
+
+        let out = state.opt_out_of_encrypted_dns_block().unwrap();
+        assert!(out.consequence.contains("will not apply"));
+        assert_eq!(blocks(&state), 0);
+        assert!(!state.consent().needs_disclosure());
+        // The required built-ins are untouched by the opt-out.
+        assert!(state.rules().iter().any(RoutingRule::is_dns_capture));
+    }
+
+    #[test]
+    fn the_block_can_be_restored_and_user_rules_survive_both_changes() {
+        let mut state = DomainState::seeded();
+        let rule = RoutingRule::user(
+            RuleMatcher::Domain("x.example".into()),
+            RuleAction::Tunnel,
+            10_000,
+        )
+        .unwrap();
+        let id = rule.id();
+        state.add_rule(rule).unwrap();
+        let blocked = blocks(&state);
+
+        state.opt_out_of_encrypted_dns_block().unwrap();
+        assert!(state.rules().iter().any(|r| r.id() == id));
+        state.restore_encrypted_dns_block().unwrap();
+        assert!(state.rules().iter().any(|r| r.id() == id));
+        assert_eq!(blocks(&state), blocked);
+    }
+
+    #[test]
+    fn a_user_rule_cannot_outrank_the_block_but_may_once_the_person_has_opted_out() {
+        let mut state = DomainState::seeded();
+        let low = || {
+            RoutingRule::user(
+                RuleMatcher::DomainSuffix("dns.google".into()),
+                RuleAction::Bypass,
+                50,
+            )
+            .unwrap()
+        };
+        assert!(matches!(
+            state.add_rule(low()),
+            Err(DomainError::OutranksEncryptedDnsBlock(50, _))
+        ));
+        state.opt_out_of_encrypted_dns_block().unwrap();
+        assert_eq!(state.add_rule(low()), Ok(()));
+        // And turning the block back on is refused while that rule would undo it: nothing changes.
+        let before = state.rules().len();
+        assert!(matches!(
+            state.restore_encrypted_dns_block(),
+            Err(DomainError::OutranksEncryptedDnsBlock(50, _))
+        ));
+        assert_eq!(state.rules().len(), before);
+        assert_eq!(blocks(&state), 0);
+        assert_eq!(
+            state.consent().policy(),
+            dnet_core::doh_block::Policy::Allow
+        );
+    }
+
+    #[test]
+    fn the_rules_listing_names_a_refusal() {
+        let json: Value = serde_json::from_str(&DomainState::seeded().rules_json()).unwrap();
+        assert!(json["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["action"] == "Reject" && r["builtin"] == true));
+    }
+
+    #[test]
+    fn the_encrypted_dns_choice_survives_a_save_and_a_load() {
+        let mut state = DomainState::seeded();
+        state.opt_out_of_encrypted_dns_block().unwrap();
+        let bytes = state.to_config_bytes().unwrap();
+        let reloaded =
+            DomainState::from_loaded(dnet_config::persist::decode(&bytes).unwrap()).unwrap();
+        assert_eq!(
+            reloaded.consent().policy(),
+            dnet_core::doh_block::Policy::Allow
+        );
+        assert_eq!(blocks(&reloaded), 0, "the rules follow the choice");
+        assert!(!reloaded.consent().needs_disclosure());
+        // And the other way round: a block that was restored stays restored.
+        let mut again = reloaded;
+        again.restore_encrypted_dns_block().unwrap();
+        let back = DomainState::from_loaded(
+            dnet_config::persist::decode(&again.to_config_bytes().unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert!(blocks(&back) > 0);
+    }
+
+    #[test]
+    fn a_store_nobody_has_touched_writes_no_encrypted_dns_section() {
+        let text = String::from_utf8(DomainState::seeded().to_config_bytes().unwrap()).unwrap();
+        assert!(!text.contains("encrypted_dns"), "{text}");
+        // Being told about it is recorded, even though the policy is still the default.
+        let mut told = DomainState::seeded();
+        told.acknowledge_encrypted_dns_disclosure();
+        let text = String::from_utf8(told.to_config_bytes().unwrap()).unwrap();
+        assert!(text.contains("encrypted_dns"), "{text}");
+    }
+
+    #[test]
+    fn an_endpoint_can_be_enabled_and_disabled_and_a_missing_one_is_reported() {
+        let mut state = DomainState::seeded();
+        let e = endpoint("home");
+        let id = e.id();
+        state.add_endpoint(e).unwrap();
+        assert!(state.set_endpoint_enabled(id, false));
+        assert!(!state.endpoint(id).unwrap().is_enabled());
+        assert!(state.set_endpoint_enabled(id, true));
+        assert!(state.endpoint(id).unwrap().is_enabled());
+        assert!(!state.set_endpoint_enabled(EndpointId::new(), true));
+        assert!(state.endpoint(EndpointId::new()).is_none());
+    }
+
     #[test]
     fn a_user_rule_can_be_removed() {
         let mut state = DomainState::seeded();
@@ -478,6 +744,34 @@ mod tests {
 
         assert_eq!(state.remove_rule(id), Ok(true));
         assert_eq!(state.remove_rule(id), Ok(false));
+    }
+
+    fn encrypted_dns(state: &DomainState) -> Value {
+        let json: Value = serde_json::from_str(&state.rules_json()).unwrap();
+        json["encrypted_dns"].clone()
+    }
+
+    #[test]
+    fn the_rules_reply_says_whether_encrypted_dns_is_blocked_and_whether_the_disclosure_is_owed() {
+        let mut state = DomainState::seeded();
+        // The protective default, nothing yet shown.
+        assert_eq!(
+            encrypted_dns(&state),
+            json!({ "block": true, "needs_disclosure": true })
+        );
+        // Choosing the default is how the first-run flow records that it showed the disclosure.
+        state.choose_encrypted_dns_block().unwrap();
+        assert_eq!(
+            encrypted_dns(&state),
+            json!({ "block": true, "needs_disclosure": false })
+        );
+        // Opting out records it too, and says the block is off.
+        let mut state = DomainState::seeded();
+        state.opt_out_of_encrypted_dns_block().unwrap();
+        assert_eq!(
+            encrypted_dns(&state),
+            json!({ "block": false, "needs_disclosure": false })
+        );
     }
 
     #[test]

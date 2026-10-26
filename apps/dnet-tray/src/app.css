@@ -1,0 +1,202 @@
+/*
+ * Global styles. Colours, sizes and durations come from docs/design/tokens.css and from nowhere else (ADR-0007
+ * R7): this file and every component use `var(--…)` only, and a test fails the build on a colour literal.
+ */
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--c-base);
+}
+
+body {
+  margin: 0;
+  font: var(--fs-md) / var(--lh-body) var(--font-ui);
+  color: var(--c-text);
+  background: var(--c-base);
+}
+
+h1,
+h2,
+h3,
+p,
+ul,
+ol,
+dl,
+dd {
+  margin: 0;
+  padding: 0;
+}
+
+ul,
+ol {
+  list-style: none;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+/* Native radios and checkboxes take the action colour, not the browser's own blue. */
+input[type='radio'],
+input[type='checkbox'] {
+  accent-color: var(--c-paper);
+  width: 18px;
+  height: 18px;
+  margin: 0;
+}
+
+.num {
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+}
+
+.disp {
+  font-family: var(--font-display);
+}
+
+:focus-visible {
+  outline: 2px solid var(--c-focus);
+  outline-offset: 2px;
+  border-radius: var(--r-ctl);
+}
+
+.sr-only {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* Buttons: equal weight by default; the paper fill means "press this" and nothing else does. */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s-2);
+  min-height: var(--hit);
+  padding: 0 var(--s-4);
+  border-radius: var(--r-ctl);
+  border: 1px solid var(--c-line-strong);
+  background: transparent;
+  color: var(--c-text);
+  cursor: pointer;
+  font-weight: 500;
+  transition: background var(--dur-1) var(--ease);
+}
+
+.btn:hover {
+  background: var(--c-raised);
+}
+
+.btn:active {
+  background: var(--c-line);
+}
+
+.btn:disabled {
+  color: var(--c-text-3);
+  cursor: not-allowed;
+}
+
+.btn.primary {
+  background: var(--c-paper);
+  color: var(--c-on-paper);
+  border-color: var(--c-paper);
+}
+
+/* Forms: a visible label above, error text replacing helper text, never colour-only (§12). */
+.field {
+  display: grid;
+  gap: var(--s-1);
+}
+
+.field > label {
+  font-weight: 500;
+}
+
+.field .help {
+  color: var(--c-text-2);
+  font-size: var(--fs-sm);
+}
+
+.field .error {
+  color: var(--c-fail);
+  font-size: var(--fs-sm);
+}
+
+.field input,
+.field textarea,
+.field select {
+  min-height: var(--hit);
+  padding: 0 var(--s-3);
+  border: 1px solid var(--c-line-strong);
+  border-radius: var(--r-ctl);
+  background: var(--c-card);
+}
+
+.field textarea {
+  padding: var(--s-2) var(--s-3);
+  min-height: 96px;
+}
+
+/* A full view (Endpoints, Rules, Activity, Settings, About). */
+.view {
+  display: grid;
+  align-content: start;
+  gap: var(--s-4);
+  padding: var(--s-5);
+  overflow: auto;
+  min-height: 0;
+}
+
+.view > h1 {
+  font: 500 var(--fs-2xl) / var(--lh-tight) var(--font-display);
+}
+
+.view .lede {
+  color: var(--c-text-2);
+  max-width: 62ch;
+}
+
+.card {
+  background: color-mix(in srgb, var(--c-card) 78%, transparent);
+  border-radius: var(--r-card);
+  padding: var(--s-4);
+  display: grid;
+  gap: var(--s-2);
+}
+
+.empty {
+  color: var(--c-text-2);
+  max-width: 56ch;
+}
+
+.notice {
+  display: flex;
+  gap: var(--s-3);
+  align-items: flex-start;
+  padding: var(--s-2) var(--s-4);
+  border-left: 3px solid var(--c-warn);
+  background: var(--c-warn-bg);
+  border-radius: 0 var(--r-ctl) var(--r-ctl) 0;
+  font-size: var(--fs-sm);
+}
+
+/* Forced colours: shapes carry state, the system colours do the rest. */
+@media (forced-colors: active) {
+  .btn.primary {
+    forced-color-adjust: none;
+    background: Highlight;
+    color: HighlightText;
+  }
+}

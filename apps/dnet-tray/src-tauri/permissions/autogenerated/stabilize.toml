@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-stabilize"
+description = "Enables the stabilize command without any pre-configured scope."
+commands.allow = ["stabilize"]
+
+[[permission]]
+identifier = "deny-stabilize"
+description = "Denies the stabilize command without any pre-configured scope."
+commands.deny = ["stabilize"]

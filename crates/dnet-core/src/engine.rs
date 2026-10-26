@@ -37,6 +37,7 @@
 
 use std::time::Instant;
 
+use crate::degraded::Change;
 use crate::endpoint::Endpoint;
 use crate::endpoint_health::rank;
 use crate::failure::{classify, Reach, Situation};
@@ -131,6 +132,10 @@ pub enum Input {
         from: Option<InterfaceId>,
         to: InterfaceId,
     },
+    /// The carrying path became poor and the connection is staying on it, or recovered (T084).
+    /// Only meaningful while connected: it is a statement about a connection, so with none it is
+    /// ignored.
+    Connectivity(Change),
     /// Direct reachability of each endpoint, in endpoint order, made outside any profile. A connect
     /// forgets earlier reach (it describes the network the last attempt ran on), so report it
     /// after `Connect`, before the race result.
@@ -234,6 +239,7 @@ impl Engine {
                 Vec::new()
             }
             Input::PathChanged { from, to } => self.path_changed(from, to),
+            Input::Connectivity(change) => self.connectivity(change),
             Input::Reach(reach) => {
                 self.reach = reach;
                 Vec::new()
@@ -456,6 +462,24 @@ impl Engine {
             to,
             tier_at_time: tier,
         })]
+    }
+
+    /// Record that the carrying path is poor and why the connection is staying on it, or that it
+    /// recovered (T084, FR-019). Not a failure and not a move: it changes nothing but what the user
+    /// is told, which is the point.
+    fn connectivity(&mut self, change: Change) -> Vec<Action> {
+        if !matches!(self.phase, Phase::Connected { .. }) {
+            return Vec::new();
+        }
+        let event = match change {
+            Change::Degraded(d) => ConnectionEvent::Degraded {
+                path: d.path,
+                band: d.band,
+                staying: d.staying,
+            },
+            Change::Recovered { path } => ConnectionEvent::Recovered { path },
+        };
+        vec![Action::Emit(event)]
     }
 
     fn live_check(&mut self, check: LiveCheck, now: Instant) -> Vec<Action> {
@@ -743,10 +767,12 @@ fn unusable_reason(why: Unusable) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::degraded::{Degradation, NoMove};
     use crate::endpoint_health::fixtures::{degraded, endpoint, healthy, unreachable};
     use crate::health::ProbeOutcome;
     use crate::probe::Verdict;
     use crate::profile::{ProfileKind, ProfileParams, Viability};
+    use crate::quality::QualityBand;
     use crate::reprobe::BLOCK_AFTER;
     use crate::tier::SurvivalMeasurement;
     use std::time::Duration;
@@ -1946,5 +1972,65 @@ mod tests {
             },
         );
         assert_eq!(failed_cause(&e), FailureCause::AllProfilesBlocked);
+    }
+
+    // ------------------------------------------------------------ a poor carrying path (T084)
+
+    fn degraded_on(path: u64, staying: NoMove) -> Change {
+        Change::Degraded(Degradation {
+            path: InterfaceId::new(path),
+            band: QualityBand::Poor,
+            staying,
+        })
+    }
+
+    #[test]
+    fn a_degraded_carrying_path_while_connected_is_recorded_with_why_it_is_kept() {
+        let (mut e, _) = connected();
+
+        let actions = step(
+            &mut e,
+            Input::Connectivity(degraded_on(3, NoMove::OnlyPath)),
+        );
+
+        assert_eq!(
+            events(&actions),
+            [&ConnectionEvent::Degraded {
+                path: InterfaceId::new(3),
+                band: QualityBand::Poor,
+                staying: NoMove::OnlyPath,
+            }]
+        );
+        assert!(
+            matches!(e.phase(), Phase::Connected { .. }),
+            "a poor path is not a failure, and nothing is torn down"
+        );
+    }
+
+    #[test]
+    fn a_recovery_while_connected_is_recorded() {
+        let (mut e, _) = connected();
+        let actions = step(
+            &mut e,
+            Input::Connectivity(Change::Recovered {
+                path: InterfaceId::new(3),
+            }),
+        );
+        assert_eq!(
+            events(&actions),
+            [&ConnectionEvent::Recovered {
+                path: InterfaceId::new(3)
+            }]
+        );
+    }
+
+    #[test]
+    fn a_report_about_the_path_when_nothing_is_connected_is_ignored() {
+        let (mut e, _) = engine();
+        let actions = step(
+            &mut e,
+            Input::Connectivity(degraded_on(3, NoMove::OnlyPath)),
+        );
+        assert!(actions.is_empty(), "{actions:?}");
     }
 }

@@ -83,10 +83,10 @@ fn run() -> anyhow::Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
     // The orchestrator spawns its tasks when the service is built, so a runtime must be current.
     let _entered = runtime.enter();
-    let (service, orchestrator) = crate::build_service();
+    let service = crate::build_service();
     runtime.block_on(async {
         tokio::select! {
-            result = dnet_ipc::server::run_control_listener(service) => {
+            result = dnet_ipc::server::run_control_listener(crate::listening(&service)) => {
                 if let Err(e) = result {
                     tracing::error!(error = %e, "control listener stopped with an error");
                 }
@@ -101,7 +101,8 @@ fn run() -> anyhow::Result<()> {
             ServiceControlAccept::empty(),
             crate::SHUTDOWN_WAIT,
         );
-        crate::shutdown_orchestrator(orchestrator).await;
+        // The orchestrator in use now: a configuration change replaces it.
+        crate::shutdown_orchestrator(service.orchestrator_handle()).await;
     });
 
     report(

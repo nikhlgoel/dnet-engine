@@ -1,0 +1,18 @@
+{
+  "endpoints": [
+    {
+      "address": "203.0.113.9:44443",
+      "enabled": true,
+      "health": "Healthy",
+      "id": "5b1f0c1e-8a43-4c51-9a79-0f6d1a9c2f10",
+      "label": "oracle-mumbai"
+    },
+    {
+      "address": "vpn.example.com:443",
+      "enabled": false,
+      "health": "Unknown",
+      "id": "0a1b2c3d-0000-4000-8000-000000000001",
+      "label": "spare"
+    }
+  ]
+}

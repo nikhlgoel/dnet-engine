@@ -19,6 +19,10 @@
 
 // Reached only through the Windows service entry points today; the Linux entry point
 // will use them too. Their unit tests run on every platform.
+// What a person can safely hand over to explain a failure (T112); reached through the service.
+#[cfg_attr(not(windows), allow(dead_code))]
+mod configure;
+mod diagnostics;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod domain;
 // Runs the connection engine (T126). The production service attaches it on Windows; off Windows the
@@ -27,6 +31,7 @@ mod domain;
 mod netwatch;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod orchestrator;
+mod telemetry;
 // What the network is asked and how each answer is read (T126). Reached through the real effects,
 // which are Windows-only; their tests run on every platform.
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -34,6 +39,21 @@ mod checks;
 // Decides what a connection starts; carried out by the real effects (T126).
 #[cfg_attr(not(windows), allow(dead_code))]
 mod plan;
+// The profile feed held by the service (T066a): restore, offer, apply.
+#[cfg_attr(not(windows), allow(dead_code))]
+mod feed_service;
+// Fetches the signed profile feed on a schedule and when asked (T066b).
+#[cfg_attr(not(windows), allow(dead_code))]
+mod feed_fetch;
+// The trust anchor compiled into this build (empty until the key ceremony, T066d).
+#[cfg_attr(not(windows), allow(dead_code))]
+mod feed_trust;
+// Feed step 8: a trial configuration for every profile before a feed is kept.
+#[cfg_attr(not(windows), allow(dead_code))]
+mod feed_trial;
+// Asks the network whether a captive portal is in the way (T077); used by the real effects.
+#[cfg_attr(not(windows), allow(dead_code))]
+mod portal_probe;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod recovery;
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -80,10 +100,10 @@ fn run_console() -> anyhow::Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
     // The orchestrator spawns its tasks when the service is built, so a runtime must be current.
     let _entered = runtime.enter();
-    let (service, orchestrator) = build_service();
+    let service = build_service();
     runtime.block_on(async {
         tokio::select! {
-            result = dnet_ipc::server::run_control_listener(service) => {
+            result = dnet_ipc::server::run_control_listener(listening(&service)) => {
                 if let Err(e) = result {
                     tracing::error!(error = %e, "control listener stopped with an error");
                 }
@@ -92,7 +112,9 @@ fn run_console() -> anyhow::Result<()> {
                 tracing::info!("shutdown requested (Ctrl-C)");
             }
         }
-        shutdown_orchestrator(orchestrator).await;
+        // The orchestrator in use now, not the one the service started with: a configuration change
+        // replaces it, and stopping the retired one would leave the live tunnel up.
+        shutdown_orchestrator(service.orchestrator_handle()).await;
     });
     Ok(())
 }
@@ -116,20 +138,26 @@ pub(crate) async fn shutdown_orchestrator(handle: Option<orchestrator::Handle>) 
     }
 }
 
-/// Construct the production service and the handle that stops its tunnel. Shared by both entry
-/// modes, and called with a Tokio runtime current.
+/// Construct the production service. Shared by both entry modes, and called with a Tokio runtime
+/// current. To stop its tunnel, ask the service for its orchestrator *when stopping*
+/// (`DnetService::orchestrator_handle`): a configuration change replaces the orchestrator, so a handle
+/// taken at start-up would stop the wrong one.
 ///
 /// Start-up recovery (T038) runs here, first, before the control listener exists and
 /// before anything could create a core or adapter. Its outcome gates the service: without a
 /// clean recovery, or with a refused configuration, no orchestrator is attached and nothing
 /// connects.
 #[cfg(windows)]
-pub(crate) fn build_service() -> (
-    std::sync::Arc<dyn dnet_ipc::service::Service>,
-    Option<orchestrator::Handle>,
-) {
+pub(crate) fn build_service() -> std::sync::Arc<service_impl::DnetService> {
     let recovery = recovery::recover_installation();
     let service = service_impl::DnetService::production(recovery).with_production_orchestrator();
-    let handle = service.orchestrator_handle();
-    (std::sync::Arc::new(service), handle)
+    std::sync::Arc::new(service)
+}
+
+/// The service as the control listener takes it.
+#[cfg(windows)]
+pub(crate) fn listening(
+    service: &std::sync::Arc<service_impl::DnetService>,
+) -> std::sync::Arc<dyn dnet_ipc::service::Service> {
+    std::sync::Arc::clone(service) as std::sync::Arc<dyn dnet_ipc::service::Service>
 }

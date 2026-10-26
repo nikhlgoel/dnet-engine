@@ -14,10 +14,11 @@ When documents disagree, this is the order of precedence:
 | Path | Contains |
 |---|---|
 | [`architecture/`](architecture/) | [Tech stack](architecture/tech-stack.md) · [System architecture](architecture/system-architecture.md) · [Module blueprints](architecture/module-blueprints.md) |
-| [`design/`](design/) | [Design system](design/design-system.md) · [Interaction flows](design/interaction-flows.md) |
+| [`design/`](design/) | [Design system](design/design-system.md) · [Tokens](design/tokens.css) · [Live preview](design/preview.html) (serve over HTTP) · [Interaction flows](design/interaction-flows.md) |
 | [`security/`](security/) | [Security design](security/security-design.md) · [Threat model](security/threat-model.md) · [Credential handling](security/credential-handling.md) |
 | [`bugs/`](bugs/) | One file per significant bug — see the [index](bugs/README.md) |
 | [`adr/`](adr/) | Architecture decision records |
+| [`feed-publishing.md`](feed-publishing.md) | Runbook for the key ceremony and for signing the profile feed (ADR-0002) |
 
 ## Source records
 

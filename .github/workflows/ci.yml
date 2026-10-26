@@ -47,6 +47,96 @@ jobs:
       - name: Unit and contract tests
         run: cargo test --workspace
 
+  # The declared minimum Rust version (Cargo.toml `rust-version`). Until 2026-10-21 nothing checked it and
+  # the lockfile had drifted above it (T143); this keeps it true. Raise both together, deliberately.
+  msrv:
+    name: Minimum Rust version
+    needs: licence-compliance
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --all-targets
+
+  # CLAUDE.md: a change must not break the Linux build. dnetd is Windows-only and is not built here; the
+  # crates that are meant to be portable are linted exactly as on Windows.
+  linux-portable:
+    name: Linux (portable crates)
+    needs: licence-compliance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy on the portable crates
+        run: >
+          cargo clippy --all-targets
+          -p dnet-core -p dnet-netstate -p dnet-ipc -p dnet-config
+          -p dnet-supervisor -p dnet-probe -p dnet-view -p dnetctl
+          -- -D warnings
+
+  # ADR-0007: the window. The web view is checked on its own: types, the tests (including the contrast pairs
+  # and the fixtures it shares with dnet-view), the size budget, and the dependency audit. Its dependencies
+  # are held back 14 days and run no install scripts (pnpm-workspace.yaml), so a freshly published malicious
+  # release cannot reach a build here.
+  ui:
+    name: Window (types, tests, budget, audit)
+    needs: licence-compliance
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: apps/dnet-tray
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.4.2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/dnet-tray/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check
+      - run: pnpm test
+      - name: Build and hold it to the size budget
+        run: pnpm build
+      - name: Audit production dependencies
+        run: pnpm audit --prod
+
+  # The tray and window shell is detached from the workspace (Tauri's dependency tree would otherwise be paid
+  # for by every other job), so it is built here, after the web view it embeds.
+  ui-shell:
+    name: Window shell (build, clippy)
+    needs: ui
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/dnet-tray/src-tauri
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.4.2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/dnet-tray/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+        working-directory: apps/dnet-tray
+      - run: pnpm build
+        working-directory: apps/dnet-tray
+      - run: cargo fmt --manifest-path apps/dnet-tray/src-tauri/Cargo.toml --check
+      - run: cargo clippy --manifest-path apps/dnet-tray/src-tauri/Cargo.toml --all-targets -- -D warnings
+      - run: cargo build --manifest-path apps/dnet-tray/src-tauri/Cargo.toml --release
+
   coverage:
     name: Coverage (>=80%)
     needs: build-and-test

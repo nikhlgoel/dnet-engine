@@ -23,9 +23,71 @@ use crate::error::ConfigError;
 use crate::hysteria2::{hysteria2_outbound, Hysteria2Outbound, Hysteria2Transport};
 use crate::reality::{reality_outbound, RealityTransport, VlessOutbound};
 
-/// FakeIP pools (CC-02, research.md R3). Documented defaults.
-pub const FAKEIP_INET4: &str = "198.18.0.0/15";
-pub const FAKEIP_INET6: &str = "fc00::/18";
+/// FakeIP pools (CC-02, research.md R3). Documented defaults. A tunnel hands out addresses from only
+/// one half of each (see [`FakeIpHalf`]); these are the whole pools, which nothing else may use.
+pub const FAKEIP_INET4: &str = dnet_core::fakeip::INET4_POOL;
+pub const FAKEIP_INET6: &str = dnet_core::fakeip::INET6_POOL;
+
+/// Which half of the FakeIP pools one tunnel hands out (T131, CC-02).
+///
+/// Every tunnel starts handing out addresses from the bottom of its pool, so an address a program
+/// remembered from the last session can belong to a **different name** in the next: over plain HTTP the
+/// program would reach the wrong host, and the name it meant is revealed to it. Alternating between the
+/// two halves per tunnel start turns that into the harmless case, an address the core does not know and
+/// refuses. The choice is an input, not read from a clock here, so the output stays a pure function of
+/// its input (CC-09).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FakeIpHalf {
+    Low,
+    High,
+}
+
+impl FakeIpHalf {
+    /// `198.18.0.0/16` or `198.19.0.0/16`.
+    pub const fn inet4(self) -> &'static str {
+        match self {
+            FakeIpHalf::Low => "198.18.0.0/16",
+            FakeIpHalf::High => "198.19.0.0/16",
+        }
+    }
+
+    /// `fc00::/19` or `fc00:2000::/19`.
+    pub const fn inet6(self) -> &'static str {
+        match self {
+            FakeIpHalf::Low => "fc00::/19",
+            FakeIpHalf::High => "fc00:2000::/19",
+        }
+    }
+
+    pub const fn other(self) -> Self {
+        match self {
+            FakeIpHalf::Low => FakeIpHalf::High,
+            FakeIpHalf::High => FakeIpHalf::Low,
+        }
+    }
+}
+
+/// Hands out the half for each tunnel start, alternating, starting with `first`.
+#[derive(Debug)]
+pub struct FakeIpRotation(std::sync::atomic::AtomicBool);
+
+impl FakeIpRotation {
+    pub fn new(first: FakeIpHalf) -> Self {
+        Self(std::sync::atomic::AtomicBool::new(
+            first == FakeIpHalf::High,
+        ))
+    }
+
+    /// The half for this start; the next call returns the other.
+    pub fn take(&self) -> FakeIpHalf {
+        // `fetch_xor` returns the previous value and flips it, so concurrent starts never share one.
+        if self.0.fetch_xor(true, std::sync::atomic::Ordering::SeqCst) {
+            FakeIpHalf::High
+        } else {
+            FakeIpHalf::Low
+        }
+    }
+}
 
 const TUN_TAG: &str = "tun-in";
 /// The TUN adapter name the primary core creates.
@@ -60,6 +122,8 @@ pub struct PrimaryCoreInput<'a> {
     /// **Required**, and of the matching kind, when the active profile is Hysteria 2 or
     /// VLESS+REALITY. Unused for AmneziaWG.
     pub primary_transport: Option<PrimaryTransport<'a>>,
+    /// The half of the FakeIP pools this tunnel hands out (T131).
+    pub fakeip: FakeIpHalf,
 }
 
 /// Settings and credentials for a profile the primary core carries itself.
@@ -205,8 +269,8 @@ pub fn generate_primary_core_config(
     let mut servers = vec![
         DnsServer::FakeIp {
             tag: FAKEIP_DNS.to_string(),
-            inet4_range: FAKEIP_INET4.to_string(),
-            inet6_range: FAKEIP_INET6.to_string(),
+            inet4_range: input.fakeip.inet4().to_string(),
+            inet6_range: input.fakeip.inet6().to_string(),
         },
         DnsServer::Local {
             tag: LOCAL_DNS.to_string(),
@@ -292,6 +356,16 @@ pub fn generate_primary_core_config(
     })
 }
 
+/// A domain pattern in the form a connection arrives in: lower case, no trailing dot.
+///
+/// The core compares the names it is given as they are, so a rule written `Example.COM.` would never
+/// match `example.com`, and a destination the person marked "bypass" would go through the tunnel (found
+/// by the agreement test against `dnet_core::rule_eval`, T073). Patterns are validated when the rule is
+/// made, so the fallback is only for a pattern that somehow was not.
+fn written(pattern: &str) -> String {
+    dnet_core::rule_eval::normalize_domain(pattern).unwrap_or_else(|| pattern.to_owned())
+}
+
 /// Rules sorted by ascending precedence, so lower values (built-ins, DNS capture) win.
 fn by_precedence(rules: &[RoutingRule]) -> Vec<&RoutingRule> {
     let mut sorted: Vec<&RoutingRule> = rules.iter().collect();
@@ -301,12 +375,13 @@ fn by_precedence(rules: &[RoutingRule]) -> Vec<&RoutingRule> {
 
 /// Map the domain routing rules to route entries. The DNS-capture rule becomes the
 /// native `hijack-dns` action; everything else routes to an outbound.
-fn route_rules(rules: &[RoutingRule]) -> Vec<RouteRule> {
+pub fn route_rules(rules: &[RoutingRule]) -> Vec<RouteRule> {
     by_precedence(rules)
         .into_iter()
         .map(|rule| {
             let (action, outbound) = match rule.action() {
                 RuleAction::Capture => ("hijack-dns", None),
+                RuleAction::Reject => ("reject", None),
                 RuleAction::Bypass => ("route", Some(DIRECT_TAG.to_string())),
                 RuleAction::Tunnel => ("route", Some(PROXY_TAG.to_string())),
             };
@@ -316,11 +391,14 @@ fn route_rules(rules: &[RoutingRule]) -> Vec<RouteRule> {
                 ..RouteRule::default()
             };
             match rule.matcher() {
-                RuleMatcher::Domain(d) => entry.domain.push(d.clone()),
-                RuleMatcher::DomainSuffix(d) => entry.domain_suffix.push(d.clone()),
+                RuleMatcher::Domain(d) => entry.domain.push(written(d)),
+                RuleMatcher::DomainSuffix(d) => entry.domain_suffix.push(written(d)),
                 RuleMatcher::IpCidr(c) => entry.ip_cidr.push(c.to_string()),
                 RuleMatcher::Application(p) => entry.process_path.push(p.clone()),
                 RuleMatcher::DnsPort => entry.port.push(53),
+                RuleMatcher::EncryptedDnsPort => {
+                    entry.port.push(dnet_core::doh_block::ENCRYPTED_DNS_PORT);
+                }
             }
             entry
         })
@@ -340,18 +418,25 @@ fn route_rules(rules: &[RoutingRule]) -> Vec<RouteRule> {
 fn dns_rules(rules: &[RoutingRule], tunnel_resolver: Option<&str>) -> Vec<DnsRule> {
     let mut chain: Vec<DnsRule> = by_precedence(rules)
         .into_iter()
-        .filter(|r| r.action() == RuleAction::Bypass)
+        .filter(|r| matches!(r.action(), RuleAction::Bypass | RuleAction::Reject))
         .filter_map(|r| {
             let (domain, domain_suffix) = match r.matcher() {
-                RuleMatcher::Domain(d) => (vec![d.clone()], Vec::new()),
-                RuleMatcher::DomainSuffix(d) => (Vec::new(), vec![d.clone()]),
+                RuleMatcher::Domain(d) => (vec![written(d)], Vec::new()),
+                RuleMatcher::DomainSuffix(d) => (Vec::new(), vec![written(d)]),
                 _ => return None,
+            };
+            // A refused name gets no answer at all, so the program falls back to the system
+            // resolver (T070); a bypassed name is answered by the local resolver.
+            let (action, server) = if r.action() == RuleAction::Reject {
+                ("reject", None)
+            } else {
+                ("route", Some(LOCAL_DNS.to_string()))
             };
             Some(DnsRule {
                 domain,
                 domain_suffix,
-                action: "route",
-                server: Some(LOCAL_DNS.to_string()),
+                action,
+                server,
                 ..DnsRule::default()
             })
         })

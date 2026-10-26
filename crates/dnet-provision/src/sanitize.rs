@@ -1,0 +1,176 @@
+//! Everything a provider says on its own account passes through here before a person or a log sees it
+//! (PR-04: the credential never appears in logs, diagnostics, IPC messages, error text or telemetry).
+//!
+//! A provider's error text is its own words, produced by code this crate does not control and often by a
+//! remote service that echoes the request it was sent. The credential is in the request. So the text is
+//! cleaned of the credential's value (and of parts of it long enough to identify it), of control
+//! characters that could forge a log line, and cut to a length that fits a dialog.
+//!
+//! This is the second line of defence. The first is that a [`crate::secret::Secret`] never prints.
+
+use crate::secret::Secret;
+
+/// Longest provider text shown, in characters.
+pub const MAX_TEXT_CHARS: usize = 240;
+
+/// Shortest fragment of a secret that is treated as identifying it.
+const MIN_FRAGMENT: usize = 8;
+
+/// Removes known secrets from text.
+#[derive(Default)]
+pub struct Sanitizer {
+    secrets: Vec<Secret>,
+}
+
+impl Sanitizer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Also remove this secret from anything cleaned from now on.
+    pub fn with_secret(mut self, secret: Secret) -> Self {
+        self.secrets.push(secret);
+        self
+    }
+
+    /// `text` with every known secret (and every run of `MIN_FRAGMENT` or more of its characters, so a
+    /// truncated echo is caught) replaced by `<redacted>`, control characters removed, and the length cut.
+    pub fn clean(&self, text: &str) -> String {
+        let mut out = text.to_owned();
+        for secret in &self.secrets {
+            let value = secret.expose_secret();
+            if value.is_empty() {
+                continue;
+            }
+            out = out.replace(value, "<redacted>");
+            // A service that truncates what it echoes leaves a prefix, a suffix or a middle of the value.
+            out = redact_fragments(&out, value);
+        }
+        let printable: String = out
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect();
+        let collapsed = printable.split_whitespace().collect::<Vec<_>>().join(" ");
+        if collapsed.chars().count() > MAX_TEXT_CHARS {
+            let cut: String = collapsed.chars().take(MAX_TEXT_CHARS).collect();
+            format!("{cut}…")
+        } else {
+            collapsed
+        }
+    }
+}
+
+/// Replace every stretch of `text` that shares `MIN_FRAGMENT` or more consecutive characters with
+/// `secret` by one `<redacted>`. Linear in the two lengths: every `MIN_FRAGMENT`-character window of the
+/// secret goes into a set, and each window of the text is looked up in it.
+fn redact_fragments(text: &str, secret: &str) -> String {
+    let text: Vec<char> = text.chars().collect();
+    let secret: Vec<char> = secret.chars().collect();
+    if secret.len() < MIN_FRAGMENT || text.len() < MIN_FRAGMENT {
+        return text.into_iter().collect();
+    }
+    let known: std::collections::HashSet<&[char]> = secret.windows(MIN_FRAGMENT).collect();
+    let mut covered = vec![false; text.len()];
+    for (start, window) in text.windows(MIN_FRAGMENT).enumerate() {
+        if known.contains(window) {
+            covered[start..start + MIN_FRAGMENT].fill(true);
+        }
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut in_run = false;
+    for (c, hidden) in text.iter().zip(covered) {
+        match (hidden, in_run) {
+            (true, false) => {
+                out.push_str("<redacted>");
+                in_run = true;
+            }
+            (true, true) => {}
+            (false, _) => {
+                out.push(*c);
+                in_run = false;
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const KEY: &str = "SENTINEL-oci-key-0123456789abcdef";
+
+    fn sanitizer() -> Sanitizer {
+        Sanitizer::new().with_secret(Secret::new(KEY))
+    }
+
+    #[test]
+    fn the_whole_credential_is_removed_wherever_it_appears() {
+        let cleaned = sanitizer().clean(&format!("bad request for {KEY}: signature {KEY} invalid"));
+        assert!(!cleaned.contains("SENTINEL"), "{cleaned}");
+        assert_eq!(cleaned.matches("<redacted>").count(), 2);
+    }
+
+    #[test]
+    fn a_truncated_echo_of_the_credential_is_removed_too() {
+        for echo in [&KEY[..12], &KEY[5..20], &KEY[KEY.len() - 10..]] {
+            let cleaned = sanitizer().clean(&format!("header was {echo}..."));
+            assert!(!cleaned.contains(echo), "{echo} survived: {cleaned}");
+        }
+    }
+
+    #[test]
+    fn a_short_coincidence_is_left_alone() {
+        // Fewer than eight characters in common is not an identification, and removing them would mangle
+        // ordinary words.
+        let cleaned = sanitizer().clean("the SENTIN word is fine");
+        assert_eq!(cleaned, "the SENTIN word is fine");
+    }
+
+    #[test]
+    fn control_characters_cannot_forge_a_log_line() {
+        let cleaned = Sanitizer::new().clean("denied\r\n[INFO] approved\u{1b}[2J\u{7}");
+        assert!(!cleaned.chars().any(char::is_control), "{cleaned:?}");
+        assert!(cleaned.starts_with("denied "), "{cleaned}");
+    }
+
+    #[test]
+    fn long_text_is_cut() {
+        let cleaned = Sanitizer::new().clean(&"word ".repeat(500));
+        assert!(cleaned.chars().count() <= MAX_TEXT_CHARS + 1);
+        assert!(cleaned.ends_with('…'));
+    }
+
+    #[test]
+    fn text_with_nothing_to_remove_is_unchanged_apart_from_spacing() {
+        assert_eq!(
+            Sanitizer::new().clean("  quota   exceeded "),
+            "quota exceeded"
+        );
+        assert_eq!(sanitizer().clean("quota exceeded"), "quota exceeded");
+    }
+
+    #[test]
+    fn a_long_credential_is_cleaned_quickly() {
+        // A signing key is a PEM block of well over a thousand characters; the scan must stay linear.
+        let pem = format!(
+            "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----",
+            "MIIEvQIBADANBgkq".repeat(120)
+        );
+        let cleaner = Sanitizer::new().with_secret(Secret::new(pem.clone()));
+        let started = std::time::Instant::now();
+        let cleaned = cleaner.clean(&format!("rejected: {pem} (and again {pem})"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert!(!cleaned.contains("MIIEvQIB"), "{cleaned}");
+        assert!(!cleaned.contains("PRIVATE KEY"), "{cleaned}");
+    }
+
+    #[test]
+    fn several_secrets_are_all_removed() {
+        let both = Sanitizer::new()
+            .with_secret(Secret::new("first-secret-value-aaaa"))
+            .with_secret(Secret::new("second-secret-value-bbbb"));
+        let cleaned = both.clean("a first-secret-value-aaaa and a second-secret-value-bbbb");
+        assert!(!cleaned.contains("secret-value"), "{cleaned}");
+    }
+}

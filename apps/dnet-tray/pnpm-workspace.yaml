@@ -1,0 +1,7 @@
+# Supply-chain guard (ADR-0007 R3: an npm tree is a supply chain, so it is kept small and visible).
+#
+# - A version must be at least 14 days old (in minutes) before it can be installed, so a freshly
+#   published malicious release cannot arrive by a routine update.
+# - Install scripts do not run unless listed here. None is.
+minimumReleaseAge: 20160
+onlyBuiltDependencies: []

@@ -20,6 +20,9 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
+mod support;
+
+use dnet_core::ids::EndpointId;
 use dnet_core::profile::CoreBinding;
 use dnet_core::session::FailureCause;
 use dnet_core::tier::FailoverTier;
@@ -77,6 +80,8 @@ fn ipc01_request_classes_match_the_contract_table() {
         GetVersion,
         GetState,
         GetSession,
+        GetPaths,
+        GetStats,
         ListEndpoints,
         ListProfiles,
         ListRules,
@@ -91,14 +96,19 @@ fn ipc01_request_classes_match_the_contract_table() {
             endpoint: None,
         },
         Disconnect,
-        AddEndpoint,
-        RemoveEndpoint,
-        SetEndpointEnabled,
+        AddEndpoint(Box::new(support::new_endpoint())),
+        RemoveEndpoint {
+            endpoint: EndpointId::new(),
+        },
+        SetEndpointEnabled {
+            endpoint: EndpointId::new(),
+            enabled: false,
+        },
         AddRule,
         RemoveRule,
         SetProfileParams,
         EnableBrutal,
-        SetEncryptedDnsHandling,
+        SetEncryptedDnsHandling { block: true },
         StartProvisioning,
         CancelProvisioning,
     ] {

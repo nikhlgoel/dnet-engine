@@ -82,7 +82,10 @@ proptest! {
                 "status", "connect", "disconnect", "events", "profiles", "endpoints", "version",
                 "help", "--json", "--timeout", "--profile", "--accept-tier2", "--no-wait", "-f",
                 "--follow", "--allow-unprivileged-service", "0", "99999999999999999999", "-1",
-                "hy2-default", "",
+                "hy2-default", "", "add-endpoint", "remove-endpoint", "enable-endpoint",
+                "disable-endpoint", "encrypted-dns", "block", "allow", "--host",
+                "--credentials-file", "--credentials-stdin", "home", "import-feed", "check-updates", "--keys-file",
+                "--feed-file",
             ]),
             0..8
         )

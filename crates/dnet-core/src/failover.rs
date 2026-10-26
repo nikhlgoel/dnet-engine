@@ -31,6 +31,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
+use crate::degraded::NoMove;
 use crate::ids::InterfaceId;
 use crate::path::{NetworkPath, PathRole};
 use crate::quality::{QualityBand, QualityThresholds};
@@ -38,6 +39,23 @@ use crate::quality::{QualityBand, QualityThresholds};
 /// How much less loss (an absolute fraction) a poor path must show over a poor carrying path to be
 /// worth a move: below this the difference is noise, and a move costs more than it gains.
 const SAME_BAND_MARGIN: f64 = 0.15;
+
+/// Whether `candidate` is clearly better than the carrying path `current`, which is in `band`.
+/// Better: a higher band, or, among poor paths (as on a weak connection, where nothing is good),
+/// measurably less lossy. The decision to move and the explanation of why it has not moved both ask
+/// this, so they cannot disagree about it.
+fn is_better(
+    band: QualityBand,
+    current: &NetworkPath,
+    candidate: &NetworkPath,
+    band_of: &impl Fn(&NetworkPath) -> QualityBand,
+) -> bool {
+    band_of(candidate) > band
+        || (band == QualityBand::Poor
+            && band_of(candidate) == QualityBand::Poor
+            && candidate.quality.is_measured()
+            && candidate.quality.loss_ewma + SAME_BAND_MARGIN <= current.quality.loss_ewma)
+}
 
 /// Tunable limits. The defaults are for campus and public Wi-Fi.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -51,6 +69,9 @@ pub struct FailoverConfig {
     pub stable_for: Duration,
     /// Minimum time between a move and the next voluntary one.
     pub min_dwell: Duration,
+    /// A path reported as degraded must stay `Good` this long before it is reported recovered
+    /// (T084). It is a statement to the user, not a decision, so it is as patient as `degrade_for`.
+    pub recover_for: Duration,
     /// SC-007: at most this many moves in `window`, counting forced ones, which block further
     /// voluntary moves but are never blocked themselves.
     pub max_moves: usize,
@@ -65,6 +86,7 @@ impl Default for FailoverConfig {
             unusable_for: Duration::from_secs(4),
             stable_for: Duration::from_secs(30),
             min_dwell: Duration::from_secs(120),
+            recover_for: Duration::from_secs(10),
             max_moves: 4,
             window: Duration::from_secs(600),
         }
@@ -229,17 +251,10 @@ impl FailoverState {
         let urgent = band == QualityBand::Unusable && held(next.unusable_since, cfg.unusable_for);
         let sustained = urgent || held(next.below_good_since, cfg.degrade_for);
         if band < QualityBand::Good && sustained {
-            // A better path, and a proven one. Better: a higher band, or, among poor paths (as on
-            // a weak connection, where nothing is good), clearly less lossy. Proven: a good path has
-            // been good and measured for `stable_for`; a poor one has at least been measured. When
-            // the carrying path is `Unusable`, waiting for proof costs more than a gamble does.
-            let better = |p: &NetworkPath| {
-                band_of(p) > band
-                    || (band == QualityBand::Poor
-                        && band_of(p) == QualityBand::Poor
-                        && p.quality.is_measured()
-                        && p.quality.loss_ewma + SAME_BAND_MARGIN <= current.quality.loss_ewma)
-            };
+            // A better path (see `is_better`), and a proven one. Proven: a good path has been good
+            // and measured for `stable_for`; a poor one has at least been measured. When the
+            // carrying path is `Unusable`, waiting for proof costs more than a gamble does.
+            let better = |p: &NetworkPath| is_better(band, current, p, &band_of);
             let proven = |p: &NetworkPath| {
                 if band_of(p) == QualityBand::Good {
                     stable(p)
@@ -285,6 +300,56 @@ impl FailoverState {
             }
         }
         (next, Decision::Stay)
+    }
+
+    /// Why the machine is staying on the carrying path, for a caller that has found it poor (T084).
+    ///
+    /// The answer is the first thing that is true of these, in the order a person would want to hear
+    /// it: there is no other usable path; the other paths are no better; a move was made too recently;
+    /// the recent-moves budget is used up; or a better path exists and has not yet proven itself.
+    /// With nothing carrying there is nothing to stay on, and the answer is `OnlyPath`.
+    #[must_use]
+    pub fn explain_staying(
+        &self,
+        paths: &[NetworkPath],
+        now: Instant,
+        cfg: &FailoverConfig,
+    ) -> NoMove {
+        let band_of = |p: &NetworkPath| p.quality.band(&cfg.thresholds);
+        let usable = |p: &NetworkPath| p.role != PathRole::Unusable;
+        let Some(current) = self
+            .carrying
+            .and_then(|id| paths.iter().find(|p| p.interface_id == id))
+            .filter(|p| usable(p))
+        else {
+            return NoMove::OnlyPath;
+        };
+        let band = band_of(current);
+        let mut others = paths
+            .iter()
+            .filter(|p| usable(p) && p.interface_id != current.interface_id)
+            .peekable();
+        if others.peek().is_none() {
+            return NoMove::OnlyPath;
+        }
+        if !others.any(|p| is_better(band, current, p, &band_of)) {
+            return NoMove::NoBetterPath;
+        }
+        let dwelled = self
+            .moved_at
+            .is_none_or(|at| now.saturating_duration_since(at) >= cfg.min_dwell);
+        if !dwelled {
+            return NoMove::Dwell;
+        }
+        let recent = self
+            .moves
+            .iter()
+            .filter(|at| now.saturating_duration_since(**at) < cfg.window)
+            .count();
+        if recent >= cfg.max_moves {
+            return NoMove::Budget;
+        }
+        NoMove::Proving
     }
 
     fn reset_timers(&mut self) {
@@ -333,6 +398,7 @@ fn best(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::degraded::NoMove;
     use crate::path::{PathKind, PathQuality};
     use crate::quality::PathSample;
 
@@ -936,5 +1002,101 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ------------------------------------------------------------------ why a poor path is kept (T084)
+
+    fn why(s: &FailoverState, paths: &[NetworkPath], at: Instant) -> NoMove {
+        s.explain_staying(paths, at, &cfg())
+    }
+
+    #[test]
+    fn with_no_other_usable_path_the_reason_is_that_it_is_the_only_one() {
+        let c = Clock::new();
+        let s = FailoverState::carrying_on(id(1), c.at(0));
+        assert_eq!(why(&s, &[poor(1, 0)], c.at(1)), NoMove::OnlyPath);
+        assert_eq!(
+            why(&s, &[poor(1, 0), down(2, 0)], c.at(1)),
+            NoMove::OnlyPath,
+            "a network that is down is not an alternative"
+        );
+    }
+
+    #[test]
+    fn other_paths_that_are_no_better_are_said_to_be_no_better() {
+        let c = Clock::new();
+        let s = FailoverState::carrying_on(id(1), c.at(0));
+        assert_eq!(
+            why(&s, &[poor(1, 0), poor(2, 0)], c.at(1)),
+            NoMove::NoBetterPath
+        );
+        assert_eq!(
+            why(&s, &[poor(1, 0), unusable(2, 0)], c.at(1)),
+            NoMove::NoBetterPath
+        );
+        // Slightly less lossy is inside the noise margin: not a reason to move.
+        assert_eq!(
+            why(&s, &[path(1, 0, 0.30, 40), path(2, 0, 0.25, 40)], c.at(1)),
+            NoMove::NoBetterPath
+        );
+    }
+
+    #[test]
+    fn a_better_path_that_has_not_proven_itself_is_still_being_proven() {
+        let c = Clock::new();
+        let mut s = FailoverState::carrying_on(id(1), c.at(0));
+        let paths = [poor(1, 0), good(2, 0)];
+        assert_eq!(step(&mut s, &paths, c.at(0)), Decision::Stay);
+        assert_eq!(why(&s, &paths, c.at(5)), NoMove::Proving);
+    }
+
+    #[test]
+    fn a_better_path_is_held_back_by_the_dwell_after_a_recent_move() {
+        let c = Clock::new();
+        let mut s = FailoverState::carrying_on(id(1), c.at(0));
+        // Path 1 is lost: a forced move to 2, which starts the dwell.
+        assert_eq!(
+            step(&mut s, &[down(1, 0), poor(2, 0)], c.at(0)),
+            moved(2, MoveReason::Lost, Some(1))
+        );
+        // Path 3 turns up and is good, and has been for the whole stability wait. The carrying path
+        // has been poor long enough. Only the dwell stands in the way.
+        let paths = [down(1, 0), poor(2, 0), good(3, 0)];
+        assert_eq!(step(&mut s, &paths, c.at(20)), Decision::Stay);
+        assert_eq!(step(&mut s, &paths, c.at(60)), Decision::Stay);
+        assert_eq!(why(&s, &paths, c.at(60)), NoMove::Dwell);
+        // And once the dwell has passed, the machine does move: the explanation was the truth.
+        assert_eq!(
+            step(&mut s, &paths, c.at(121)),
+            moved(3, MoveReason::Degraded, Some(2))
+        );
+    }
+
+    #[test]
+    fn a_better_path_is_held_back_by_the_move_budget() {
+        let c = Clock::new();
+        let tight = FailoverConfig {
+            max_moves: 1,
+            min_dwell: Duration::ZERO,
+            ..cfg()
+        };
+        let mut s = FailoverState::carrying_on(id(1), c.at(0));
+        let (next, d) = s.evaluate(&[down(1, 0), poor(2, 0)], c.at(0), &tight);
+        s = next;
+        assert_eq!(d, moved(2, MoveReason::Lost, Some(1)));
+        let paths = [down(1, 0), poor(2, 0), good(3, 0)];
+        for t in [20, 60] {
+            let (next, d) = s.evaluate(&paths, c.at(t), &tight);
+            s = next;
+            assert_eq!(d, Decision::Stay, "t={t}");
+        }
+        assert_eq!(s.explain_staying(&paths, c.at(60), &tight), NoMove::Budget);
+    }
+
+    #[test]
+    fn with_nothing_carrying_there_is_nothing_to_explain_but_the_only_path_answer() {
+        let c = Clock::new();
+        let s = FailoverState::new();
+        assert_eq!(why(&s, &[poor(1, 0)], c.at(1)), NoMove::OnlyPath);
     }
 }

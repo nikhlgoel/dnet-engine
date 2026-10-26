@@ -1,0 +1,22 @@
+[package]
+name = "spike-tauri-tray"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Measurement spike: what the mandated UI stack costs as a tray-resident app. Not product code."
+
+# Detached from the main workspace on purpose: it pulls in a large dependency tree that the
+# engine's own builds and CI must not pay for.
+[workspace]
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+
+[build-dependencies]
+tauri-build = "2"
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+strip = true

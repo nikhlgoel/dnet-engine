@@ -411,8 +411,10 @@ confirm the login can be reached and completed with the application installed.
 **Resource impact**
 
 - **SC-012**: The installer is 60 MB or smaller.
-- **SC-013**: While connected and idle, total memory use across all components stays at or below
-  150 MB.
+- **SC-013**: While connected and idle with the window closed, combined **private** memory across all
+  components stays at or below 150 MB. With the window open it stays at or below 300 MB, and the window
+  is loaded within 600 ms of opening. (Reworded 2026-10-24 by ADR-0007: the earlier text named neither a
+  state nor a metric.)
 - **SC-014**: While connected and idle, total processor use stays below 1% of a four-core machine.
 - **SC-015**: A developer running a compile, a test suite, and an editor sees no measurable slowdown
   attributable to the product while it is connected.

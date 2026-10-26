@@ -9,6 +9,7 @@
 //! - [`envelope`]: DSSE v1 parsing, PAE, canonical base64, the size cap, and signature counting.
 //! - [`keys`]: the root-signed keys document that delegates signing keys.
 //! - [`document`]: the closed v1 feed schema and its parameter bounds.
+//! - [`applied`]: what an applied feed changes for the client, and what it only proposes for the endpoint.
 //! - [`state`]: acceptance order, rollback and equivocation, rule R, and restore at startup.
 //! - [`fetch`]: where the files live (D1) and when fetching may use which network (D2).
 //!
@@ -16,14 +17,17 @@
 //! names a field and never quotes the input. Errors about a payload arise only after the
 //! signature threshold is met, so any text they carry was authorised by the signing keys.
 
+pub mod applied;
 pub mod document;
 pub mod envelope;
 pub mod fetch;
 pub mod keys;
+pub mod sign;
 pub mod state;
 
 use ed25519_dalek::VerifyingKey;
 
+pub use applied::{staged_endpoint_updates, ClientDefinitions, StagedEndpointUpdate};
 pub use document::FeedDocument;
 pub use keys::KeysDocument;
 pub use state::{

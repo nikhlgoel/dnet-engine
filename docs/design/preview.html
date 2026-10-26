@@ -1,0 +1,566 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DNet Engine — design preview (v3, “Orbit”)</title>
+<link rel="stylesheet" href="tokens.css">
+<style>
+  * { box-sizing: border-box; }
+  html { background: var(--c-base); }
+  body { margin: 0; font: var(--fs-md)/var(--lh-body) var(--font-ui); color: var(--c-text); background: var(--c-base); }
+  h1, h2, h3, p, ul, ol { margin: 0; padding: 0; }
+  ul, ol { list-style: none; }
+  button { font: inherit; color: inherit; }
+  .num { font-family: var(--font-num); font-variant-numeric: tabular-nums; }
+  .disp { font-family: var(--font-display); }
+  :focus-visible { outline: 2px solid var(--c-focus); outline-offset: 2px; border-radius: var(--r-ctl); }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+  /* ---------- preview furniture (not part of the product) ---------- */
+  .bar { position: sticky; top: 0; z-index: 20; display: flex; flex-wrap: wrap; gap: var(--s-2) var(--s-4); align-items: center;
+         padding: var(--s-2) var(--s-5); background: var(--c-raised); border-bottom: 1px solid var(--c-line); font-size: var(--fs-sm); }
+  .bar label { display: inline-flex; gap: var(--s-2); align-items: center; color: var(--c-text-2); }
+  .bar select, .bar button { background: var(--c-card); color: var(--c-text); border: 1px solid var(--c-line-strong); border-radius: var(--r-ctl); min-height: 30px; padding: 0 var(--s-2); }
+  .bar .note { margin-left: auto; color: var(--c-text-3); font-size: var(--fs-xs); }
+  .stage-page { padding: var(--s-5); display: grid; gap: var(--s-6); justify-items: center; }
+  .stage-page > h2 { justify-self: start; font-size: var(--fs-lg); font-weight: 600; }
+  .stage-page > h2 small { color: var(--c-text-3); font-weight: 400; margin-left: var(--s-2); }
+
+  /* ---------- the window ---------- */
+  .window { width: min(960px, 100%); height: 660px; container-type: inline-size; display: grid; grid-template-rows: 32px 1fr; border: 1px solid var(--c-line-strong);
+            border-radius: var(--r-card); overflow: hidden; background: var(--c-base); resize: horizontal; min-width: 560px; max-width: 100%; }
+  .titlebar { display: flex; align-items: center; justify-content: flex-end; gap: 0; background: var(--c-card); border-bottom: 1px solid var(--c-line); color: var(--c-text-2); font-size: var(--fs-xs); }
+  .titlebar span { width: 46px; text-align: center; line-height: 32px; }
+  .app { position: relative; isolation: isolate; display: grid; grid-template-rows: auto 1fr auto auto; min-height: 0; overflow: hidden; --ambient: var(--c-text-3); }
+  .app[data-lamp="ok"] { --ambient: var(--c-ok); } .app[data-lamp="probe"] { --ambient: var(--c-probe); }
+  .app[data-lamp="warn"] { --ambient: var(--c-warn); } .app[data-lamp="fail"] { --ambient: var(--c-fail); }
+  .app::before { content: ""; position: absolute; inset: 0; z-index: -1; transition: background var(--dur-3) var(--ease);
+    background:
+      radial-gradient(60% 52% at 50% 36%, color-mix(in srgb, var(--ambient) var(--ambient-strength), transparent), transparent 72%),
+      radial-gradient(circle at center, var(--dot-grid) 1px, transparent 1.4px) 0 0 / var(--dot-grid-step) var(--dot-grid-step);
+    -webkit-mask-image: radial-gradient(75% 70% at 50% 42%, #000 25%, transparent 100%); mask-image: radial-gradient(75% 70% at 50% 42%, #000 25%, transparent 100%); }
+  .app::after { content: ""; position: absolute; inset: 0; z-index: -2; background: var(--c-base); }
+
+  /* top: the wordmark plate, and the heartbeat */
+  .top { display: flex; align-items: center; justify-content: space-between; padding: var(--s-4) var(--s-5) 0; }
+  .plate { display: inline-flex; align-items: flex-end; gap: var(--s-3); background: none; border: 0; padding: 4px; cursor: pointer; border-radius: var(--r-ctl); color: var(--c-text); }
+  .plate .engine { font: 500 10px/1 var(--font-display); letter-spacing: 0.42em; color: var(--c-text-3); padding-bottom: 3px; text-transform: uppercase; }
+  .wm circle { transform-box: fill-box; transform-origin: center; animation: boot var(--dur-3) var(--ease) backwards; }
+  @keyframes boot { from { opacity: 0; transform: scale(0.2); } }
+  [data-motion="reduce"] .wm circle { animation: none; }
+  .heartbeat { display: inline-flex; align-items: center; gap: var(--s-2); color: var(--c-text-3); font-size: var(--fs-xs); font-family: var(--font-display); letter-spacing: 0.08em; text-transform: uppercase; }
+  .heartbeat i { width: 6px; height: 6px; border-radius: 50%; background: var(--c-text-2); animation: beat 2s ease-in-out infinite; }
+  [data-motion="reduce"] .heartbeat i { animation: none; }
+  @keyframes beat { 50% { opacity: 0.25; } }
+
+  /* the stage: scene (canvas + networks), then the words and the control */
+  .stage { display: flex; flex-direction: column; min-height: 0; }
+  .scene { position: relative; flex: 1; min-height: 200px; }
+  .scene canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .core-hit { position: absolute; border-radius: 50%; cursor: pointer; transition: box-shadow var(--dur-2) var(--ease); }
+  .core-hit:hover { box-shadow: 0 0 0 1px var(--c-line-strong); }
+  .sats { position: absolute; inset: 0; pointer-events: none; }
+  .sat { position: absolute; pointer-events: auto; display: grid; grid-template-columns: auto 1fr; gap: 1px 10px; align-items: center; min-width: 148px; padding: 8px 12px;
+         border: 1px solid transparent; border-radius: 12px; background: color-mix(in srgb, var(--c-card) 72%, transparent); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }
+  .sat.l { transform: translate(-100%, -50%); } .sat.r { transform: translate(0, -50%); }
+  .sat svg { grid-row: 1 / 3; color: var(--c-text-2); }
+  .sat .name { font: 500 14px/1.2 var(--font-display); letter-spacing: 0.01em; }
+  .sat .role { display: flex; align-items: center; gap: 6px; font-size: var(--fs-xs); color: var(--c-text-2); }
+  .sat .mk { width: 9px; height: 9px; flex: none; }
+  .sat .m { grid-column: 1 / -1; font-size: var(--fs-xs); color: var(--c-text-2); padding-top: 2px; white-space: nowrap; }
+  .sat[data-role="carry"] { border-color: color-mix(in srgb, var(--ambient) 40%, transparent); background: color-mix(in srgb, var(--c-card) 88%, transparent); }
+  .sat[data-role="lost"] { border-style: dashed; color: var(--c-text-3); }
+  .badge-concept { position: absolute; top: 6px; left: 50%; transform: translateX(-50%); font-size: var(--fs-xs); padding: 2px var(--s-3); border: 1px dashed var(--c-line-strong); border-radius: var(--r-pill); color: var(--c-text-2); background: var(--c-card); }
+
+  .caption { display: grid; justify-items: center; gap: var(--s-2); padding: 0 var(--s-5) var(--s-3); text-align: center; }
+  .caption h1 { font: 500 30px/1.1 var(--font-display); letter-spacing: -0.005em; font-variation-settings: "wdth" 92; }
+  .caption[data-fail] h1 { font-size: var(--fs-xl); }
+  .caption .because { color: var(--c-text-2); max-width: 54ch; min-height: 3em; }
+  .row-actions { display: flex; gap: var(--s-3); align-items: center; justify-content: center; flex-wrap: wrap; }
+  .pill { display: inline-flex; align-items: center; gap: var(--s-3); height: 44px; padding: 0 var(--s-4) 0 var(--s-2); border: 1px solid var(--c-line); border-radius: var(--r-pill); background: color-mix(in srgb, var(--c-card) 70%, transparent); cursor: pointer; transition: background var(--dur-1) var(--ease); }
+  .pill:hover { background: var(--c-raised); }
+  .pill .track { width: 44px; height: 28px; border-radius: var(--r-pill); border: 1px solid var(--c-line-strong); background: var(--c-base); position: relative; transition: background var(--dur-2) var(--ease); }
+  .pill .track::after { content: ""; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: var(--c-text-2); transition: transform var(--dur-2) var(--ease), background var(--dur-2) var(--ease); }
+  .pill[aria-checked="true"] .track { background: var(--c-paper); border-color: var(--c-paper); }
+  .pill[aria-checked="true"] .track::after { transform: translateX(16px); background: var(--c-on-paper); }
+  .pill[aria-busy="true"] .track { background: repeating-linear-gradient(135deg, var(--c-base) 0 6px, var(--c-raised) 6px 12px); }
+  .pill .w { font: 500 var(--fs-lg)/1 var(--font-display); letter-spacing: 0.02em; min-width: 6.4em; text-align: left; }
+  .btn { display: inline-flex; align-items: center; justify-content: center; gap: var(--s-2); min-height: var(--hit); padding: 0 var(--s-4); border-radius: var(--r-ctl); border: 1px solid var(--c-line-strong); background: transparent; color: var(--c-text); cursor: pointer; font-weight: 500; transition: background var(--dur-1) var(--ease); }
+  .btn:hover { background: var(--c-raised); } .btn:active { background: var(--c-line); }
+  .btn.primary { background: var(--c-paper); color: var(--c-on-paper); border-color: var(--c-paper); }
+
+  /* instruments: one compact strip */
+  .strip { position: relative; margin: 0 var(--s-5) var(--s-3); display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)) auto; border-radius: var(--r-card); background: color-mix(in srgb, var(--c-card) 78%, transparent); }
+  .cell { display: grid; grid-template-columns: 1fr auto; grid-template-rows: auto auto; column-gap: var(--s-3); padding: 10px var(--s-4); border-left: 1px solid var(--c-line); min-width: 0; align-items: end; }
+  .cell:first-child { border-left: 0; }
+  .cell .k { grid-column: 1 / -1; font: 500 10px/1.4 var(--font-display); letter-spacing: 0.16em; text-transform: uppercase; color: var(--c-text-3); }
+  .cell .v { font: 400 24px/1.1 var(--font-num); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .cell .v small { font: 12px var(--font-display); letter-spacing: 0.04em; color: var(--c-text-2); margin-left: 3px; }
+  .cell .v.na { color: var(--c-text-3); }
+  .cell .t { width: 64px; height: 22px; color: var(--c-text-3); align-self: center; }
+  .cell .d { grid-column: 1 / -1; font-size: var(--fs-xs); color: var(--c-text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .more { display: grid; place-items: center; width: 44px; border: 0; border-left: 1px solid var(--c-line); background: none; cursor: pointer; color: var(--c-text-2); border-radius: 0 var(--r-card) var(--r-card) 0; }
+  .more:hover { background: var(--c-raised); color: var(--c-text); }
+  .more svg { transition: transform var(--dur-2) var(--ease); } .more[aria-expanded="true"] svg { transform: rotate(180deg); }
+  @container (max-width: 720px) { .strip { grid-template-columns: repeat(2, minmax(0, 1fr)) auto; } .cell:nth-child(3) { border-left: 0; border-top: 1px solid var(--c-line); } .cell:nth-child(4) { border-top: 1px solid var(--c-line); } .more { grid-row: 1 / 3; grid-column: 3; } }
+  .drawer { position: absolute; z-index: 6; left: var(--s-5); right: var(--s-5); bottom: 78px; padding: var(--s-4) var(--s-5); border: 1px solid var(--c-line-strong); border-radius: var(--r-card); background: var(--c-raised); box-shadow: var(--shadow-dialog); display: grid; gap: var(--s-4); grid-template-columns: 1.5fr 1fr; }
+  .drawer[hidden] { display: none; }
+  @container (max-width: 720px) { .drawer { grid-template-columns: 1fr; } }
+  .drawer h2 { font: 600 11px/1 var(--font-display); letter-spacing: 0.16em; text-transform: uppercase; color: var(--c-text-3); margin-bottom: var(--s-2); }
+  .drawer table { width: 100%; border-collapse: collapse; font-size: var(--fs-sm); }
+  .drawer th, .drawer td { text-align: left; padding: 5px var(--s-2) 5px 0; border-top: 1px solid var(--c-line); white-space: nowrap; }
+  .drawer th { color: var(--c-text-3); font-weight: 500; font-size: var(--fs-xs); border-top: 0; }
+  .drawer dl { margin: 0; display: grid; grid-template-columns: 1fr auto; gap: 0 var(--s-4); font-size: var(--fs-sm); }
+  .drawer dt { color: var(--c-text-2); padding: 5px 0; border-top: 1px solid var(--c-line); } .drawer dd { margin: 0; padding: 5px 0; border-top: 1px solid var(--c-line); text-align: right; }
+  .drawer dt:first-of-type, .drawer dd:first-of-type { border-top: 0; }
+  .drawer .fine { grid-column: 1 / -1; font-size: var(--fs-xs); color: var(--c-text-3); }
+
+  /* the dock replaces the sidebar */
+  .dock { display: flex; justify-content: center; padding: 0 var(--s-5) var(--s-4); }
+  .dock nav { display: flex; align-items: center; gap: 2px; padding: 5px; border: 0; box-shadow: 0 8px 28px rgb(0 0 0 / 0.14); border-radius: var(--r-pill); background: color-mix(in srgb, var(--c-raised) 82%, transparent); -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); }
+  .dock a { position: relative; display: inline-flex; align-items: center; gap: 8px; height: 40px; padding: 0 16px; border-radius: var(--r-pill); color: var(--c-text-2); text-decoration: none; font: 500 var(--fs-sm)/1 var(--font-display); letter-spacing: 0.06em; text-transform: uppercase; transition: background var(--dur-1) var(--ease), color var(--dur-1) var(--ease); }
+  .dock a:hover { background: var(--c-card); color: var(--c-text); }
+  .dock a[aria-current="page"] { color: var(--c-text); background: var(--c-card); }
+  .dock a[aria-current="page"]::before { content: ""; position: absolute; top: 3px; left: 50%; width: 4px; height: 4px; margin-left: -2px; border-radius: 50%; background: var(--c-text); }
+  .dock .sep { width: 3px; height: 3px; border-radius: 50%; background: var(--c-line-strong); }
+  @container (max-width: 760px) { .dock a:not([aria-current="page"]) .label { display: none; } .dock a { padding: 0 12px; } .dock .sep { display: none; } }
+
+  /* ---------- dialog, tray, palette, type (unchanged in spirit from v2) ---------- */
+  dialog { border: 1px solid var(--c-line-strong); border-radius: var(--r-card); padding: 0; background: var(--c-raised); color: var(--c-text); width: min(460px, calc(100% - 32px)); box-shadow: var(--shadow-dialog); }
+  dialog::backdrop { background: var(--c-scrim); }
+  dialog .body { padding: var(--s-5); display: grid; gap: var(--s-3); }
+  dialog h2 { font: 600 var(--fs-xl)/var(--lh-tight) var(--font-display); }
+  dialog .consequence { padding: var(--s-3) var(--s-4); border-left: 3px solid var(--c-warn); background: var(--c-warn-bg); }
+  dialog .foot { display: flex; justify-content: flex-end; gap: var(--s-3); padding: var(--s-4) var(--s-5); border-top: 1px solid var(--c-line); }
+  .tray { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: var(--s-6); width: min(960px, 100%); align-items: start; }
+  .menu { background: var(--c-raised); border: 1px solid var(--c-line-strong); border-radius: var(--r-card); padding: var(--s-1); box-shadow: var(--shadow-dialog); max-width: 340px; }
+  .menu .item { display: flex; align-items: center; gap: var(--s-3); min-height: 32px; padding: 0 var(--s-3); border-radius: var(--r-ctl); }
+  .menu .item.head { min-height: 40px; font-weight: 600; } .menu .item.dim { color: var(--c-text-2); font-size: var(--fs-sm); min-height: 24px; } .menu .item.hot { background: var(--c-card); }
+  .menu .sep { height: 1px; background: var(--c-line); margin: var(--s-1) var(--s-2); }
+  .icons { display: flex; flex-wrap: wrap; gap: var(--s-4); }
+  .icons figure { margin: 0; display: grid; gap: var(--s-2); justify-items: center; font-size: var(--fs-xs); color: var(--c-text-2); }
+  .icons .plate2 { display: grid; gap: var(--s-2); justify-items: center; padding: var(--s-3); border-radius: var(--r-ctl); }
+  .icons .on-dark { background: #101010; } .icons .on-light { background: #f3f3f3; }
+  .palette, .specimen { width: min(960px, 100%); display: grid; gap: var(--s-5); }
+  .swatches { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: var(--s-3); }
+  .sw { border: 1px solid var(--c-line); border-radius: var(--r-ctl); overflow: hidden; background: var(--c-card); font-size: var(--fs-xs); }
+  .sw i { display: block; height: 40px; border-bottom: 1px solid var(--c-line); } .sw span { display: block; padding: var(--s-2); color: var(--c-text-2); } .sw b { color: var(--c-text); font-weight: 600; display: block; }
+  table.contrast { width: 100%; border-collapse: collapse; font-size: var(--fs-sm); }
+  table.contrast th, table.contrast td { text-align: left; padding: 6px var(--s-3); border-top: 1px solid var(--c-line); }
+  table.contrast th { color: var(--c-text-3); font-weight: 500; font-size: var(--fs-xs); }
+  .pass { color: var(--c-ok); } .fail { color: var(--c-fail); font-weight: 600; } .summary { font-weight: 600; }
+  .specimen .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: var(--s-4); }
+  .specimen .card { background: var(--c-card); border: 1px solid var(--c-line); border-radius: var(--r-card); padding: var(--s-4); display: grid; gap: var(--s-2); }
+  .specimen .k { font: 600 10px/1.4 var(--font-display); letter-spacing: 0.16em; text-transform: uppercase; color: var(--c-text-3); }
+  @media (forced-colors: active) { .pill .track::after { forced-color-adjust: none; background: ButtonText; } .pill[aria-checked="true"] .track { background: Highlight; } }
+</style>
+</head>
+<body>
+<div class="bar" role="toolbar" aria-label="Preview controls (not part of the product)">
+  <label>State
+    <select id="state">
+      <option value="off">Not connected</option><option value="probe">Probing</option><option value="ok" selected>Connected (Tier 2)</option>
+      <option value="warn">Degraded</option><option value="fail">Failed</option>
+    </select>
+  </label>
+  <label>Failure <select id="cause"></select></label>
+  <label>Networks
+    <select id="paths">
+      <option value="one">One Wi-Fi</option><option value="two" selected>Wi-Fi + phone (standby)</option>
+      <option value="three">Wi-Fi + phone + cable lost</option><option value="agg">Concept: both at once (v2, deferred)</option>
+    </select>
+  </label>
+  <label>Theme <select id="theme"><option value="">System</option><option value="dark">Dark</option><option value="light">Light</option></select></label>
+  <label><input type="checkbox" id="motion"> Reduce motion</label>
+  <button type="button" id="consent">Tier 2 consent</button>
+  <span class="note num" id="perf">scene —</span>
+</div>
+
+<div class="stage-page">
+  <h2>Main window <small>“Orbit”: drag the right edge to narrow it</small></h2>
+  <div class="window" id="window">
+    <div class="titlebar" aria-hidden="true"><span>–</span><span>□</span><span>×</span></div>
+    <div class="app" id="app" data-lamp="ok">
+      <header class="top">
+        <button class="plate" type="button" aria-label="DNet Engine — about">
+          <svg class="wm" id="wm" width="108" height="28" viewBox="0 0 108 28" aria-hidden="true"></svg>
+          <span class="engine">engine</span>
+        </button>
+        <div class="heartbeat" aria-live="off"><i></i><span id="beat">Live · updated 1 s ago</span></div>
+      </header>
+
+      <main class="stage" aria-labelledby="headline">
+        <div class="scene" id="scene" role="group" aria-label="Your networks">
+          <canvas id="cv" aria-hidden="true"></canvas>
+          <div class="core-hit" id="corehit" aria-hidden="true"></div>
+          <ul class="sats" id="sats"></ul>
+          <div class="badge-concept" id="concept" hidden>Concept · using several networks at once is not in v1</div>
+        </div>
+        <div class="caption" id="caption">
+          <h1 id="headline">Connected</h1>
+          <p class="because" id="because"></p>
+          <div class="row-actions">
+            <button type="button" class="pill" id="switch" role="switch" aria-checked="true"><span class="track" aria-hidden="true"></span><span class="w" id="switchword">Stabilized</span></button>
+            <span id="action"></span>
+          </div>
+        </div>
+        <p class="sr-only" id="live" role="status" aria-live="polite"></p>
+      </main>
+
+      <section class="strip" id="strip" aria-label="Connection quality"></section>
+      <div class="drawer" id="drawer" hidden></div>
+
+      <div class="dock">
+        <nav aria-label="Sections">
+          <a href="#" aria-current="page"><svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="3" fill="currentColor"/></svg><span class="label">Status</span></a>
+          <i class="sep"></i>
+          <a href="#"><svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="6" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><rect x="4" y="14" width="16" height="6" rx="2" fill="none" stroke="currentColor" stroke-width="2"/></svg><span class="label">Endpoints</span></a>
+          <i class="sep"></i>
+          <a href="#"><svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M5 12h14M5 17h9" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"/></svg><span class="label">Rules</span></a>
+          <i class="sep"></i>
+          <a href="#"><svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-7 4 14 3-7h4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg><span class="label">Activity</span></a>
+          <i class="sep"></i>
+          <a href="#"><svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><span class="label">Settings</span></a>
+        </nav>
+      </div>
+    </div>
+  </div>
+
+  <h2>Tray <small>native menu; the window is only opened to read</small></h2>
+  <div class="tray">
+    <div class="menu" id="menu" role="img" aria-label="Tray menu preview"></div>
+    <div><p class="num" style="color:var(--c-text-2);margin-bottom:var(--s-3)">Tray icon states · 16 px and 32 px · dark and light taskbars</p><div class="icons" id="icons"></div></div>
+  </div>
+
+  <h2>Type <small>display voice (Bahnschrift, ships with Windows) · UI voice · readout voice</small></h2>
+  <section class="specimen"><div class="cards">
+    <div class="card"><span class="k">Display · state word</span><span class="disp" style="font-size:30px;font-weight:600;font-variation-settings:'wdth' 92">Connected, but slow</span><span class="disp" style="font-size:20px;font-weight:600">This network needs you to log in first.</span></div>
+    <div class="card"><span class="k">UI · sentences</span><span>Carrying your traffic through endpoint-1 using Hysteria 2. Wi-Fi is your only network, so nothing else can take over.</span></div>
+    <div class="card"><span class="k">Readout · figures</span><span class="num" style="font-size:24px">43.2 ms · 2.0 % · 0123456789</span><span class="num" style="font-size:13px;color:var(--c-text-2)">tabular, so digits never jitter</span></div>
+  </div></section>
+
+  <h2>Palette and live contrast check <small>computed from the values in force right now</small></h2>
+  <section class="palette">
+    <div class="swatches" id="swatches"></div>
+    <div><p class="summary" id="contrast-summary"></p>
+      <table class="contrast"><thead><tr><th>Pair</th><th>Where</th><th>Ratio</th><th>Needs</th><th></th></tr></thead><tbody id="contrast"></tbody></table></div>
+  </section>
+</div>
+
+<dialog id="dlg" aria-labelledby="dlg-h">
+  <form method="dialog">
+    <div class="body">
+      <h2 id="dlg-h">This profile will drop your connections when the network changes</h2>
+      <p>Hysteria 2 is the best way through on this network right now, but it has not been shown to keep a download alive when you move from Wi-Fi to another network.</p>
+      <p class="consequence">Your downloads and calls will drop when you switch networks.</p>
+      <p style="color:var(--c-text-2)">A profile that survives a switch is not available on this network.</p>
+    </div>
+    <div class="foot"><button class="btn" value="cancel" autofocus>Don't connect</button><button class="btn" value="ok">Connect anyway</button></div>
+  </form>
+</dialog>
+
+<script>
+'use strict';
+// Text goes into the page as text (textContent), never as markup built from data: the real application
+// renders what the service says the same way (design-system.md §14). innerHTML below is used only for
+// static SVG written in this file.
+const NS = 'http://www.w3.org/2000/svg';
+const $ = (id) => document.getElementById(id);
+function el(tag, props = {}, ...kids) { const n = document.createElement(tag); for (const [k, v] of Object.entries(props)) { if (k === 'class') n.className = v; else n.setAttribute(k, v); } for (const k of kids) n.append(k); return n; }
+function svg(inner, size = 24) { const s = document.createElementNS(NS, 'svg'); s.setAttribute('viewBox', '0 0 24 24'); s.setAttribute('width', size); s.setAttribute('height', size); s.setAttribute('aria-hidden', 'true'); s.innerHTML = inner; return s; }
+const reduced = () => document.body.dataset.motion === 'reduce' || matchMedia('(prefers-reduced-motion: reduce)').matches;
+const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+/* ---------- the wordmark: DNET in a 5×7 dot matrix ---------- */
+const GLYPH = { D: ['11110','10001','10001','10001','10001','10001','11110'], N: ['10001','11001','10101','10011','10001','10001','10001'], E: ['11111','10000','10000','11110','10000','10000','11111'], T: ['11111','00100','00100','00100','00100','00100','00100'] };
+(function wordmark() {
+  const s = $('wm'); let x = 2, n = 0;
+  for (const ch of 'DNET') { GLYPH[ch].forEach((row, y) => [...row].forEach((on, i) => { if (on === '1') { const c = document.createElementNS(NS, 'circle'); c.setAttribute('cx', x + i * 4); c.setAttribute('cy', 2 + y * 4); c.setAttribute('r', 1.35); c.setAttribute('fill', 'currentColor'); c.style.animationDelay = (n++ * 9) + 'ms'; s.append(c); } })); x += 27; }
+})();
+
+/* ---------- state, networks, instruments ---------- */
+const LAMPS = {
+  off:   '<circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2"/>',
+  probe: '<circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2" opacity=".35"/><path d="M12 4a8 8 0 0 1 8 8" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/>',
+  ok:    '<circle cx="12" cy="12" r="8.5" fill="currentColor"/>',
+  warn:  '<circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 4a8 8 0 0 0 0 16Z" fill="currentColor"/>',
+  fail:  '<rect x="3.5" y="3.5" width="17" height="17" rx="4.5" fill="currentColor"/><path d="M9 9l6 6M15 9l-6 6" stroke="var(--c-card)" stroke-width="2.4" stroke-linecap="round"/>',
+};
+const KIND = {
+  wifi: '<path d="M2.5 9a14 14 0 0 1 19 0M5.5 12.5a9.5 9.5 0 0 1 13 0M8.6 16a5 5 0 0 1 6.8 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="19.2" r="1.4" fill="currentColor"/>',
+  cell: '<rect x="7" y="2.5" width="10" height="19" rx="2.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M10.5 18.5h3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
+  eth:  '<rect x="4" y="5" width="16" height="9" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M8 14v4M12 14v4M16 14v4M7 18h10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
+};
+const CAUSES = {
+  NoEndpointReachable: ['None of your endpoints are reachable.', 'DNet Engine tried every endpoint you have added and none answered.', 'Check endpoints'],
+  AllProfilesBlocked: ['This network is blocking every connection method.', 'All three methods were tried and none got through.', 'Retry'],
+  CaptivePortalUnsatisfied: ['This network needs you to log in first.', 'It is asking for a sign-in page before it lets anything out.', 'Open login page'],
+  InsufficientPrivilege: ['DNet Engine needs administrator rights.', 'Its background service is not running with the permission it needs.', 'How to grant them'],
+  CoreFailedPersistently: ['A component keeps failing to start.', 'It stopped 5 times in a row, so DNet Engine has given up on it for now.', 'View diagnostics'],
+  NoUsablePath: ['No usable network connection.', 'This computer has no network that can reach the internet.', 'Show adapter state'],
+  ConfigurationInvalid: ['Configuration is invalid: the endpoint address is empty.', 'Nothing was changed on this computer.', 'Open the setting'],
+};
+const STATES = {
+  off:   { lamp: 'off',   word: 'Not connected', because: 'Your traffic is leaving this computer directly. Nothing is being changed.', on: false, sw: 'Stabilize', shape: 'ring' },
+  probe: { lamp: 'probe', word: 'Finding a way through', because: 'Trying Hysteria 2 — 6 s of 15 s. Next in line: VLESS + REALITY.', on: true, busy: true, sw: 'Working…', shape: 'ring' },
+  ok:    { lamp: 'ok',    word: 'Connected', because: 'Carrying your traffic over Hostel-5G through endpoint-1, using Hysteria 2.', on: true, sw: 'Stabilized', shape: 'sphere' },
+  warn:  { lamp: 'warn',  word: 'Connected, but slow', because: 'Hostel-5G is dropping 18 % of packets and no other network is ready to take over.', on: true, sw: 'Stabilized', shape: 'sphere' },
+  fail:  { lamp: 'fail',  word: null, because: null, on: false, sw: 'Stabilize', shape: 'cube' },
+};
+const NETS = {
+  Wifi:  { id: 'w', kind: 'wifi', name: 'Hostel-5G' },
+  Phone: { id: 'p', kind: 'cell', name: 'Pixel 8 · USB' },
+  Cable: { id: 'e', kind: 'eth', name: 'Ethernet' },
+};
+function networks(set, key, causeKey) {
+  const idle = key === 'off' || key === 'probe' || key === 'fail';
+  const q = key === 'warn' ? { rtt: 212, jit: 38, loss: 18 } : { rtt: 43, jit: 4, loss: 2 };
+  const carry = (n, extra = {}) => ({ ...n, role: idle ? 'avail' : 'carry', ...(idle ? {} : q), ...extra });
+  const stand = (n) => ({ ...n, role: idle ? 'avail' : 'standby', ...(idle ? {} : { rtt: 88, jit: 6, loss: 0 }) });
+  const lost = (n) => ({ ...n, role: 'lost' });
+  if (key === 'fail' && causeKey === 'NoUsablePath') return [lost(NETS.Wifi)];
+  if (set === 'one') return [carry(NETS.Wifi)];
+  if (set === 'two') return [carry(NETS.Wifi), stand(NETS.Phone)];
+  if (set === 'three') return [carry(NETS.Wifi), stand(NETS.Phone), lost(NETS.Cable)];
+  return [carry(NETS.Wifi, { share: 62 }), idle ? stand(NETS.Phone) : { ...NETS.Phone, role: 'carry', rtt: 88, jit: 6, loss: 0, share: 38 }];
+}
+const INSTR = {
+  off:   [['Latency', 'ms', '—'], ['Jitter', 'ms', '—'], ['Loss', '%', '—'], ['Stability', '', '—']],
+  probe: [['Latency', 'ms', '—'], ['Jitter', 'ms', '—'], ['Loss', '%', '—'], ['Stability', '', '—']],
+  ok:    [['Latency', 'ms', '43'], ['Jitter', 'ms', '4'], ['Loss', '%', '2'], ['Stability', '', '0 poor spells']],
+  warn:  [['Latency', 'ms', '212'], ['Jitter', 'ms', '38'], ['Loss', '%', '18'], ['Stability', '', '1 poor spell']],
+  fail:  [['Latency', 'ms', '—'], ['Jitter', 'ms', '—'], ['Loss', '%', '—'], ['Stability', '', '—']],
+};
+const DELTA = {
+  ok:   ['usually 40–48 ms', 'steady', 'usually 1–3 %', '3 h 12 m · 2 network changes'],
+  warn: ['usually 40–48 ms', 'usually 3–6 ms', 'usually 1–3 %', '1 poor spell · now'],
+};
+function spark(seed, bad, up) {
+  let x = seed, pts = [];
+  for (let i = 0; i < 40; i++) { x = (x * 1664525 + 1013904223) % 4294967296; const n = x / 4294967296; pts.push(bad ? 6 + n * 16 : 11 + n * 4 + Math.sin(i / 4) * 2); }
+  const path = pts.map((y, i) => `${(i / 39 * 100).toFixed(1)},${(22 - y).toFixed(1)}`).join(' ');
+  const s = document.createElementNS(NS, 'svg'); s.setAttribute('class', 't'); s.setAttribute('viewBox', '0 0 100 22'); s.setAttribute('preserveAspectRatio', 'none'); s.setAttribute('aria-hidden', 'true');
+  s.innerHTML = `<polyline points="${path}" fill="none" stroke="currentColor" stroke-width="1.4" vector-effect="non-scaling-stroke"/>`; return s;
+}
+
+let NET = [];
+function render() {
+  const key = $('state').value, S = STATES[key], cause = CAUSES[$('cause').value];
+  $('cause').disabled = key !== 'fail';
+  $('app').dataset.lamp = S.lamp;
+  const word = key === 'fail' ? cause[0] : S.word;
+  const because = key === 'fail' ? cause[1] : (key === 'ok' || key === 'warn') && $('paths').value === 'agg' ? 'Concept: carrying your traffic over Hostel-5G and Pixel 8 together, 62 % and 38 %.' : S.because;
+  $('headline').textContent = word; $('because').textContent = because;
+  $('caption').toggleAttribute('data-fail', key === 'fail');
+  const sw = $('switch'); sw.setAttribute('aria-checked', String(key === 'ok' || key === 'warn' || key === 'probe')); sw.setAttribute('aria-busy', String(!!S.busy)); $('switchword').textContent = S.sw;
+  const action = $('action'); action.replaceChildren(); if (key === 'fail') action.append(el('button', { type: 'button', class: 'btn primary' }, cause[2]));
+  $('live').textContent = word + '. ' + because;
+  $('concept').hidden = $('paths').value !== 'agg';
+
+  NET = networks($('paths').value, key, $('cause').value);
+  renderSats(); renderStrip(key); renderDrawer(key); renderMenu(key);
+  setTarget(S.shape, key); layout(); kick();
+}
+
+function renderSats() {
+  const ul = $('sats'); ul.replaceChildren();
+  NET.forEach((n, i) => {
+    const left = i % 2 === 0;
+    const marker = n.role === 'carry' ? '<circle cx="5" cy="5" r="4.2" fill="currentColor"/>' : n.role === 'lost' ? '<path d="M1.5 1.5l7 7M8.5 1.5l-7 7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>' : '<circle cx="5" cy="5" r="3.5" fill="none" stroke="currentColor" stroke-width="1.5"/>';
+    const mk = document.createElementNS(NS, 'svg'); mk.setAttribute('class', 'mk'); mk.setAttribute('viewBox', '0 0 10 10'); mk.setAttribute('aria-hidden', 'true'); mk.innerHTML = marker;
+    if (n.role === 'carry') mk.style.color = 'var(--ambient)';
+    const roleText = { carry: n.share ? `Carrying ${n.share} %` : 'Carrying', standby: 'Standby · ready', avail: 'Available', lost: 'Unavailable' }[n.role];
+    const metrics = n.role === 'carry' || n.role === 'standby' ? `${n.rtt} ms · ${n.loss} % loss` : n.role === 'lost' ? 'cable unplugged' : 'not measured';
+    const li = el('li', { class: 'sat ' + (left ? 'l' : 'r'), 'data-role': n.role, 'data-i': i });
+    li.append(svg(KIND[n.kind], 22), el('span', { class: 'name' }, n.name), el('span', { class: 'role' }, mk, roleText), el('span', { class: 'm num' }, metrics));
+    ul.append(li);
+  });
+}
+
+function renderStrip(key) {
+  const strip = $('strip'); strip.replaceChildren();
+  const rows = INSTR[key], d = DELTA[key];
+  rows.forEach(([k, unit, val], i) => {
+    const na = val === '—';
+    const v = el('div', { class: 'v' + (na ? ' na' : '') }, val, ...(na || !unit ? [] : [el('small', {}, unit)]));
+    const c = el('div', { class: 'cell' }, el('div', { class: 'k' }, k), v);
+    if (i < 3) c.append(na ? el('span', {}) : spark(11 + i * 17 + key.length, key === 'warn'));
+    else c.append(el('span', {}));
+    c.append(el('div', { class: 'd' }, na ? 'no measurement' : d ? d[i] : ''));
+    strip.append(c);
+  });
+  const more = el('button', { type: 'button', class: 'more', id: 'more', 'aria-expanded': String(!$('drawer').hidden), 'aria-controls': 'drawer', 'aria-label': 'Details' });
+  more.append(svg('<path d="M6 15l6-6 6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>', 18));
+  more.addEventListener('click', () => { const dr = $('drawer'); dr.hidden = !dr.hidden; more.setAttribute('aria-expanded', String(!dr.hidden)); });
+  strip.append(more);
+}
+
+function renderDrawer(key) {
+  const dr = $('drawer'); dr.replaceChildren();
+  const t = el('table', {}, el('thead', {}, el('tr', {}, ...['Network', 'Role', 'Latency', 'Jitter', 'Loss'].map((h) => el('th', {}, h)))));
+  const body = el('tbody', {});
+  NET.forEach((n) => { const m = n.role === 'carry' || n.role === 'standby'; body.append(el('tr', {}, el('td', {}, n.name), el('td', {}, { carry: 'Carrying', standby: 'Standby', avail: 'Available', lost: 'Unavailable' }[n.role]), el('td', { class: 'num' }, m ? n.rtt + ' ms' : '—'), el('td', { class: 'num' }, m ? n.jit + ' ms' : '—'), el('td', { class: 'num' }, m ? n.loss + ' %' : '—'))); });
+  t.append(body);
+  const live = key === 'ok' || key === 'warn';
+  const dl = el('dl', {}, ...[['Connected for', live ? '3 h 12 m' : '—'], ['Network changes', live ? '2' : '—'], ['…under a Tier 2 profile (breaks connections)', live ? '1' : '—'], ['Method switches', live ? '1' : '—'], ['Poor spells', live ? (key === 'warn' ? '1' : '0') : '—'], ['Longest poor spell', live ? (key === 'warn' ? '40 s' : '0 s') : '—']].flatMap(([a, b]) => [el('dt', {}, a), el('dd', { class: 'num' }, b)]));
+  dr.append(el('div', {}, el('h2', {}, 'Your networks'), t), el('div', {}, el('h2', {}, 'Since 14:42'), dl),
+    el('p', { class: 'fine' }, 'Counted on this computer. Nothing here compares with not using DNet Engine; a comparison would be a measurement you start, labelled with its time and method.'));
+}
+
+/* ---------- the scene: a dot figure, orbiting networks, dotted beams ---------- */
+const N = 520;
+const base = Array.from({ length: N }, () => [0, 0, 0]);
+const tgt = Array.from({ length: N }, () => [0, 0, 0]);
+let shape = 'sphere', stateKey = 'ok', ang = 0, roll = 0, W = 0, H = 0, cx = 0, cy = 0, R = 80, dpr = 1, slots = [];
+const cv = $('cv'), ctx = cv.getContext('2d');
+function pointFor(kind, i) {
+  if (kind === 'ring') { const track = i % 4, per = N / 4, a = Math.floor(i / 4) / per * Math.PI * 2, r = [0.8, 0.93, 1.06, 1.19][track]; return [Math.cos(a) * r, Math.sin(a) * r, 0]; }
+  if (kind === 'cube') { const face = i % 6, k = Math.floor(i / 6), side = Math.ceil(Math.sqrt(N / 6)), u = ((k % side) + 0.5) / side * 2 - 1, v = (Math.floor(k / side) + 0.5) / side * 2 - 1, s = 0.82;
+    return [[s, u * s, v * s], [-s, u * s, v * s], [u * s, s, v * s], [u * s, -s, v * s], [u * s, v * s, s], [u * s, v * s, -s]][face]; }
+  const y = 1 - 2 * (i + 0.5) / N, r = Math.sqrt(1 - y * y), th = i * 2.399963; return [Math.cos(th) * r, y, Math.sin(th) * r];
+}
+function setTarget(kind, key) { shape = kind; stateKey = key; for (let i = 0; i < N; i++) tgt[i] = pointFor(kind, i); if (reduced()) for (let i = 0; i < N; i++) base[i] = tgt[i].slice(); }
+for (let i = 0; i < N; i++) base[i] = pointFor('sphere', i);
+const dust = Array.from({ length: 70 }, (_, i) => ({ x: ((i * 97) % 100) / 100, y: ((i * 53) % 100) / 100, s: 0.4 + ((i * 31) % 10) / 14, v: 0.004 + ((i * 17) % 10) / 3000 }));
+
+function layout() {
+  const r = $('scene').getBoundingClientRect(); W = r.width; H = r.height; dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+  cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  cx = W / 2; cy = H / 2; R = Math.max(48, Math.min(H * 0.34, 96));
+  const dx = Math.min(W * 0.33, 290), up = H * 0.12, lo = H * 0.3;
+  slots = [[cx - dx, cy - up], [cx + dx, cy - up], [cx - dx * 0.82, cy + lo], [cx + dx * 0.82, cy + lo]];
+  const hit = $('corehit'); const hr = R * 1.25; hit.style.cssText = `left:${cx - hr}px;top:${cy - hr}px;width:${hr * 2}px;height:${hr * 2}px`;
+  // Each chip is kept inside the scene whatever its text: measured, then clamped.
+  document.querySelectorAll('.sat').forEach((n) => { const s = slots[+n.dataset.i]; if (!s) return; const w = n.offsetWidth, left = n.classList.contains('l'); s[0] = left ? Math.max(s[0], w + 14) : Math.min(s[0], W - w - 14); n.style.left = s[0] + 'px'; n.style.top = s[1] + 'px'; });
+  if (reduced() || !running) draw(0, 0);
+}
+
+function colors() { return { text3: css('--c-text-3'), text2: css('--c-text-2'), ok: css('--c-ok'), probe: css('--c-probe'), warn: css('--c-warn'), fail: css('--c-fail'), line: css('--c-line-strong') }; }
+let C = colors();
+const hash = (i) => { const x = Math.sin(i * 12.9898) * 43758.5453; return x - Math.floor(x); };
+function draw(t, dt) {
+  const t0 = performance.now(); C = C || colors();
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, W, H);
+  const lamp = { off: C.text3, probe: C.probe, ok: C.ok, warn: C.warn, fail: C.fail }[stateKey];
+  const still = reduced();
+  // drifting dust, for depth
+  ctx.fillStyle = C.text3;
+  for (const d of dust) { if (!still) { d.y -= d.v * dt * 30; if (d.y < 0) d.y = 1; } ctx.globalAlpha = 0.18; ctx.beginPath(); ctx.arc(d.x * W, d.y * H, d.s, 0, 6.283); ctx.fill(); }
+  // beams from each network to the core
+  NET.forEach((n, i) => {
+    const s = slots[i]; if (!s) return; const dxs = cx - s[0], dys = cy - s[1], dist = Math.hypot(dxs, dys), ux = dxs / dist, uy = dys / dist;
+    const x0 = s[0] + (s[0] < cx ? 4 : -4) , y0 = s[1], x1 = cx - ux * R * 1.28, y1 = cy - uy * R * 1.28, len = Math.hypot(x1 - x0, y1 - y0), cnt = Math.max(6, Math.floor(len / 7));
+    const probing = stateKey === 'probe', carry = n.role === 'carry', poor = carry && stateKey === 'warn';
+    const col = carry ? lamp : (probing && n.role === 'avail' ? C.probe : C.text3);
+    ctx.fillStyle = col;
+    for (let k = 0; k < cnt; k++) {
+      let u = k / cnt;
+      if (carry && !still) u = (u + t * (poor ? 0.12 : 0.28)) % 1;          // dots travel toward the core
+      if (probing && !still) u = (u + t * 0.35 + i * 0.3) % 1;
+      if (n.role === 'lost' && k % 3) continue; if (n.role === 'avail' && !probing && k % 2) continue; if (n.role === 'standby' && k % 2) continue;
+      if (poor && hash(k + Math.floor(t * 4)) < 0.35) continue;               // a ragged beam: loss, drawn
+      const px = x0 + (x1 - x0) * u, py = y0 + (y1 - y0) * u + (poor && !still ? (hash(k * 7 + Math.floor(t * 8)) - 0.5) * 6 : 0);
+      ctx.globalAlpha = carry ? 0.35 + 0.65 * Math.sin(Math.PI * u) : n.role === 'lost' ? 0.25 : 0.4;
+      ctx.beginPath(); ctx.arc(px, py, carry ? 2.1 : 1.5, 0, 6.283); ctx.fill();
+    }
+  });
+  // the core figure
+  const speed = { off: 0.03, probe: 0.5, ok: 0.34, warn: 0.2, fail: 0.12 }[stateKey]; if (!still) { ang += speed * dt; roll += (stateKey === 'fail' ? 0.1 : 0) * dt; }
+  const ca = Math.cos(ang), sa = Math.sin(ang), pitch = shape === 'ring' ? 0.0 : 0.38, cp = Math.cos(pitch), sp = Math.sin(pitch), cr = Math.cos(roll), sr = Math.sin(roll);
+  const pts = [];
+  for (let i = 0; i < N; i++) {
+    const b = base[i], g = tgt[i], k = still ? 1 : 0.09; b[0] += (g[0] - b[0]) * k; b[1] += (g[1] - b[1]) * k; b[2] += (g[2] - b[2]) * k;
+    let x = b[0], y = b[1], z = b[2];
+    if (shape === 'ring') { const tilt = 0.9, yy = y * Math.cos(tilt) - z * Math.sin(tilt), zz = y * Math.sin(tilt) + z * Math.cos(tilt); y = yy; z = zz; }
+    const x1 = x * ca + z * sa, z1 = -x * sa + z * ca; let y1 = y;
+    if (stateKey === 'fail') { const x2 = x1 * cr - y1 * sr; y1 = x1 * sr + y1 * cr; pts.push([x2, y1 * cp - z1 * sp, y1 * sp + z1 * cp, i, b[0], b[1]]); continue; }
+    pts.push([x1, y1 * cp - z1 * sp, y1 * sp + z1 * cp, i, b[0], b[1]]);
+  }
+  pts.sort((a, b) => a[2] - b[2]);
+  const scanHead = t * 3.2;
+  for (const [x, y, z, i, bx, by] of pts) {
+    const depth = (z + 1.2) / 2.4, f = 3.4 / (3.4 - z * 0.9), px = cx + x * R * f, py = cy + y * R * f;
+    let a = 0.2 + 0.62 * depth, col = lamp, size = 0.75 + 1.15 * depth;
+    if (stateKey === 'off') { a *= 0.55; }
+    else if (stateKey === 'probe') { const th = Math.atan2(by, bx), d = ((scanHead - th) % 6.283 + 6.283) % 6.283; a *= d < 1.3 ? 1 - d / 1.3 * 0.7 : 0.32; size += d < 1.3 ? 0.7 : 0; }
+    else if (stateKey === 'ok') { a *= still ? 1 : 0.8 + 0.2 * Math.sin(t * 2 + i); }
+    else if (stateKey === 'warn') { a *= x < 0 ? 1 : 0.2; if (x < 0 && !still && (i + Math.floor(t * 6)) % 13 === 0) a *= 0.25; }
+    else if (stateKey === 'fail') { if (i % 9 === 0) { a *= still ? 0.3 : 0.15 + 0.5 * hash(i + Math.floor(t * 5)); } }
+    ctx.globalAlpha = Math.max(0, Math.min(1, a)); ctx.fillStyle = col; ctx.beginPath(); ctx.arc(px, py, size, 0, 6.283); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  const ms = performance.now() - t0; perf.n++; perf.sum += ms; perf.max = Math.max(perf.max, ms);
+}
+const perf = { n: 0, sum: 0, max: 0 };
+setInterval(() => { if (perf.n) $('perf').textContent = `scene ${(perf.sum / perf.n).toFixed(2)} ms/frame avg · ${perf.max.toFixed(1)} max · ${running ? '30 fps cap' : 'paused'}`; perf.n = 0; perf.sum = 0; perf.max = 0; }, 2000);
+
+let running = false, raf = 0, last = 0;
+function frame(ts) { raf = requestAnimationFrame(frame); if (ts - last < 33) return; const dt = Math.min(0.1, (ts - last) / 1000); last = ts; draw(ts / 1000, dt); }
+function kick() { cancelAnimationFrame(raf); running = false; if (reduced() || document.hidden) { draw(0, 0); return; } running = true; last = 0; raf = requestAnimationFrame(frame); }
+document.addEventListener('visibilitychange', kick);   // nothing runs while the window is hidden
+new ResizeObserver(() => layout()).observe($('scene'));
+
+/* ---------- tray + icons ---------- */
+function renderMenu(key) {
+  const S = STATES[key]; const m = $('menu'); m.replaceChildren();
+  const item = (cls, ...k) => el('div', { class: 'item ' + cls }, ...k);
+  const lampSvg = (l) => { const s = svg(LAMPS[l], 16); s.style.color = { off: 'var(--c-text-3)', probe: 'var(--c-probe)', ok: 'var(--c-ok)', warn: 'var(--c-warn)', fail: 'var(--c-fail)' }[l]; return s; };
+  m.append(item('head', lampSvg(S.lamp), key === 'fail' ? CAUSES[$('cause').value][0] : S.word));
+  if (key === 'ok' || key === 'warn') m.append(item('dim', 'Hysteria 2 · Tier 2 · via Hostel-5G · ' + (key === 'warn' ? 212 : 43) + ' ms'));
+  if (key === 'probe') m.append(item('dim', 'Trying Hysteria 2 · 6 s'));
+  m.append(el('div', { class: 'sep' }), item('hot', S.on ? 'Stop stabilizing' : 'Stabilize'), item('', 'Open DNet Engine'), el('div', { class: 'sep' }), item('', 'Start with Windows'), item('', 'Quit this app (the connection stays up)'));
+}
+function renderIcons() {
+  const box = $('icons'); box.replaceChildren();
+  [['off', 'Not connected'], ['probe', 'Probing'], ['ok', 'Connected'], ['warn', 'Degraded'], ['fail', 'Failed']].forEach(([l, name]) => {
+    const colors = { off: ['#9aa3a0', '#5c6663'], probe: ['#e8c24f', '#7a5c00'], ok: ['#3dd6a6', '#0a7556'], warn: ['#f29a4a', '#a24e00'], fail: ['#ff7468', '#b3261e'] }[l];
+    const plate = (cls, hex) => { const p = el('div', { class: 'plate2 ' + cls }); const a = svg(LAMPS[l], 16); a.style.color = hex; const b = svg(LAMPS[l], 32); b.style.color = hex; p.append(a, b); return p; };
+    box.append(el('figure', {}, el('div', { style: 'display:flex;gap:6px' }, plate('on-dark', colors[0]), plate('on-light', colors[1])), el('figcaption', {}, name)));
+  });
+}
+
+/* ---------- live contrast check ---------- */
+function toRGB(c) { const cv2 = document.createElement('canvas'); cv2.width = cv2.height = 1; const x = cv2.getContext('2d'); x.fillStyle = '#000'; x.fillStyle = c; x.fillRect(0, 0, 1, 1); return Array.from(x.getImageData(0, 0, 1, 1).data).slice(0, 3); }
+const lin = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; };
+const lum = ([r, g, b]) => 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+const ratio = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
+const mix = (a, b, p) => a.map((v, i) => Math.round(v * (1 - p) + b[i] * p));
+const CHECKS = [
+  ['text', 'base', 4.5, 'body on page'], ['text', 'card', 4.5, 'body on card'], ['text', 'raised', 4.5, 'body on raised'],
+  ['text-2', 'base', 4.5, 'secondary on page'], ['text-2', 'card', 4.5, 'secondary on card'], ['text-2', 'raised', 4.5, 'secondary on raised'],
+  ['text-3', 'card', 4.5, 'labels on card'], ['on-paper', 'paper', 4.5, 'primary button text'],
+  ['ok', 'card', 4.5, 'connected, as text'], ['probe', 'card', 4.5, 'probing, as text'], ['warn', 'card', 4.5, 'degraded, as text'], ['fail', 'card', 4.5, 'failed, as text'],
+  ['ok', 'base', 3, 'connected lamp'], ['probe', 'base', 3, 'probing lamp'], ['warn', 'base', 3, 'degraded lamp'], ['fail', 'base', 3, 'failed lamp'],
+  ['line-strong', 'card', 3, 'control edge on card'], ['line-strong', 'base', 3, 'control edge on page'], ['line-strong', 'raised', 3, 'control edge on raised'],
+  ['focus', 'base', 3, 'focus ring on page'], ['focus', 'card', 3, 'focus ring on card'], ['focus', 'raised', 3, 'focus ring on raised'],
+];
+const TOKENS = ['base', 'card', 'raised', 'line', 'line-strong', 'text', 'text-2', 'text-3', 'paper', 'on-paper', 'focus', 'ok', 'probe', 'warn', 'fail'];
+function renderPalette() {
+  C = colors();
+  const val = (t) => css('--c-' + t);
+  const sw = $('swatches'); sw.replaceChildren();
+  TOKENS.forEach((t) => sw.append(el('div', { class: 'sw' }, el('i', { style: 'background:' + val(t) }), el('span', {}, el('b', {}, '--c-' + t), val(t)))));
+  const rows = CHECKS.map(([fg, bg, need, what]) => [fg + ' on ' + bg, what, ratio(toRGB(val(fg)), toRGB(val(bg))), need]);
+  // the ambient wash: the stage background is the page colour with up to 9 % of a lamp colour in it
+  const strength = parseFloat(css('--ambient-strength')) / 100, baseRGB = toRGB(val('base'));
+  for (const lamp of ['ok', 'probe', 'warn', 'fail']) { const bg = mix(baseRGB, toRGB(val(lamp)), strength); for (const t of ['text-2', 'text-3']) rows.push([t + ' on stage+' + lamp, 'words on the ambient wash', ratio(toRGB(val(t)), bg), 4.5]); }
+  const body = $('contrast'); body.replaceChildren(); let bad = 0;
+  rows.forEach(([pair, what, r, need]) => { const ok = r >= need; if (!ok) bad++; body.append(el('tr', {}, el('td', {}, pair), el('td', {}, what), el('td', { class: 'num' }, r.toFixed(2) + ' : 1'), el('td', { class: 'num' }, '≥ ' + need), el('td', { class: ok ? 'pass' : 'fail' }, ok ? '✓ pass' : '✗ FAIL'))); });
+  const s = $('contrast-summary'); s.textContent = bad ? `${bad} of ${rows.length} pairs fail in this theme.` : `All ${rows.length} pairs pass in this theme (WCAG 2.2 AA, non-text 3:1, ambient wash included).`; s.className = 'summary ' + (bad ? 'fail' : 'pass');
+}
+
+/* ---------- controls ---------- */
+Object.keys(CAUSES).forEach((c) => $('cause').append(el('option', { value: c }, c)));
+for (const id of ['state', 'cause', 'paths']) $(id).addEventListener('change', render);
+$('theme').addEventListener('change', (e) => { const v = e.target.value; if (v) document.documentElement.dataset.theme = v; else delete document.documentElement.dataset.theme; renderPalette(); render(); });
+$('motion').addEventListener('change', (e) => { document.body.dataset.motion = e.target.checked ? 'reduce' : ''; render(); });
+$('consent').addEventListener('click', () => $('dlg').showModal());
+function toggle() { const k = $('state'); k.value = (k.value === 'ok' || k.value === 'warn' || k.value === 'probe') ? 'off' : 'probe'; render(); if (k.value === 'probe') setTimeout(() => { if ($('state').value === 'probe') { $('state').value = 'ok'; render(); } }, 2400); }
+$('switch').addEventListener('click', toggle); $('corehit').addEventListener('click', toggle);
+let beatS = 1; setInterval(() => { beatS = beatS % 5 + 1; $('beat').textContent = 'Live · updated ' + beatS + ' s ago'; }, 1000);
+matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => { renderPalette(); render(); });
+render(); renderIcons(); renderPalette();
+</script>
+</body>
+</html>

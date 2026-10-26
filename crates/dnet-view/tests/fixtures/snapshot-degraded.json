@@ -1,0 +1,89 @@
+{
+  "activeEndpoint": {
+    "id": "5b1f0c1e-8a43-4c51-9a79-0f6d1a9c2f10",
+    "label": "oracle-mumbai"
+  },
+  "activeProfile": {
+    "id": "hy2-default",
+    "kind": "Hysteria2",
+    "tier": "Tier2"
+  },
+  "failure": null,
+  "lastBecause": null,
+  "paths": {
+    "asOfMs": 1730000000000,
+    "degraded": {
+      "path": "7",
+      "quality": "Poor",
+      "staying": "NoBetterPath"
+    },
+    "paths": [
+      {
+        "id": "7",
+        "jitterMs": 38.0,
+        "kind": "Wifi",
+        "loss": 0.18,
+        "measured": true,
+        "name": "Hostel-5G",
+        "role": "Carrying",
+        "rttMs": 212.0,
+        "traceMs": [
+          200.5,
+          null,
+          230.0
+        ],
+        "typicalMs": [
+          38.0,
+          52.0
+        ]
+      },
+      {
+        "id": "9",
+        "jitterMs": 6.0,
+        "kind": "Cellular",
+        "loss": 0.0,
+        "measured": true,
+        "name": null,
+        "role": "Standby",
+        "rttMs": 88.0,
+        "traceMs": [
+          87.0,
+          88.5
+        ],
+        "typicalMs": null
+      },
+      {
+        "id": "12",
+        "jitterMs": null,
+        "kind": "Ethernet",
+        "loss": null,
+        "measured": false,
+        "name": null,
+        "role": "Unusable",
+        "rttMs": null,
+        "traceMs": [],
+        "typicalMs": null
+      }
+    ],
+    "watching": true
+  },
+  "posture": {
+    "kind": "Tunnelled",
+    "tier": "Tier2"
+  },
+  "stats": {
+    "changesThatDropConnections": 1,
+    "connected": true,
+    "connectedForS": 11520,
+    "degradedPeriods": 1,
+    "endpointSwitches": 0,
+    "longestDegradedS": 6,
+    "methodSwitches": 1,
+    "networkChanges": 2
+  },
+  "status": "Connected",
+  "warnings": [
+    "Tier2ProfileActive",
+    "EncryptedDnsOverridden"
+  ]
+}

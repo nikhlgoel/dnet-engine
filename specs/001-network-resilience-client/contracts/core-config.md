@@ -22,7 +22,7 @@ or endpoint change, applied by restarting or by the core's runtime control API w
 | # | Invariant | Why |
 |---|---|---|
 | CC-01 | TUN inbound is present for **every** profile, including AmneziaWG | Uniform FakeIP, rules, and attribution across profiles (R4) |
-| CC-02 | `inet4_range = 198.18.0.0/15`, `inet6_range = fc00::/18` | R3; documented defaults |
+| CC-02 | The FakeIP ranges are **one half** of `198.18.0.0/15` and of `fc00::/18`: `198.18.0.0/16` or `198.19.0.0/16`, and `fc00::/19` or `fc00:2000::/19`. The half is an input to generation, and the daemon alternates it on every tunnel start (amended 2026-10-22, T131) | R3; documented defaults. Every session used to start at the bottom of the same pool, so an address a program remembered could belong to a *different name* in the next session; alternating makes it an address the core does not know, which it refuses. The built-in bypasses still may not overlap the **whole** pool |
 | CC-03 | Hysteria 2 outbounds omit the `bandwidth` section unless Brutal is explicitly enabled | Yields BBR by default (R2, FR-006) |
 | CC-04 | Enabling Brutal requires a recorded user acknowledgement and emits both `up` and `down` | Partial bandwidth config silently half-enables Brutal |
 | CC-05 | A `Bypass`/direct rule for the **active endpoint address** is always present | Mirrors the R4 host route; divergence causes the routing loop |
@@ -33,6 +33,7 @@ or endpoint change, applied by restarting or by the core's runtime control API w
 | CC-10 | Hysteria 2 outbounds always carry an obfuscation layer (`salamander` or `gecko`) with a non-empty password distinct from the auth password, and TLS verified by a public CA or a pinned public key — never `insecure` | Without the layer the handshake is recognisable QUIC; the core would accept it (T056) |
 | CC-11 | VLESS+REALITY outbounds always enable uTLS and REALITY together; `server_name` is the configured, validated target domain | The pinned core refuses REALITY without uTLS; the target is configuration, not a constant (Research-Critique §4.3, T058) |
 | CC-12 | Brutal is emitted only under an acknowledgement of the **current** warning revision (extends CC-04) | A warning that changed after the user accepted it has not been accepted (T057) |
+| CC-13 | While encrypted DNS is blocked (the default, FR-025), every well-known encrypted resolver is refused twice: as a `reject` route rule and as a `reject` DNS rule placed **before** the FakeIP answer; port 853 is refused as a route rule. After the person's opt-out (FR-025a) none of these appear. Refusals are generated only from built-in rules (T070) | A program that hides its lookups cannot be routed by site; refusing its resolver makes it use the system's. A refused name placed after the FakeIP rule would be given an address instead |
 
 ### 1.2 Contract tests
 
@@ -49,7 +50,10 @@ or endpoint change, applied by restarting or by the core's runtime control API w
 | CFG-09 | A VLESS+REALITY config's `server_name` equals the configured target domain for two different targets, with uTLS and REALITY enabled. Malformed credentials fail generation without echoing the value. |
 | CFG-10 | A Hysteria 2 or VLESS+REALITY profile generated without its transport settings, or with another kind's, fails with `MissingTransport`. |
 | CFG-11 | No credential appears in the `Debug` form of a generated config. |
-| — | The pinned core's offline `check` accepts generated configs for all three profiles (`tests/pinned_core_check.rs`). |
+| CFG-13 | CC-13: each resolver in `ENCRYPTED_RESOLVER_SUFFIXES` has a `reject` route rule and a `reject` DNS rule before the FakeIP answer; port 853 has a `reject` route rule; plaintext DNS is still captured first; with the opt-out none of it is generated. |
+| CFG-14 | CC-02: the two halves are disjoint, each inside its pool and one bit longer (so together exactly the pool); a tunnel contains only its half; the two halves' configs differ **only** in the ranges; each is deterministic; the rotation alternates whichever half it starts with; the TUN address is outside both. |
+| — | The pinned core's offline `check` accepts generated configs for all three profiles, with the encrypted-DNS block and without it, in both halves (`tests/pinned_core_check.rs`). |
+| — | `tests/rule_agreement.rs` (T073): the generated routes decide every destination the way `dnet_core::rule_eval` does, and no rule a person adds lifts what the built-ins refuse. |
 
 ---
 

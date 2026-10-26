@@ -206,7 +206,7 @@ pub(crate) fn validate_uuid(uuid: &Secret) -> Result<(), ConfigError> {
 pub(crate) fn validate_short_id(short_id: &Secret) -> Result<(), ConfigError> {
     let text = short_id.expose();
     let valid = !text.is_empty()
-        && text.len() % 2 == 0
+        && text.len().is_multiple_of(2)
         && text.len() <= SHORT_ID_MAX_BYTES * 2
         && text.bytes().all(|b| b.is_ascii_hexdigit());
     if valid {

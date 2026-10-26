@@ -28,6 +28,7 @@ use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::{Duration, Instant};
 
+use dnet_core::degraded::Change;
 use dnet_core::failover::{Decision, FailoverConfig};
 use dnet_core::ids::InterfaceId;
 use dnet_core::path::{NetworkPath, PathRole};
@@ -36,6 +37,8 @@ use dnet_core::probe_plan::{Availability, Observation, ProbePlanner, Strategy, V
 use dnet_core::profile::Carrier;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
+
+use crate::telemetry::Telemetry;
 
 /// How long after a move that failed before another is tried.
 pub const HOLD_AFTER_FAILURE: Duration = Duration::from_secs(30);
@@ -73,6 +76,13 @@ pub trait NetworkWatch: Send + 'static {
 
     /// The adapter the tunnel's packets leave through now, if it can be told.
     fn carrying_now(&mut self, paths: &[NetworkPath]) -> Option<InterfaceId>;
+
+    /// What the system calls each network (for Wi-Fi, the network name), for those it has a name
+    /// for. Read on every refresh, because a laptop roams: the same adapter, another network. The
+    /// names are untrusted text, cleaned before they are sent anywhere.
+    fn names(&mut self) -> HashMap<InterfaceId, String> {
+        HashMap::new()
+    }
 
     /// How the active profile is carried, for choosing what to measure.
     fn carrier(&self) -> Carrier;
@@ -140,6 +150,23 @@ impl NetworkWatch for NoWatch {
     }
 }
 
+/// Where the loop publishes what it knows, for `GetPaths`, and under which connection attempt: a
+/// loop of an older attempt can neither overwrite nor clear what a newer one published.
+#[derive(Clone)]
+pub struct Board {
+    pub telemetry: Telemetry,
+    pub attempt: u64,
+}
+
+/// Clears the board when the loop ends, however it ends.
+struct Cleared(Board);
+
+impl Drop for Cleared {
+    fn drop(&mut self) {
+        self.0.telemetry.clear_paths(self.0.attempt);
+    }
+}
+
 /// The carrying path changed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PathMove {
@@ -184,6 +211,11 @@ struct Loop<W: NetworkWatch> {
     /// Strategies still to try for a path whose probe is in flight.
     remaining: HashMap<InterfaceId, VecDeque<Strategy>>,
     moved: mpsc::Sender<PathMove>,
+    /// What the user should be told about the carrying path being poor, or recovered (T084).
+    told: mpsc::Sender<Change>,
+    board: Board,
+    /// What the system calls each network, as of the last refresh.
+    names: HashMap<InterfaceId, String>,
     /// The adapter last reported as carrying.
     reported: Option<InterfaceId>,
     hold_until: Option<Instant>,
@@ -194,13 +226,21 @@ struct Loop<W: NetworkWatch> {
 }
 
 /// Watch the network until `alive` says the attempt is over. Changes of the carrying path are sent
-/// to `moved`.
+/// to `moved`; a carrying path that is poor with no way out, and its recovery, to `told` (T084); what
+/// is known of the networks to `board` (T144), which is cleared when the loop ends.
+///
+/// Only a steered profile is measured, so only for one can the path be called poor: the others are
+/// observed, and an observed path has no quality to speak of (probes are real packets, and nothing
+/// would act on the answer).
 pub async fn run<W: NetworkWatch>(
     watch: W,
     settings: Settings,
     alive: impl Fn() -> bool,
     moved: mpsc::Sender<PathMove>,
+    told: mpsc::Sender<Change>,
+    board: Board,
 ) {
+    let _cleared = Cleared(board.clone());
     let mut l = Loop {
         steer: watch.can_steer(),
         carrier: watch.carrier(),
@@ -212,6 +252,9 @@ pub async fn run<W: NetworkWatch>(
         probes: JoinSet::new(),
         remaining: HashMap::new(),
         moved,
+        told,
+        board,
+        names: HashMap::new(),
         reported: None,
         hold_until: None,
         started: false,
@@ -225,6 +268,7 @@ pub async fn run<W: NetworkWatch>(
     if !l.refresh().await {
         return;
     }
+    l.publish();
     loop {
         if !alive() {
             return;
@@ -257,6 +301,7 @@ pub async fn run<W: NetworkWatch>(
                 return;
             }
         }
+        l.publish();
     }
 }
 
@@ -277,6 +322,7 @@ impl<W: NetworkWatch> Loop<W> {
             }
         };
         let carrying = self.watch.carrying_now(&observed);
+        self.names = self.watch.names();
         let observed = self.capable(observed);
 
         // What was learned about a gateway holds only for that gateway.
@@ -319,14 +365,29 @@ impl<W: NetworkWatch> Loop<W> {
     }
 
     /// For a profile that is not steered: note where the tunnel really is, and say when that changes.
+    /// The monitor is told too, so the networks are published with the right one marked as carrying
+    /// (it makes no decision of its own here: nothing evaluates it for a profile that is only
+    /// observed).
     async fn follow(&mut self, carrying: Option<InterfaceId>) -> bool {
         match carrying {
             Some(path) if self.reported != Some(path) => {
+                self.monitor.set_carrying(path, Self::now());
                 let from = self.reported;
                 self.report(from, path).await
             }
             _ => true,
         }
+    }
+
+    /// Put what is known of the networks where the control pipe can read it.
+    fn publish(&self) {
+        let mut snapshot = self.monitor.snapshot(Self::now());
+        for path in &mut snapshot.paths {
+            path.name = self.names.get(&path.id).cloned();
+        }
+        self.board
+            .telemetry
+            .publish_paths(self.board.attempt, snapshot);
     }
 
     async fn report(&mut self, from: Option<InterfaceId>, to: InterfaceId) -> bool {
@@ -418,7 +479,15 @@ impl<W: NetworkWatch> Loop<W> {
             return true;
         }
         self.hold_until = None;
-        let Decision::Move { from, to, .. } = self.monitor.evaluate(now) else {
+        let decision = self.monitor.evaluate(now);
+        // After the decision, on the same tick: a move just made is already reflected, and a path
+        // the machine would have left by now is exactly what is worth telling the user about.
+        if let Some(change) = self.monitor.report(now) {
+            if self.told.send(change).await.is_err() {
+                return false;
+            }
+        }
+        let Decision::Move { from, to, .. } = decision else {
             return true;
         };
         let Some(path) = self
@@ -450,7 +519,10 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
+    use dnet_core::degraded::{Degradation, NoMove};
+    use dnet_core::path::PathRole as Role;
     use dnet_core::path::{PathKind, PathQuality};
+    use dnet_core::quality::QualityBand;
     use tokio::task::JoinHandle;
 
     use super::*;
@@ -498,6 +570,8 @@ mod tests {
         probe_takes: Duration,
         /// How long a carry-over takes before it is done and recorded.
         carry_takes: Duration,
+        /// What the system calls each network.
+        names: HashMap<InterfaceId, String>,
     }
 
     impl World {
@@ -511,6 +585,7 @@ mod tests {
                 answers: HashMap::new(),
                 probe_takes: Duration::ZERO,
                 carry_takes: Duration::ZERO,
+                names: HashMap::new(),
             }))
         }
     }
@@ -562,6 +637,9 @@ mod tests {
         }
         fn carrying_now(&mut self, _paths: &[NetworkPath]) -> Option<InterfaceId> {
             self.world.lock().unwrap().carrying
+        }
+        fn names(&mut self) -> HashMap<InterfaceId, String> {
+            self.world.lock().unwrap().names.clone()
         }
         fn carrier(&self) -> Carrier {
             self.profile.carrier
@@ -616,6 +694,10 @@ mod tests {
         world: Arc<Mutex<World>>,
         poke: Option<mpsc::Sender<()>>,
         moves: mpsc::Receiver<PathMove>,
+        /// What the user is told about the carrying path being poor (T084).
+        told: mpsc::Receiver<Change>,
+        /// What the control pipe would answer `GetPaths` with.
+        telemetry: Telemetry,
         alive: Arc<AtomicBool>,
         task: JoinHandle<()>,
     }
@@ -623,6 +705,8 @@ mod tests {
     fn start(world: Arc<Mutex<World>>, profile: Profile) -> Harness {
         let (poke, changes) = mpsc::channel(8);
         let (moved, moves) = mpsc::channel(16);
+        let (tell, told) = mpsc::channel(16);
+        let telemetry = Telemetry::new();
         let alive = Arc::new(AtomicBool::new(true));
         let fake = Fake {
             world: Arc::clone(&world),
@@ -635,11 +719,18 @@ mod tests {
             Settings::default(),
             move || flag.load(Ordering::SeqCst),
             moved,
+            tell,
+            Board {
+                telemetry: telemetry.clone(),
+                attempt: 1,
+            },
         ));
         Harness {
             world,
             poke: Some(poke),
             moves,
+            told,
+            telemetry,
             alive,
             task,
         }
@@ -658,6 +749,26 @@ mod tests {
         }
         fn no_move_pending(&mut self) -> bool {
             self.moves.try_recv().is_err()
+        }
+        /// The next thing the user was told about the carrying path, within `within` seconds.
+        async fn next_told(&mut self, within: u64) -> Change {
+            tokio::time::timeout(Duration::from_secs(within), self.told.recv())
+                .await
+                .expect("the user should have been told something by now")
+                .expect("the loop is still running")
+        }
+        /// Make every probe of `path` come back as silence, or answered again.
+        fn path_goes_quiet(&self, path: u64, quiet: bool) {
+            let answer = if quiet {
+                Observation::Silent
+            } else {
+                Observation::Answered(Duration::from_millis(10))
+            };
+            self.world
+                .lock()
+                .unwrap()
+                .answers
+                .insert((id(path), Strategy::Gateway), Some(answer));
         }
         fn set_paths(&self, paths: Vec<NetworkPath>) {
             self.world.lock().unwrap().paths = paths;
@@ -971,5 +1082,212 @@ mod tests {
             "probing carries on"
         );
         assert!(!h.task.is_finished());
+    }
+
+    // ------------------------------------------------------------------ a poor path with no way out (T084)
+
+    #[tokio::test(start_paused = true)]
+    async fn a_connection_on_the_only_network_going_bad_is_reported_with_the_reason() {
+        let world = World::new(vec![wifi(true)], Some(1));
+        let mut h = start(world, AWG);
+        h.next_move().await;
+        secs(25).await; // the gateway answers: the path is known to be good, and measured
+        assert!(
+            h.told.try_recv().is_err(),
+            "nothing to say about a good path"
+        );
+
+        h.path_goes_quiet(1, true);
+
+        // Silence from a gateway that has been answering is loss; after two losses the path is
+        // poor, and after it has stayed so for the machine's own patience the user is told.
+        assert_eq!(
+            h.next_told(120).await,
+            Change::Degraded(Degradation {
+                path: id(1),
+                band: QualityBand::Poor,
+                staying: NoMove::OnlyPath,
+            })
+        );
+        assert!(
+            h.no_move_pending(),
+            "there was nowhere to move, and nothing was claimed"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_user_is_told_when_the_network_has_recovered() {
+        let world = World::new(vec![wifi(true)], Some(1));
+        let mut h = start(world, AWG);
+        h.next_move().await;
+        secs(25).await;
+        h.path_goes_quiet(1, true);
+        assert!(matches!(h.next_told(120).await, Change::Degraded(_)));
+        // It may get worse before it gets better; only the recovery matters here.
+        h.path_goes_quiet(1, false);
+
+        let mut told = None;
+        for _ in 0..6 {
+            match h.next_told(300).await {
+                Change::Recovered { path } => {
+                    told = Some(path);
+                    break;
+                }
+                Change::Degraded(_) => continue,
+            }
+        }
+        assert_eq!(told, Some(id(1)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_profile_that_is_only_observed_is_never_called_degraded() {
+        // Its path is not probed (nothing steers it, and a probe is a real packet), so there is no
+        // measurement to base a claim on. Silence here is absence of evidence, not evidence.
+        let world = World::new(vec![wifi(true)], Some(1));
+        let mut h = start(
+            world,
+            Profile {
+                carrier: Carrier::Udp,
+                endpoint_tcp: true,
+                steer: false,
+                needs_gateway: false,
+            },
+        );
+        h.next_move().await;
+        h.path_goes_quiet(1, true);
+        secs(300).await;
+        assert!(h.told.try_recv().is_err());
+    }
+
+    // ------------------------------------------------------------------ what the interface is shown (T144)
+
+    #[tokio::test(start_paused = true)]
+    async fn the_loop_publishes_the_networks_it_watches_with_the_carrying_one_marked() {
+        let world = World::new(vec![wifi(true), wired(true)], Some(1));
+        let mut h = start(world, AWG);
+        h.next_move().await;
+        secs(3).await;
+
+        let snap = h.telemetry.paths().expect("the networks are being watched");
+
+        assert_eq!(snap.paths.len(), 2);
+        let role = |n: u64| snap.paths.iter().find(|p| p.id == id(n)).unwrap().role;
+        assert_eq!(role(1), Role::Carrying);
+        assert_eq!(role(2), Role::Standby);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_names_the_system_gives_reach_the_published_networks() {
+        let world = World::new(vec![wifi(true), wired(true)], Some(1));
+        world
+            .lock()
+            .unwrap()
+            .names
+            .insert(id(1), "Hostel-5G".to_owned());
+        let mut h = start(world, AWG);
+        h.next_move().await;
+        secs(3).await;
+
+        let snap = h.telemetry.paths().unwrap();
+        let name = |n: u64| {
+            snap.paths
+                .iter()
+                .find(|p| p.id == id(n))
+                .unwrap()
+                .name
+                .clone()
+        };
+        assert_eq!(name(1).as_deref(), Some("Hostel-5G"));
+        assert_eq!(
+            name(2),
+            None,
+            "a network the system has no name for has none"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_move_is_reflected_in_what_is_published() {
+        let world = World::new(vec![wifi(true), wired(true)], Some(1));
+        let mut h = start(world, AWG);
+        h.next_move().await;
+        h.set_paths(vec![wifi(false), wired(true)]);
+        h.changed().await;
+        h.next_move().await;
+        secs(3).await;
+
+        let snap = h.telemetry.paths().unwrap();
+        let carrying: Vec<u64> = snap
+            .paths
+            .iter()
+            .filter(|p| p.role == Role::Carrying)
+            .map(|p| p.id.luid())
+            .collect();
+        assert_eq!(carrying, [2]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_measurements_reach_the_published_networks_once_probes_have_answered() {
+        let world = World::new(vec![wifi(true)], Some(1));
+        let mut h = start(world, AWG);
+        h.next_move().await;
+        secs(25).await;
+
+        let snap = h.telemetry.paths().unwrap();
+        let p = &snap.paths[0];
+        assert!(p.measured);
+        assert!(!p.trace_ms.is_empty());
+        assert_eq!(p.band, Some(QualityBand::Good));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn nothing_is_published_after_the_loop_ends() {
+        let world = World::new(vec![wifi(true)], Some(1));
+        let mut h = start(world, AWG);
+        h.next_move().await;
+        secs(3).await;
+        assert!(h.telemetry.paths().is_some());
+
+        h.alive.store(false, Ordering::SeqCst);
+        h.changed().await;
+        let _ = (&mut h.task).await;
+
+        assert_eq!(
+            h.telemetry.paths(),
+            None,
+            "the networks are no longer watched"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_profile_that_is_only_followed_still_shows_which_network_carries() {
+        let world = World::new(vec![wifi(true), wired(true)], Some(2));
+        let mut h = start(
+            world,
+            Profile {
+                carrier: Carrier::Udp,
+                endpoint_tcp: true,
+                steer: false,
+                needs_gateway: false,
+            },
+        );
+        h.next_move().await;
+        secs(3).await;
+
+        let snap = h.telemetry.paths().unwrap();
+        let carrying: Vec<u64> = snap
+            .paths
+            .iter()
+            .filter(|p| p.role == Role::Carrying)
+            .map(|p| p.id.luid())
+            .collect();
+        assert_eq!(
+            carrying,
+            [2],
+            "the tunnel is on the cable, whatever the preference"
+        );
+        assert!(
+            snap.paths.iter().all(|p| !p.measured),
+            "nothing is probed for an observed profile, so nothing is called measured"
+        );
     }
 }

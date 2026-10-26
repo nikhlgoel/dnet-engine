@@ -24,6 +24,7 @@ use crate::secret_store::SecretKey;
 use crate::write::default_run_dir;
 use dnet_core::catalogue::bundled_kind;
 use dnet_core::credential::CredentialRef;
+use dnet_core::doh_consent::ConsentState;
 use dnet_core::endpoint::{Endpoint, EndpointAddress, EndpointOrigin};
 use dnet_core::hostname::is_dns_hostname;
 use dnet_core::ids::{EndpointId, ProfileId};
@@ -113,6 +114,10 @@ pub struct ProfileSettings {
 pub struct LoadedConfig {
     pub endpoints: Vec<Endpoint>,
     pub profiles: Vec<ProfileSettings>,
+    /// The person's choice about encrypted DNS and whether they have been told about it (T071).
+    /// `None` for a file written before it existed: the protective default applies (block, and the
+    /// disclosure is shown).
+    pub encrypted_dns: Option<ConsentState>,
     /// Things worth telling the user that are not errors: a setting that was dropped because it no
     /// longer applies. For the log and the session's events.
     pub notes: Vec<String>,
@@ -150,6 +155,13 @@ impl ConfigStore {
     ) -> Result<(), PersistError> {
         let bytes = encode(endpoints, profiles)?;
         self.file.write(&bytes).map_err(PersistError::Storage)
+    }
+
+    /// Write bytes that [`encode_full`] (or [`encode_config`]) produced, replacing what was there.
+    /// Those functions read their own output back, so a caller that encodes first and writes second
+    /// can fail before anything is touched.
+    pub fn save_bytes(&self, bytes: &[u8]) -> Result<(), PersistError> {
+        self.file.write(bytes).map_err(PersistError::Storage)
     }
 
     /// Save a configuration as it was loaded, replacing what was there.
@@ -241,6 +253,18 @@ struct Wire {
     version: u32,
     endpoints: Vec<EndpointWire>,
     profiles: Vec<ProfileWire>,
+    /// Absent in files written before the choice existed, and when nothing was ever chosen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    encrypted_dns: Option<ConsentWire>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConsentWire {
+    /// `block` or `allow`.
+    policy: String,
+    /// The version of the disclosure the person was shown; 0 for never.
+    disclosed_version: u32,
 }
 
 #[derive(Deserialize)]
@@ -344,8 +368,18 @@ pub fn encode(
     endpoints: &[Endpoint],
     profiles: &[ConnectionProfile],
 ) -> Result<Vec<u8>, PersistError> {
+    encode_full(endpoints, profiles, None)
+}
+
+/// [`encode`], also recording the encrypted-DNS choice (T071).
+pub fn encode_full(
+    endpoints: &[Endpoint],
+    profiles: &[ConnectionProfile],
+    encrypted_dns: Option<ConsentState>,
+) -> Result<Vec<u8>, PersistError> {
     finish(
         endpoints,
+        encrypted_dns,
         profiles
             .iter()
             .map(|p| ProfileWire {
@@ -371,6 +405,7 @@ pub fn encode(
 pub fn encode_config(config: &LoadedConfig) -> Result<Vec<u8>, PersistError> {
     finish(
         &config.endpoints,
+        config.encrypted_dns,
         config
             .profiles
             .iter()
@@ -421,11 +456,22 @@ fn endpoint_wire(e: &Endpoint) -> EndpointWire {
     }
 }
 
-fn finish(endpoints: &[Endpoint], profiles: Vec<ProfileWire>) -> Result<Vec<u8>, PersistError> {
+fn finish(
+    endpoints: &[Endpoint],
+    encrypted_dns: Option<ConsentState>,
+    profiles: Vec<ProfileWire>,
+) -> Result<Vec<u8>, PersistError> {
     let wire = Wire {
         version: FORMAT_VERSION,
         endpoints: endpoints.iter().map(endpoint_wire).collect(),
         profiles,
+        encrypted_dns: encrypted_dns.map(|c| {
+            let (policy, disclosed_version) = c.to_stored();
+            ConsentWire {
+                policy: policy.to_owned(),
+                disclosed_version,
+            }
+        }),
     };
     let bytes = serde_json::to_vec_pretty(&wire).map_err(|e| malformed(&e))?;
     // The strongest statement that what is written can be read: read it.
@@ -475,11 +521,30 @@ pub fn decode(bytes: &[u8]) -> Result<LoadedConfig, PersistError> {
         profiles.push(decode_profile(p, &mut notes)?);
     }
 
+    // A choice the file records but that is not one of the two known: the protective default applies, and
+    // the person is told, rather than the setting being quietly read as something else.
+    let encrypted_dns = wire.encrypted_dns.map(|c| {
+        if !matches!(c.policy.as_str(), "block" | "allow") {
+            notes.push(
+                "the saved encrypted-DNS setting was not recognised, so the default (blocked) applies"
+                    .to_owned(),
+            );
+        }
+        ConsentState::from_stored(&c.policy, c.disclosed_version)
+    });
+
     Ok(LoadedConfig {
         endpoints,
         profiles,
+        encrypted_dns,
         notes,
     })
+}
+
+/// Whether `host` is something an endpoint can be reached at: an IP address or a host name. The one
+/// rule, shared by what is read from the saved file and what is accepted from a client.
+pub fn host_is_acceptable(host: &str) -> bool {
+    host.parse::<IpAddr>().is_ok() || is_dns_hostname(host)
 }
 
 fn decode_endpoint(e: EndpointWire, index: usize) -> Result<Endpoint, PersistError> {
@@ -492,8 +557,7 @@ fn decode_endpoint(e: EndpointWire, index: usize) -> Result<Endpoint, PersistErr
 
     plain_text(&e.label, &at("the label"))?;
 
-    let host_ok = e.host.parse::<IpAddr>().is_ok() || is_dns_hostname(&e.host);
-    if !host_ok {
+    if !host_is_acceptable(&e.host) {
         return Err(invalid(at(
             "the host is neither an IP address nor a host name",
         )));
@@ -759,6 +823,92 @@ mod tests {
             .iter()
             .filter(|p| p.id.as_str() != "hy2-default")
             .all(|p| p.brutal.is_none()));
+    }
+
+    // ---------------------------------------------------------------- the encrypted-DNS choice (T071)
+
+    fn consent(allow: bool, disclosed: bool) -> ConsentState {
+        let mut c = ConsentState::new();
+        if disclosed {
+            c.acknowledge_disclosure();
+        }
+        if allow {
+            let _ = c.opt_out();
+        }
+        c
+    }
+
+    #[test]
+    fn the_encrypted_dns_choice_survives_a_restart_in_every_state() {
+        for (allow, disclosed) in [(false, false), (false, true), (true, true)] {
+            let saved = consent(allow, disclosed);
+            let bytes = encode_full(&endpoints(), &profiles(), Some(saved)).unwrap();
+            let loaded = decode(&bytes).unwrap();
+            assert_eq!(
+                loaded.encrypted_dns,
+                Some(saved),
+                "allow={allow} disclosed={disclosed}"
+            );
+            assert!(loaded.notes.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_file_without_the_choice_reads_as_none_so_the_default_applies() {
+        let loaded = decode(&encode(&endpoints(), &profiles()).unwrap()).unwrap();
+        assert_eq!(loaded.encrypted_dns, None);
+        assert!(
+            !good_text().contains("encrypted_dns"),
+            "nothing is written when nothing was chosen"
+        );
+    }
+
+    #[test]
+    fn a_choice_the_file_records_that_is_not_known_is_the_protective_default_and_is_reported() {
+        let bytes = encode_full(&endpoints(), &profiles(), Some(consent(true, true))).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        let tampered = text.replacen("\"allow\"", "\"maybe\"", 1);
+        assert_ne!(tampered, text);
+        let loaded = decode(tampered.as_bytes()).unwrap();
+        let read = loaded.encrypted_dns.expect("a choice was recorded");
+        assert_eq!(
+            read.policy(),
+            dnet_core::doh_block::Policy::Block,
+            "never silently allowed"
+        );
+        assert!(
+            loaded.notes.iter().any(|n| n.contains("encrypted-DNS")),
+            "{:?}",
+            loaded.notes
+        );
+    }
+
+    #[test]
+    fn the_choice_cannot_carry_anything_else() {
+        let bytes = encode_full(&endpoints(), &profiles(), Some(consent(true, true))).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        let tampered = text.replacen("\"policy\"", "\"extra\": 1, \"policy\"", 1);
+        assert!(matches!(
+            decode(tampered.as_bytes()),
+            Err(PersistError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn the_host_rule_is_the_one_the_file_applies() {
+        for good in ["203.0.113.9", "2001:db8::1", "vpn.example.org", "a.b"] {
+            assert!(host_is_acceptable(good), "{good}");
+        }
+        for bad in [
+            "",
+            "no spaces.example",
+            "http://x.example",
+            "x.example:443",
+            "a..b",
+            "-x.example",
+        ] {
+            assert!(!host_is_acceptable(bad), "{bad:?}");
+        }
     }
 
     #[test]
@@ -1135,7 +1285,9 @@ mod tests {
 
     #[test]
     fn the_default_paths_are_beside_the_run_directory() {
-        assert!(default_config_path().ends_with(r"DNet Engine\state\config.json"));
-        assert!(default_secrets_dir().ends_with(r"DNet Engine\state\secrets"));
+        // Compared by path components, not by a string with Windows separators: this also runs on Linux.
+        let beside = std::path::Path::new("DNet Engine").join("state");
+        assert!(default_config_path().ends_with(beside.join("config.json")));
+        assert!(default_secrets_dir().ends_with(beside.join("secrets")));
     }
 }

@@ -72,9 +72,24 @@ pub fn builtin_rules(active_endpoint: Option<&EndpointAddress>) -> Vec<RoutingRu
     rules
 }
 
+/// The built-in rules plus, unless the person opted out, the encrypted-DNS block (T070, FR-025).
+///
+/// The block sits between the bypasses and every user rule (`doh_block::FIRST_PRECEDENCE`), and is
+/// kept out of [`builtin_rules`] on purpose: that set is what is **required** to be present, and the
+/// block is removable by the one documented opt-out.
+pub fn builtin_rules_for(
+    active_endpoint: Option<&EndpointAddress>,
+    policy: crate::doh_block::Policy,
+) -> Vec<RoutingRule> {
+    let mut rules = builtin_rules(active_endpoint);
+    rules.extend(crate::doh_block::blocking_rules(policy));
+    rules
+}
+
 /// A human-readable name for a built-in rule, for errors.
 fn describe(rule: &RoutingRule) -> String {
     match rule.matcher() {
+        RuleMatcher::EncryptedDnsPort => "encrypted DNS block (port 853)".to_string(),
         RuleMatcher::DnsPort => "DNS capture (port 53)".to_string(),
         RuleMatcher::IpCidr(c) => format!("bypass {c}"),
         RuleMatcher::Domain(d) => format!("bypass {d}"),

@@ -9,6 +9,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+dnet-config = { workspace = true }
 dnet-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

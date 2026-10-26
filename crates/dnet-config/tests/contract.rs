@@ -93,6 +93,7 @@ fn try_generate_with(
         rules: &rules,
         amneziawg_adapter: Some(ADAPTER),
         primary_transport: transport,
+        fakeip: dnet_config::primary::FakeIpHalf::Low,
     })
 }
 
@@ -234,6 +235,7 @@ fn cfg_04_profile_a_requires_the_adapter_name() {
         rules: &rules,
         amneziawg_adapter: None,
         primary_transport: None,
+        fakeip: dnet_config::primary::FakeIpHalf::Low,
     });
     assert_eq!(result, Err(ConfigError::MissingAmneziaWgAdapter));
 }
@@ -387,6 +389,168 @@ fn no_non_bypassed_dns_query_reaches_the_local_network() {
     }
 }
 
+fn generate_with_rules(rules: &[dnet_core::rule::RoutingRule]) -> dnet_config::PrimaryCoreConfig {
+    let addr = endpoint();
+    let bypass = ActiveEndpointBypass::new(&addr);
+    generate_primary_core_config(PrimaryCoreInput {
+        active_profile: &profile(ProfileKind::AmneziaWg),
+        endpoint_bypass: &bypass,
+        rules,
+        amneziawg_adapter: Some(ADAPTER),
+        primary_transport: None,
+        fakeip: dnet_config::primary::FakeIpHalf::Low,
+    })
+    .unwrap()
+}
+
+/// CFG-13 (T070): while encrypted DNS is blocked, every well-known encrypted resolver is refused both
+/// when a connection to it is routed and when its name is looked up, and port 853 is refused. A refused
+/// name sits in the DNS chain **before** the FakeIP answer, or it would be given an address instead.
+#[test]
+fn cfg_13_encrypted_resolvers_are_refused_in_routing_and_in_dns() {
+    use dnet_core::builtin_rules::builtin_rules_for;
+    use dnet_core::doh_block::{Policy, ENCRYPTED_DNS_PORT, ENCRYPTED_RESOLVER_SUFFIXES};
+    let config = generate_with_rules(&builtin_rules_for(Some(&endpoint()), Policy::Block));
+
+    for suffix in ENCRYPTED_RESOLVER_SUFFIXES {
+        let route = config
+            .route
+            .rules
+            .iter()
+            .find(|r| r.domain_suffix == [*suffix])
+            .unwrap_or_else(|| panic!("no route rule for {suffix}"));
+        assert_eq!(route.action, "reject", "{suffix}");
+        assert_eq!(route.outbound, None, "{suffix}");
+
+        let n = config.dns.rules.len();
+        let position = config
+            .dns
+            .rules
+            .iter()
+            .position(|r| r.domain_suffix == [*suffix])
+            .unwrap_or_else(|| panic!("no DNS rule for {suffix}"));
+        assert_eq!(config.dns.rules[position].action, "reject", "{suffix}");
+        assert_eq!(config.dns.rules[position].server, None, "{suffix}");
+        assert!(
+            position < n - 2,
+            "{suffix} must come before the FakeIP answer"
+        );
+    }
+    let port = config
+        .route
+        .rules
+        .iter()
+        .find(|r| r.port == [ENCRYPTED_DNS_PORT])
+        .expect("a rule for port 853");
+    assert_eq!(port.action, "reject");
+    // Plaintext DNS is still captured first.
+    assert_eq!(config.route.rules[0].action, "hijack-dns");
+}
+
+/// CFG-13: once the person has opted out, nothing in the configuration refuses encrypted DNS.
+#[test]
+fn cfg_13_opting_out_leaves_no_refusal_in_the_configuration() {
+    use dnet_core::builtin_rules::builtin_rules_for;
+    use dnet_core::doh_block::{Policy, ENCRYPTED_DNS_PORT};
+    let config = generate_with_rules(&builtin_rules_for(Some(&endpoint()), Policy::Allow));
+    assert!(config.route.rules.iter().all(|r| r.action != "reject"));
+    assert!(config
+        .route
+        .rules
+        .iter()
+        .all(|r| r.port != [ENCRYPTED_DNS_PORT]));
+    let n = config.dns.rules.len();
+    assert!(config.dns.rules[..n - 2]
+        .iter()
+        .all(|r| r.action != "reject"));
+}
+
+/// CC-02 (T131): the two halves split each FakeIP pool exactly: disjoint, each inside the pool and one
+/// bit longer, so together they are the whole pool and nothing outside it.
+#[test]
+fn cfg_14_the_two_halves_split_each_fakeip_pool_exactly() {
+    use dnet_config::primary::FakeIpHalf;
+    for (pool, low, high) in [
+        (
+            FAKEIP_INET4,
+            FakeIpHalf::Low.inet4(),
+            FakeIpHalf::High.inet4(),
+        ),
+        (
+            FAKEIP_INET6,
+            FakeIpHalf::Low.inet6(),
+            FakeIpHalf::High.inet6(),
+        ),
+    ] {
+        let pool = IpCidr::parse(pool).unwrap();
+        let (low, high) = (IpCidr::parse(low).unwrap(), IpCidr::parse(high).unwrap());
+        assert!(!low.overlaps(&high), "{low} and {high} must be disjoint");
+        for half in [&low, &high] {
+            assert!(pool.overlaps(half), "{half} is not inside {pool}");
+            assert_eq!(half.prefix_len(), pool.prefix_len() + 1, "{half}");
+        }
+    }
+}
+
+fn json_in(half: dnet_config::primary::FakeIpHalf) -> String {
+    let addr = endpoint();
+    let bypass = ActiveEndpointBypass::new(&addr);
+    let rules = builtin_rules(Some(&addr));
+    to_json(
+        &generate_primary_core_config(PrimaryCoreInput {
+            active_profile: &profile(ProfileKind::AmneziaWg),
+            endpoint_bypass: &bypass,
+            rules: &rules,
+            amneziawg_adapter: Some(ADAPTER),
+            primary_transport: None,
+            fakeip: half,
+        })
+        .unwrap(),
+    )
+}
+
+/// CC-02 (T131): a tunnel hands out only its half, and the half is the **only** thing that differs, so
+/// alternating cannot change routing, DNS or credentials. Each half is deterministic (CC-09).
+#[test]
+fn cfg_14_a_tunnel_hands_out_only_its_half_and_nothing_else_changes() {
+    use dnet_config::primary::FakeIpHalf::{High, Low};
+    let (low, high) = (json_in(Low), json_in(High));
+    assert_ne!(low, high);
+    assert!(low.contains(Low.inet4()) && low.contains(Low.inet6()));
+    assert!(high.contains(High.inet4()) && high.contains(High.inet6()));
+    assert!(!low.contains(High.inet4()) && !high.contains(Low.inet4()));
+    assert_eq!(
+        low.replace(Low.inet4(), High.inet4())
+            .replace(Low.inet6(), High.inet6()),
+        high,
+        "only the ranges may differ"
+    );
+    for _ in 0..20 {
+        assert_eq!(json_in(Low), low);
+        assert_eq!(json_in(High), high);
+    }
+    // The TUN's own address is outside both halves, as it is outside the whole pool.
+    let tun = IpCidr::parse("172.19.0.1/32").unwrap();
+    for half in [Low, High] {
+        assert!(!IpCidr::parse(half.inet4()).unwrap().overlaps(&tun));
+    }
+}
+
+/// CC-02 (T131): the rotation hands out the other half on every start, whichever it begins with.
+#[test]
+fn cfg_14_the_rotation_alternates_from_where_it_starts() {
+    use dnet_config::primary::{FakeIpHalf, FakeIpRotation};
+    for first in [FakeIpHalf::Low, FakeIpHalf::High] {
+        let rotation = FakeIpRotation::new(first);
+        let seen: Vec<_> = (0..5).map(|_| rotation.take()).collect();
+        assert_eq!(
+            seen,
+            [first, first.other(), first, first.other(), first],
+            "{first:?}"
+        );
+    }
+}
+
 /// The TUN's own address must not fall inside the FakeIP pool it hands out.
 #[test]
 fn tun_address_is_outside_the_fakeip_pool() {
@@ -427,6 +591,7 @@ fn ip_literal_endpoint_bypass_is_an_ip_cidr_route() {
         rules: &rules,
         amneziawg_adapter: Some(ADAPTER),
         primary_transport: None,
+        fakeip: dnet_config::primary::FakeIpHalf::Low,
     })
     .unwrap();
     assert!(config.route.rules.iter().any(|r| {

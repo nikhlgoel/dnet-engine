@@ -24,6 +24,7 @@ use std::time::Duration;
 
 use dnet_config::credentials::EndpointCredentials;
 use dnet_config::install_trust::{verify_programs, InstallProblem};
+use dnet_config::primary::{FakeIpHalf, FakeIpRotation};
 use dnet_config::secret_store::{SecretKey, SecretStore};
 use dnet_config::write;
 use dnet_core::endpoint::Endpoint;
@@ -50,8 +51,10 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::checks;
+use crate::feed_service::SharedDefinitions;
 use crate::orchestrator::{Effects, RaceOutcome};
 use crate::plan::{plan_tunnel, probe_job, reach_ports, AMNEZIAWG_ADAPTER};
+use crate::portal_probe::{self, PortalMemory};
 use crate::recovery::windows_ops::CORE_EXECUTABLES;
 use crate::tunnel::{Prepared, TunnelHost, Tunnels};
 use crate::winwatch::{WatchSetup, WindowsWatch};
@@ -285,6 +288,45 @@ pub struct RealEffects {
     /// Whether the programs launched as SYSTEM are checked for being out of reach of ordinary
     /// users, before every connection. Off only for a development run (`install_check_enabled`).
     check_install: bool,
+    /// Which half of the FakeIP pools the next tunnel hands out. Alternates on every start, so an
+    /// address a program remembers from the last session is refused rather than answered with a
+    /// different name (T131).
+    fakeip: FakeIpRotation,
+    /// Whether the network is believed to be a captive portal (T077, T078): read at every connect and
+    /// again whenever a live check fails.
+    portal: Mutex<PortalMemory>,
+    /// What the applied profile feed says about the client-only parameters (T066a). Read when a
+    /// configuration is generated, so a feed accepted mid-session reaches the next connection and
+    /// never the one that is up.
+    definitions: SharedDefinitions,
+}
+
+/// How long one look for a captive portal may take. Shorter than the orchestrator's wait for the
+/// reachability check it runs beside, so a slow portal probe can never turn into "unknown" for every
+/// endpoint.
+const PORTAL_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// The half of the FakeIP pools the first tunnel after the daemon starts uses. Which one hardly
+/// matters, only that it is not always the same one, so that a daemon restarted between two sessions
+/// has an even chance of using the other half. Not security-relevant: the clock's low bit will do.
+fn first_fakeip_half(clock_micros: u128) -> FakeIpHalf {
+    if clock_micros & 1 == 0 {
+        FakeIpHalf::Low
+    } else {
+        FakeIpHalf::High
+    }
+}
+
+/// What the real effects work with, besides the configuration they are built from.
+pub struct Dependencies {
+    /// Where the endpoints' credentials are kept sealed.
+    pub secrets: Arc<dyn SecretStore>,
+    /// The record of network changes to undo, so a crash leaves nothing behind.
+    pub undo: Arc<UndoRegistry>,
+    /// Where the programs and working directories are.
+    pub layout: Layout,
+    /// What the applied profile feed says about the client-only parameters.
+    pub definitions: SharedDefinitions,
 }
 
 impl RealEffects {
@@ -295,10 +337,14 @@ impl RealEffects {
         profiles: Vec<ConnectionProfile>,
         endpoints: &[Endpoint],
         rules: Vec<RoutingRule>,
-        secrets: Arc<dyn SecretStore>,
-        undo: Arc<UndoRegistry>,
-        layout: Layout,
+        dependencies: Dependencies,
     ) -> (Self, Vec<ConnectionProfile>, Vec<Endpoint>) {
+        let Dependencies {
+            secrets,
+            undo,
+            layout,
+            definitions,
+        } = dependencies;
         let assessed = crate::plan::assess_endpoints(endpoints, secrets.as_ref());
         // Only profiles some usable endpoint can serve: see `served_profiles`.
         let profiles = crate::plan::served_profiles(profiles, &assessed.served);
@@ -372,6 +418,13 @@ impl RealEffects {
             watching: Mutex::new(None),
             watch_paths: !std::env::args().any(|a| a == "--no-path-watch"),
             check_install,
+            fakeip: FakeIpRotation::new(first_fakeip_half(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_micros()),
+            )),
+            portal: Mutex::new(PortalMemory::default()),
+            definitions,
         };
         if !effects.watch_paths {
             tracing::warn!("--no-path-watch: the network is not watched and no path is probed");
@@ -476,18 +529,17 @@ fn prober(layout: &Layout, origin: Origin) -> Prober {
     }
 }
 
-impl Effects for RealEffects {
-    fn environment(&self) -> Environment {
-        Environment {
-            privileged: self.privileged,
-            usable_paths: usize::from(default_gateway().is_ok()),
-            // Not detected yet: nothing here can tell a portal from the network.
-            captive_portal: false,
-            configuration_error: self.configuration_error.clone(),
-        }
+impl RealEffects {
+    /// The client-only parameters in effect now.
+    fn client_definitions(&self) -> dnet_core::feed::ClientDefinitions {
+        *self
+            .definitions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
-    async fn reach(&self, endpoints: &[Endpoint]) -> Vec<Reach> {
+    /// Whether each endpoint answers a direct connection.
+    async fn reach_endpoints(&self, endpoints: &[Endpoint]) -> Vec<Reach> {
         let mut checks = JoinSet::new();
         for (index, endpoint) in endpoints.iter().enumerate() {
             let id = endpoint.id();
@@ -511,6 +563,35 @@ impl Effects for RealEffects {
                 answers[index] = reach;
             }
         }
+        answers
+    }
+}
+
+impl Effects for RealEffects {
+    fn environment(&self) -> Environment {
+        Environment {
+            privileged: self.privileged,
+            usable_paths: usize::from(default_gateway().is_ok()),
+            captive_portal: self
+                .portal
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .is_portal(),
+            configuration_error: self.configuration_error.clone(),
+        }
+    }
+
+    async fn reach(&self, endpoints: &[Endpoint]) -> Vec<Reach> {
+        // A connect is starting: look at the network beside the endpoints. Both go through the
+        // physical network, so neither waits for the other.
+        let (answers, reading) = tokio::join!(
+            self.reach_endpoints(endpoints),
+            portal_probe::detect(PORTAL_TIMEOUT)
+        );
+        self.portal
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .connecting(&reading);
         answers
     }
 
@@ -547,11 +628,12 @@ impl Effects for RealEffects {
                 return Some(nothing_usable());
             }
         };
+        let definitions = self.client_definitions();
         let jobs: Vec<_> = chosen
             .iter()
             .zip(ports)
             .filter_map(|(profile, port)| {
-                match probe_job(profile, &endpoint, &credentials, port) {
+                match probe_job(profile, &endpoint, &credentials, &definitions, port) {
                     Ok(job) => Some(job),
                     Err(error) => {
                         // Left out of the race; the engine marks a raced profile that never reports.
@@ -603,8 +685,16 @@ impl Effects for RealEffects {
         }
         let (endpoint, credentials) = self.credentials(endpoint).await.map_err(configuration)?;
         let origin = credentials.measure_origin.clone();
-        let plan = plan_tunnel(profile, &endpoint, &credentials, &self.rules)
-            .map_err(FailureCause::from)?;
+        // One half per start, taken even if this start fails: the next must not reuse it.
+        let plan = plan_tunnel(
+            profile,
+            &endpoint,
+            &credentials,
+            &self.client_definitions(),
+            &self.rules,
+            self.fakeip.take(),
+        )
+        .map_err(FailureCause::from)?;
         // What the network watch will need, taken now while the credentials are in hand: the
         // endpoint and the TCP port a probe may aim at (never a UDP port).
         let endpoint_ip: Option<Ipv4Addr> = endpoint.address().host().parse().ok();
@@ -632,10 +722,24 @@ impl Effects for RealEffects {
     }
 
     async fn live_check(&self, _profile: &ProfileId) -> LiveCheck {
-        match self.carrying_origin() {
+        let result = match self.carrying_origin() {
             Some(origin) => checks::live_check(&origin).await,
             None => LiveCheck::Failed,
+        };
+        if result != LiveCheck::Passed {
+            // A connection that stops working may be a portal whose session ended (US6-3). Ask,
+            // before the engine is told, so that what it is told next can say so.
+            let reading = portal_probe::detect(PORTAL_TIMEOUT).await;
+            let recognised = self
+                .portal
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .observed(&reading);
+            if let Some(change) = recognised {
+                tracing::info!(?change, "the network's captive portal changed");
+            }
         }
+        result
     }
 
     async fn probe_endpoint(&self, _endpoint: EndpointId) -> EndpointProbeOutcome {
@@ -709,6 +813,19 @@ mod flush_tests {
         let expected = PathBuf::from(r"C:\Windows\System32\ipconfig.exe");
         assert_eq!(resolver_flush_program(None), expected);
         assert_eq!(resolver_flush_program(Some(OsString::new())), expected);
+    }
+}
+
+#[cfg(test)]
+mod fakeip_tests {
+    use super::*;
+
+    #[test]
+    fn the_first_half_follows_the_clock_so_it_is_not_always_the_same() {
+        assert_eq!(first_fakeip_half(0), FakeIpHalf::Low);
+        assert_eq!(first_fakeip_half(1), FakeIpHalf::High);
+        assert_eq!(first_fakeip_half(1_700_000_000_123_456), FakeIpHalf::Low);
+        assert_eq!(first_fakeip_half(1_700_000_000_123_457), FakeIpHalf::High);
     }
 }
 

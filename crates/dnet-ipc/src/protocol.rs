@@ -8,6 +8,7 @@
 //! that `dnet-core`'s domain types carry no wire-format concern and the exact contract
 //! shape — including which strings are *rejected* — is explicit and testable.
 
+use dnet_config::credentials::EndpointCredentials;
 use dnet_core::failure::explain;
 use dnet_core::ids::{EndpointId, ProfileId};
 use dnet_core::profile::CoreBinding;
@@ -41,6 +42,12 @@ pub enum Request {
     GetVersion,
     GetState,
     GetSession,
+    /// The networks the computer has, which one carries the connection, and how good each is
+    /// (T144). A service that predates it answers `InvalidRequest`: a client treats that as "this
+    /// service cannot say", not as an empty list.
+    GetPaths,
+    /// What the product did during this connection (T144). Same note as `GetPaths`.
+    GetStats,
     ListEndpoints,
     ListProfiles,
     ListRules,
@@ -55,17 +62,153 @@ pub enum Request {
         endpoint: Option<EndpointId>,
     },
     Disconnect,
-    AddEndpoint,
-    RemoveEndpoint,
-    SetEndpointEnabled,
+    /// Add an endpoint the person already runs, with the credentials to reach it (FR-010). The
+    /// credentials cross the control pipe in clear: the pipe is local and its access is checked, and the
+    /// service seals them before they touch the disk.
+    AddEndpoint(Box<NewEndpoint>),
+    RemoveEndpoint {
+        endpoint: EndpointId,
+    },
+    SetEndpointEnabled {
+        endpoint: EndpointId,
+        enabled: bool,
+    },
     AddRule,
     RemoveRule,
     SetProfileParams,
     EnableBrutal,
-    SetEncryptedDnsHandling,
+    /// The person's choice about encrypted DNS (FR-025, FR-025a): `block: true` makes programs fall back
+    /// to the system resolver (the default); `block: false` is the single-action opt-out, and its reply
+    /// states the consequence.
+    SetEncryptedDnsHandling {
+        block: bool,
+    },
+    /// Hand the service signed profile-feed documents it did not fetch itself (an offline import,
+    /// ADR-0002 §7). The service runs exactly the checks a fetched document gets; this grants no
+    /// privilege, because an import can only install what the signing keys already authorised.
+    ImportFeed(FeedImport),
+    /// Check for updated connection-method definitions now, because the person asked (ADR-0002 §7, D2).
+    /// While a tunnel carries traffic the check goes through it; while disconnected it goes directly
+    /// over the physical network, which is the one flow that bypasses the fail-closed posture and so
+    /// is only ever the result of this explicit request. Takes no field: what to fetch and from where
+    /// are compiled in. The reply says the check began; its result arrives as an event.
+    FetchFeed,
     StartProvisioning,
     CancelProvisioning,
     Subscribe,
+}
+
+/// Signed feed documents to import: the keys document, the feed, or both (keys are taken first, so
+/// a feed signed under new keys can travel with them).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeedImport {
+    keys: Option<String>,
+    feed: Option<String>,
+}
+
+impl FeedImport {
+    /// Check and make an import. Each envelope is bounded by the size cap every source is held to.
+    /// Nothing is parsed here: the envelope is attacker-controlled until the service verifies it, and
+    /// the service is the only place that interprets it.
+    pub fn new(keys: Option<String>, feed: Option<String>) -> Result<Self, IpcError> {
+        if keys.is_none() && feed.is_none() {
+            return Err(invalid("give `keys`, `feed`, or both"));
+        }
+        for (name, text) in [("keys", &keys), ("feed", &feed)] {
+            if text
+                .as_ref()
+                .is_some_and(|t| t.len() > dnet_core::feed::ENVELOPE_MAX_BYTES)
+            {
+                return Err(invalid(format!(
+                    "`{name}` is larger than {} bytes, which no signed document is",
+                    dnet_core::feed::ENVELOPE_MAX_BYTES
+                )));
+            }
+        }
+        Ok(Self { keys, feed })
+    }
+
+    pub fn keys(&self) -> Option<&str> {
+        self.keys.as_deref()
+    }
+
+    pub fn feed(&self) -> Option<&str> {
+        self.feed.as_deref()
+    }
+}
+
+/// A new endpoint, as a client asks for it. Valid by construction: the label, the address and the
+/// credentials have all been checked, by the same rules the saved configuration applies when it is
+/// read back, so what is accepted here can always be saved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewEndpoint {
+    label: String,
+    host: String,
+    credentials: EndpointCredentials,
+}
+
+/// The longest label accepted: the same limit every endpoint label has.
+pub const MAX_LABEL_CHARS: usize = dnet_core::endpoint::MAX_LABEL_LEN;
+/// The longest host accepted (a DNS name is at most 253 characters).
+pub const MAX_HOST_CHARS: usize = 253;
+
+impl NewEndpoint {
+    /// Check and make a new endpoint. Every message names the field and never repeats its value.
+    pub fn new(
+        label: &str,
+        host: &str,
+        credentials: EndpointCredentials,
+    ) -> Result<Self, IpcError> {
+        let label = label.trim();
+        if label.is_empty()
+            || label.chars().count() > MAX_LABEL_CHARS
+            || !label.bytes().all(|b| (0x20..0x7F).contains(&b))
+        {
+            return Err(invalid(format!(
+                "`label` must be 1 to {MAX_LABEL_CHARS} printable ASCII characters"
+            )));
+        }
+        let host = host.trim();
+        if host.len() > MAX_HOST_CHARS || !dnet_config::persist::host_is_acceptable(host) {
+            return Err(invalid(
+                "`host` must be an IP address or a host name, with no scheme, port or path",
+            ));
+        }
+        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+            if ip.is_unspecified() || ip.is_multicast() {
+                return Err(invalid("`host` is not an address a server can have"));
+            }
+        }
+        if credentials.is_empty() {
+            return Err(invalid("`credentials` holds no connection method"));
+        }
+        // What cannot be stored cannot be accepted: the generators' own rules, applied now.
+        credentials
+            .to_plaintext_json()
+            .map_err(|e| invalid(format!("`credentials` {e}")))?;
+        Ok(Self {
+            label: label.to_owned(),
+            host: host.to_owned(),
+            credentials,
+        })
+    }
+
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    pub fn credentials(&self) -> &EndpointCredentials {
+        &self.credentials
+    }
+
+    /// Take the credentials out, to be sealed.
+    pub fn into_credentials(self) -> EndpointCredentials {
+        self.credentials
+    }
 }
 
 impl Request {
@@ -73,19 +216,21 @@ impl Request {
     pub fn class(&self) -> RequestClass {
         use Request::*;
         match self {
-            GetVersion | GetState | GetSession | ListEndpoints | ListProfiles | ListRules
-            | GetDiagnostics => RequestClass::ReadOnly,
+            GetVersion | GetState | GetSession | GetPaths | GetStats | ListEndpoints
+            | ListProfiles | ListRules | GetDiagnostics => RequestClass::ReadOnly,
             Subscribe => RequestClass::Stream,
             Connect { .. }
             | Disconnect
-            | AddEndpoint
-            | RemoveEndpoint
-            | SetEndpointEnabled
+            | AddEndpoint(_)
+            | RemoveEndpoint { .. }
+            | SetEndpointEnabled { .. }
             | AddRule
             | RemoveRule
             | SetProfileParams
             | EnableBrutal
-            | SetEncryptedDnsHandling
+            | SetEncryptedDnsHandling { .. }
+            | ImportFeed(_)
+            | FetchFeed
             | StartProvisioning
             | CancelProvisioning => RequestClass::Mutating,
         }
@@ -619,6 +764,48 @@ fn optional_flag(value: &Value, key: &str) -> Result<bool, IpcError> {
     }
 }
 
+/// A field a request cannot do without.
+fn field<'v>(value: &'v Value, key: &str) -> Result<&'v Value, IpcError> {
+    match value.get(key) {
+        None | Some(Value::Null) => Err(invalid(format!("`{key}` is required"))),
+        Some(v) => Ok(v),
+    }
+}
+
+fn field_str<'v>(value: &'v Value, key: &str) -> Result<&'v str, IpcError> {
+    field(value, key)?
+        .as_str()
+        .ok_or_else(|| invalid(format!("`{key}` must be a string")))
+}
+
+fn field_bool(value: &Value, key: &str) -> Result<bool, IpcError> {
+    field(value, key)?
+        .as_bool()
+        .ok_or_else(|| invalid(format!("`{key}` must be true or false")))
+}
+
+/// A request that changes the configuration carries exactly the fields it names. A field it does not
+/// know is refused, never ignored: a misspelt `enabled` that silently defaulted would change the wrong
+/// thing, and these are the requests where that matters.
+fn only_fields(value: &Value, allowed: &[&str]) -> Result<(), IpcError> {
+    if let Some(object) = value.as_object() {
+        if object.keys().any(|k| !allowed.contains(&k.as_str())) {
+            // The unknown name is the client's text and is not repeated: it is said what the request
+            // does take, which is both safer and more use than echoing a typo back.
+            let takes: Vec<&str> = allowed
+                .iter()
+                .copied()
+                .filter(|k| *k != "request")
+                .collect();
+            return Err(invalid(format!(
+                "unknown field; this request takes only: {}",
+                takes.join(", ")
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Decode a request from its wire JSON: `{ "request": "<Name>", <fields> }`.
 ///
 /// Every field is validated server-side; the caller is treated as hostile input
@@ -634,6 +821,8 @@ pub fn decode_request(wire: &str) -> Result<Request, IpcError> {
         "GetVersion" => Request::GetVersion,
         "GetState" => Request::GetState,
         "GetSession" => Request::GetSession,
+        "GetPaths" => Request::GetPaths,
+        "GetStats" => Request::GetStats,
         "ListEndpoints" => Request::ListEndpoints,
         "ListProfiles" => Request::ListProfiles,
         "ListRules" => Request::ListRules,
@@ -648,14 +837,60 @@ pub fn decode_request(wire: &str) -> Result<Request, IpcError> {
                 .transpose()?,
         },
         "Disconnect" => Request::Disconnect,
-        "AddEndpoint" => Request::AddEndpoint,
-        "RemoveEndpoint" => Request::RemoveEndpoint,
-        "SetEndpointEnabled" => Request::SetEndpointEnabled,
+        "AddEndpoint" => {
+            only_fields(&value, &["request", "label", "host", "credentials"])?;
+            // The credentials are the same strict form the service stores them in: an unknown field, a
+            // wrong version or a value a generator would refuse is `InvalidRequest`. The error names a
+            // place, never a value.
+            let credentials_value = field(&value, "credentials")?;
+            if !credentials_value.is_object() {
+                return Err(invalid("`credentials` must be an object"));
+            }
+            let credentials = EndpointCredentials::from_plaintext_json(
+                &serde_json::to_vec(credentials_value)
+                    .map_err(|_| invalid("`credentials` could not be read"))?,
+            )
+            .map_err(|e| invalid(format!("`credentials`: {e}")))?;
+            Request::AddEndpoint(Box::new(NewEndpoint::new(
+                field_str(&value, "label")?,
+                field_str(&value, "host")?,
+                credentials,
+            )?))
+        }
+        "RemoveEndpoint" => {
+            only_fields(&value, &["request", "endpoint"])?;
+            Request::RemoveEndpoint {
+                endpoint: parse_endpoint_id(field_str(&value, "endpoint")?)?,
+            }
+        }
+        "SetEndpointEnabled" => {
+            only_fields(&value, &["request", "endpoint", "enabled"])?;
+            Request::SetEndpointEnabled {
+                endpoint: parse_endpoint_id(field_str(&value, "endpoint")?)?,
+                enabled: field_bool(&value, "enabled")?,
+            }
+        }
         "AddRule" => Request::AddRule,
         "RemoveRule" => Request::RemoveRule,
         "SetProfileParams" => Request::SetProfileParams,
         "EnableBrutal" => Request::EnableBrutal,
-        "SetEncryptedDnsHandling" => Request::SetEncryptedDnsHandling,
+        "SetEncryptedDnsHandling" => {
+            only_fields(&value, &["request", "block"])?;
+            Request::SetEncryptedDnsHandling {
+                block: field_bool(&value, "block")?,
+            }
+        }
+        "ImportFeed" => {
+            only_fields(&value, &["request", "keys", "feed"])?;
+            Request::ImportFeed(FeedImport::new(
+                optional_string(&value, "keys")?.map(str::to_owned),
+                optional_string(&value, "feed")?.map(str::to_owned),
+            )?)
+        }
+        "FetchFeed" => {
+            only_fields(&value, &["request"])?;
+            Request::FetchFeed
+        }
         "StartProvisioning" => Request::StartProvisioning,
         "CancelProvisioning" => Request::CancelProvisioning,
         "Subscribe" => Request::Subscribe,
@@ -671,20 +906,24 @@ pub fn encode_request(request: &Request) -> String {
         Request::GetVersion => "GetVersion",
         Request::GetState => "GetState",
         Request::GetSession => "GetSession",
+        Request::GetPaths => "GetPaths",
+        Request::GetStats => "GetStats",
         Request::ListEndpoints => "ListEndpoints",
         Request::ListProfiles => "ListProfiles",
         Request::ListRules => "ListRules",
         Request::GetDiagnostics => "GetDiagnostics",
         Request::Connect { .. } => "Connect",
         Request::Disconnect => "Disconnect",
-        Request::AddEndpoint => "AddEndpoint",
-        Request::RemoveEndpoint => "RemoveEndpoint",
-        Request::SetEndpointEnabled => "SetEndpointEnabled",
+        Request::AddEndpoint(_) => "AddEndpoint",
+        Request::RemoveEndpoint { .. } => "RemoveEndpoint",
+        Request::SetEndpointEnabled { .. } => "SetEndpointEnabled",
         Request::AddRule => "AddRule",
         Request::RemoveRule => "RemoveRule",
         Request::SetProfileParams => "SetProfileParams",
         Request::EnableBrutal => "EnableBrutal",
-        Request::SetEncryptedDnsHandling => "SetEncryptedDnsHandling",
+        Request::SetEncryptedDnsHandling { .. } => "SetEncryptedDnsHandling",
+        Request::ImportFeed(_) => "ImportFeed",
+        Request::FetchFeed => "FetchFeed",
         Request::StartProvisioning => "StartProvisioning",
         Request::CancelProvisioning => "CancelProvisioning",
         Request::Subscribe => "Subscribe",
@@ -710,6 +949,40 @@ pub fn encode_request(request: &Request) -> String {
                 .as_ref()
                 .map_or(Value::Null, |e| Value::String(e.to_string())),
         );
+    }
+    match request {
+        Request::AddEndpoint(new) => {
+            object.insert("label".into(), Value::String(new.label.clone()));
+            object.insert("host".into(), Value::String(new.host.clone()));
+            // Valid by construction (`NewEndpoint::new` stored it once already), so this cannot fail.
+            let credentials = new
+                .credentials
+                .to_plaintext_json()
+                .expect("credentials were checked when the request was made");
+            object.insert(
+                "credentials".into(),
+                serde_json::from_slice(&credentials).expect("the stored form is JSON"),
+            );
+        }
+        Request::RemoveEndpoint { endpoint } => {
+            object.insert("endpoint".into(), Value::String(endpoint.to_string()));
+        }
+        Request::SetEndpointEnabled { endpoint, enabled } => {
+            object.insert("endpoint".into(), Value::String(endpoint.to_string()));
+            object.insert("enabled".into(), Value::Bool(*enabled));
+        }
+        Request::SetEncryptedDnsHandling { block } => {
+            object.insert("block".into(), Value::Bool(*block));
+        }
+        Request::ImportFeed(import) => {
+            if let Some(keys) = import.keys() {
+                object.insert("keys".into(), Value::String(keys.to_owned()));
+            }
+            if let Some(feed) = import.feed() {
+                object.insert("feed".into(), Value::String(feed.to_owned()));
+            }
+        }
+        _ => {}
     }
     Value::Object(object).to_string()
 }

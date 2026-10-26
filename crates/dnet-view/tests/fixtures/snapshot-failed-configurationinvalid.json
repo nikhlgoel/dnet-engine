@@ -1,0 +1,25 @@
+{
+  "activeEndpoint": null,
+  "activeProfile": null,
+  "failure": {
+    "action": "Correct the setting named above in the endpoint or profile settings, then try again.",
+    "cause": "ConfigurationInvalid",
+    "detail": "an endpoint's address is not usable",
+    "title": "The configuration cannot be used"
+  },
+  "lastBecause": null,
+  "paths": {
+    "asOfMs": 1730000000000,
+    "degraded": null,
+    "paths": [],
+    "watching": false
+  },
+  "posture": {
+    "kind": "FailClosed"
+  },
+  "stats": {
+    "connected": false
+  },
+  "status": "Failed",
+  "warnings": []
+}

@@ -27,12 +27,13 @@ use dnet_config::amneziawg::{ObfuscationParams, PeerConfig, PrivateKey};
 use dnet_config::credentials::EndpointCredentials;
 use dnet_config::hysteria2::{Hysteria2ClientParams, Hysteria2Settings, Hysteria2Transport};
 use dnet_config::primary::{
-    generate_primary_core_config, to_json, PrimaryCoreInput, PrimaryTransport,
+    generate_primary_core_config, to_json, FakeIpHalf, PrimaryCoreInput, PrimaryTransport,
 };
 use dnet_config::reality::{RealityClientParams, RealitySettings, RealityTransport};
 use dnet_config::secret_store::{SecretKey, SecretStore};
 use dnet_config::ActiveEndpointBypass;
 use dnet_core::endpoint::{Endpoint, EndpointAddress};
+use dnet_core::feed::ClientDefinitions;
 use dnet_core::profile::{Carrier, ConnectionProfile, CoreBinding, ProfileKind};
 use dnet_core::rule::RoutingRule;
 use dnet_core::session::FailureCause;
@@ -213,16 +214,21 @@ impl OwnedTransport {
 
 /// The transport for a profile the primary core carries itself, or `None` for AmneziaWG (which has
 /// its own core) or when the endpoint has no credentials for the profile.
+///
+/// `client` is what an applied profile feed says about the client-only parameters (ADR-0002 §6); where
+/// it says nothing, the bundled defaults apply. The endpoint's own parameters always come from its
+/// stored credentials.
 pub fn primary_transport(
     kind: ProfileKind,
     credentials: &EndpointCredentials,
+    client: &ClientDefinitions,
 ) -> Option<OwnedTransport> {
     match kind {
         ProfileKind::AmneziaWg => None,
         ProfileKind::Hysteria2 => credentials.hysteria2.as_ref().map(|bundle| {
             OwnedTransport::Hysteria2(Hysteria2Transport {
                 settings: Hysteria2Settings {
-                    client: Hysteria2ClientParams::default(),
+                    client: hysteria2_client(client),
                     endpoint: bundle.endpoint.clone(),
                 },
                 credentials: bundle.credentials.clone(),
@@ -231,12 +237,34 @@ pub fn primary_transport(
         ProfileKind::VlessReality => credentials.reality.as_ref().map(|bundle| {
             OwnedTransport::VlessReality(RealityTransport {
                 settings: RealitySettings {
-                    client: RealityClientParams::default(),
+                    client: reality_client(client),
                     endpoint: bundle.endpoint.clone(),
                 },
                 credentials: bundle.credentials.clone(),
             })
         }),
+    }
+}
+
+/// Hysteria 2's client parameters: the feed's where it gave one, the bundled default where not.
+fn hysteria2_client(client: &ClientDefinitions) -> Hysteria2ClientParams {
+    let bundled = Hysteria2ClientParams::default();
+    Hysteria2ClientParams {
+        bbr_profile: client.hysteria2.bbr_profile.unwrap_or(bundled.bbr_profile),
+        chrome_parrot: client
+            .hysteria2
+            .chrome_parrot
+            .unwrap_or(bundled.chrome_parrot),
+    }
+}
+
+/// REALITY's client parameters: the feed's where it gave one, the bundled default where not.
+fn reality_client(client: &ClientDefinitions) -> RealityClientParams {
+    RealityClientParams {
+        utls_fingerprint: client
+            .reality
+            .utls_fingerprint
+            .unwrap_or(RealityClientParams::default().utls_fingerprint),
     }
 }
 
@@ -378,10 +406,11 @@ pub fn probe_job(
     profile: &ConnectionProfile,
     endpoint: &Endpoint,
     credentials: &EndpointCredentials,
+    client: &ClientDefinitions,
     socks_port: u16,
 ) -> Result<ProbeJob, PlanError> {
     let (_, bypass) = dialled(endpoint, profile, credentials)?;
-    let transport = primary_transport(profile.kind(), credentials).ok_or_else(|| {
+    let transport = primary_transport(profile.kind(), credentials, client).ok_or_else(|| {
         PlanError::new(format!(
             "the {} profile cannot be tested through a proxy",
             kind_name(profile.kind())
@@ -392,14 +421,17 @@ pub fn probe_job(
 }
 
 /// Plan a connection of `profile` to `endpoint` with the credentials stored for that endpoint.
+/// `fakeip` is the half of the FakeIP pools this tunnel hands out (T131).
 pub fn plan_tunnel(
     profile: &ConnectionProfile,
     endpoint: &Endpoint,
     credentials: &EndpointCredentials,
+    client: &ClientDefinitions,
     rules: &[RoutingRule],
+    fakeip: FakeIpHalf,
 ) -> Result<TunnelPlan, PlanError> {
     let (endpoint_ip, bypass) = dialled(endpoint, profile, credentials)?;
-    let transport = primary_transport(profile.kind(), credentials);
+    let transport = primary_transport(profile.kind(), credentials, client);
 
     let config = generate_primary_core_config(PrimaryCoreInput {
         active_profile: profile,
@@ -407,6 +439,7 @@ pub fn plan_tunnel(
         rules,
         amneziawg_adapter: (profile.kind() == ProfileKind::AmneziaWg).then_some(AMNEZIAWG_ADAPTER),
         primary_transport: transport.as_ref().map(OwnedTransport::borrowed),
+        fakeip,
     })
     // The generator's errors name what is wrong, not a value (config crate contract).
     .map_err(|e| PlanError::new(format!("the connection could not be configured: {e}")))?;
@@ -534,8 +567,34 @@ mod tests {
             &profile(kind),
             &endpoint(host),
             &credentials(),
+            &ClientDefinitions::default(),
             &builtin_rules(None),
+            FakeIpHalf::Low,
         )
+    }
+
+    #[test]
+    fn the_planned_tunnel_hands_out_the_half_of_the_fakeip_pools_it_was_given() {
+        for half in [FakeIpHalf::Low, FakeIpHalf::High] {
+            let plan = plan_tunnel(
+                &profile(ProfileKind::Hysteria2),
+                &endpoint("203.0.113.10"),
+                &credentials(),
+                &ClientDefinitions::default(),
+                &builtin_rules(None),
+                half,
+            )
+            .unwrap();
+            let json = json(&plan);
+            let fakeip = json["dns"]["servers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["type"] == "fakeip")
+                .expect("a fakeip server");
+            assert_eq!(fakeip["inet4_range"], half.inet4());
+            assert_eq!(fakeip["inet6_range"], half.inet6());
+        }
     }
 
     fn json(plan: &TunnelPlan) -> Value {
@@ -645,7 +704,9 @@ mod tests {
                 &profile(kind),
                 &endpoint("203.0.113.10"),
                 &stored,
+                &ClientDefinitions::default(),
                 &builtin_rules(None),
+                FakeIpHalf::Low,
             )
             .unwrap_err();
             assert!(error.detail().contains(name), "{kind:?}: {error}");
@@ -718,9 +779,104 @@ mod tests {
 
     #[test]
     fn amneziawg_has_no_primary_transport() {
-        assert!(primary_transport(ProfileKind::AmneziaWg, &credentials()).is_none());
-        assert!(primary_transport(ProfileKind::Hysteria2, &credentials()).is_some());
-        assert!(primary_transport(ProfileKind::VlessReality, &credentials()).is_some());
+        let bundled = ClientDefinitions::default();
+        assert!(primary_transport(ProfileKind::AmneziaWg, &credentials(), &bundled).is_none());
+        assert!(primary_transport(ProfileKind::Hysteria2, &credentials(), &bundled).is_some());
+        assert!(primary_transport(ProfileKind::VlessReality, &credentials(), &bundled).is_some());
+    }
+
+    // ------------------------------------------------------------------ the profile feed's client section
+
+    fn from_a_feed() -> ClientDefinitions {
+        use dnet_core::feed::document::{Hysteria2ClientProposal, RealityClientProposal};
+        use dnet_core::transport_params::{BbrProfile, UtlsFingerprint};
+        ClientDefinitions {
+            hysteria2: Hysteria2ClientProposal {
+                bbr_profile: Some(BbrProfile::Conservative),
+                chrome_parrot: Some(false),
+            },
+            reality: RealityClientProposal {
+                utls_fingerprint: Some(UtlsFingerprint::Firefox),
+            },
+            sequence: Some(5),
+        }
+    }
+
+    /// The JSON with its whitespace removed, so a test can look for `"key":"value"`.
+    fn compact(json: &str) -> String {
+        json.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    fn planned_with(kind: ProfileKind, client: &ClientDefinitions) -> String {
+        let plan = plan_tunnel(
+            &profile(kind),
+            &endpoint("203.0.113.10"),
+            &credentials(),
+            client,
+            &builtin_rules(None),
+            FakeIpHalf::Low,
+        )
+        .unwrap();
+        compact(plan.config_json())
+    }
+
+    #[test]
+    fn without_a_feed_the_bundled_client_parameters_are_used() {
+        let bundled = ClientDefinitions::default();
+        let hy2 = planned_with(ProfileKind::Hysteria2, &bundled);
+        assert!(hy2.contains(r#""bbr_profile":"standard""#), "{hy2}");
+        // Parroting Chrome is the default, and is expressed by saying nothing.
+        assert!(!hy2.contains("disable_chrome_parrot"), "{hy2}");
+        let reality = planned_with(ProfileKind::VlessReality, &bundled);
+        assert!(reality.contains(r#""fingerprint":"chrome""#), "{reality}");
+    }
+
+    #[test]
+    fn an_applied_feeds_client_parameters_reach_the_next_configuration() {
+        let hy2 = planned_with(ProfileKind::Hysteria2, &from_a_feed());
+        assert!(hy2.contains(r#""bbr_profile":"conservative""#), "{hy2}");
+        assert!(hy2.contains(r#""disable_chrome_parrot":true"#), "{hy2}");
+        let reality = planned_with(ProfileKind::VlessReality, &from_a_feed());
+        assert!(reality.contains(r#""fingerprint":"firefox""#), "{reality}");
+    }
+
+    #[test]
+    fn a_feed_never_changes_what_the_endpoint_is_told_to_share() {
+        // The endpoint's own parameters come from its stored credentials, whatever the feed says.
+        let with_feed = planned_with(ProfileKind::Hysteria2, &from_a_feed());
+        let without = planned_with(ProfileKind::Hysteria2, &ClientDefinitions::default());
+        for shared in ["obfs", "salamander", "server_name"] {
+            assert_eq!(
+                with_feed.contains(shared),
+                without.contains(shared),
+                "{shared}"
+            );
+        }
+    }
+
+    #[test]
+    fn what_is_raced_is_what_will_run() {
+        // A probe job and a tunnel both take their transport from `primary_transport`, so the race
+        // measures a profile with the parameters the tunnel will then use; otherwise it would pick a
+        // profile on the strength of a configuration nobody connects with.
+        let Some(OwnedTransport::Hysteria2(transport)) =
+            primary_transport(ProfileKind::Hysteria2, &credentials(), &from_a_feed())
+        else {
+            panic!("Hysteria 2 has a primary transport");
+        };
+        assert_eq!(
+            transport.settings.client.bbr_profile,
+            dnet_core::transport_params::BbrProfile::Conservative
+        );
+        assert!(!transport.settings.client.chrome_parrot);
+        assert!(probe_job(
+            &profile(ProfileKind::Hysteria2),
+            &endpoint("203.0.113.10"),
+            &credentials(),
+            &from_a_feed(),
+            51999,
+        )
+        .is_ok());
     }
 
     // ------------------------------------------------------------------ probe jobs
@@ -730,6 +886,7 @@ mod tests {
             &profile(kind),
             &endpoint("203.0.113.10"),
             &credentials(),
+            &ClientDefinitions::default(),
             51999,
         )
     }
@@ -755,6 +912,7 @@ mod tests {
             &profile(ProfileKind::Hysteria2),
             &endpoint("vpn.example.com"),
             &credentials(),
+            &ClientDefinitions::default(),
             51999,
         )
         .unwrap_err();
@@ -764,6 +922,7 @@ mod tests {
             &profile(ProfileKind::Hysteria2),
             &endpoint("203.0.113.10"),
             &EndpointCredentials::default(),
+            &ClientDefinitions::default(),
             51999,
         )
         .unwrap_err();

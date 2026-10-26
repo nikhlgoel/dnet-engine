@@ -11,6 +11,7 @@ pub mod paths;
 pub mod probe;
 pub mod undo;
 pub mod undo_file;
+pub mod wifi;
 pub mod win_bringup;
 pub mod win_route;
 

@@ -1,0 +1,20 @@
+{
+  "encryptedDns": {
+    "block": true,
+    "needsDisclosure": false
+  },
+  "rules": [
+    {
+      "action": "Bypass",
+      "builtin": true,
+      "precedence": 1,
+      "reliability": "Deterministic"
+    },
+    {
+      "action": "Bypass",
+      "builtin": false,
+      "precedence": 200,
+      "reliability": "BestEffort"
+    }
+  ]
+}

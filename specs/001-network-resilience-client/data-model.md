@@ -230,6 +230,7 @@ One period of being connected. Append-only; the basis for both the UI's current 
 
 `ProbeStarted` · `ProfileSelected { profile, because }` · `ProfileBlocked { profile, reason }` ·
 `EndpointMigrated { from, to, because }` · `PathChanged { from, to, tier_at_time }` ·
+`Degraded { path, band, staying }` · `Recovered { path }` (T084) ·
 `CoreRestarted { core, attempt }` · `Failed { cause }`
 
 **Invariant.** Every automatic change carries a `because`. The UI must always be able to answer "why

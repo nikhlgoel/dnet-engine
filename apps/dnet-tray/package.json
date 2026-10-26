@@ -1,0 +1,34 @@
+{
+  "name": "dnet-tray",
+  "private": true,
+  "version": "0.1.0",
+  "description": "The DNet Engine window: an unprivileged client of the control pipe (via the Rust side). ADR-0007.",
+  "license": "GPL-3.0-only",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build && node scripts/check-budget.mjs",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "test": "vitest run",
+    "audit": "pnpm audit --prod"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^7",
+    "@testing-library/dom": "^10",
+    "@testing-library/svelte": "^5",
+    "@types/node": "^22.20.5",
+    "axe-core": "^4",
+    "jsdom": "^30",
+    "svelte": "^5",
+    "svelte-check": "^4",
+    "typescript": "~6.0.0",
+    "vite": "^8",
+    "vitest": "^5"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "What the window may do: give the commands in build.rs, and listen for the Rust side's events. Nothing else: no shell, no file system, no network, no other plugin.",
+  "windows": ["main"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "allow-capabilities",
+    "allow-snapshot",
+    "allow-activity-backlog",
+    "allow-stabilize",
+    "allow-list-endpoints",
+    "allow-add-endpoint",
+    "allow-remove-endpoint",
+    "allow-set-endpoint-enabled",
+    "allow-list-rules",
+    "allow-set-encrypted-dns",
+    "allow-check-updates",
+    "allow-open-login-page"
+  ]
+}

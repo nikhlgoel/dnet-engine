@@ -1,0 +1,25 @@
+{
+  "activeEndpoint": null,
+  "activeProfile": null,
+  "failure": {
+    "action": "Check that the endpoint server is running and that this network allows connections to it, or add another endpoint.",
+    "cause": "NoEndpointReachable",
+    "detail": "None of your endpoints answered a direct connection test, so there is nowhere to send your traffic. Nothing is being tunnelled.",
+    "title": "No exit endpoint is reachable"
+  },
+  "lastBecause": null,
+  "paths": {
+    "asOfMs": 1730000000000,
+    "degraded": null,
+    "paths": [],
+    "watching": false
+  },
+  "posture": {
+    "kind": "FailClosed"
+  },
+  "stats": {
+    "connected": false
+  },
+  "status": "Failed",
+  "warnings": []
+}

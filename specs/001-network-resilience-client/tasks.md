@@ -545,7 +545,7 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
   >   unit variant (Salamander).
   >
   > **Not yet wired.** Nothing in `dnetd` calls this yet; T066a–T066d below do.
-- [ ] T066a [US1] Persist and restore feed state in `dnetd`.
+- [x] T066a [US1] Persist and restore feed state in `dnetd`.
   - Keys and feed envelopes go to `%PROGRAMDATA%\DNet Engine\state\`, using the undo journal's
     durable write and SYSTEM/Administrators DACL check.
   - `restore` runs at start.
@@ -554,16 +554,65 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
   - Raise a `ConnectionEvent` on rule-R eviction and on staleness.
   - Map client parameters into the generators. Stage endpoint parameters for re-provisioning;
     never apply them alone (§6).
-- [ ] T066b [US1] Implement feed fetching in `dnetd`, per `dnet_core::feed::fetch`.
+  > **Built 2026-10-24 (not committed); security review is required before commit** (the profile feed, core configuration generation, key material). Inert until the key ceremony (T066d): with no root keys
+  > compiled in (`crates/dnetd/src/feed_trust.rs`, `ROOT_KEYS = None`) the service has no feed machinery and an import answers "not available".
+  > - **`dnetd::feed_service`** (21 tests, real signed documents): restore at start re-verifies both stored envelopes from their bytes (a bad one is dropped and reported, never trusted; a file that cannot
+  >   be read is reported); an offered keys document or feed goes through `dnet_core::feed`'s acceptance; **the envelope is written before the state changes**, so a failed write changes nothing; rule R
+  >   evicts a feed the new keys no longer cover (and a restart agrees); an expired feed stays in use and is reported out of date once, re-armed by the next feed; a restart never drops a feed for being old.
+  > - **`dnetd::feed_trial`** (10 tests): feed step 8. A configuration is generated for every bundled profile through `plan_tunnel` and `build_set_device` with the feed's client **and** endpoint values
+  >   (each candidate REALITY domain, a Gecko layer, AmneziaWG values merged over the bundled ones, cross-field rules checked on the result). The fixture is in the documentation range (192.0.2.1) with
+  >   made-up key material; nothing of the person's setup is read. One profile that will not generate refuses the whole feed (step 9). It catches what the parser cannot: `jmin` alone is in bounds, but
+  >   above the bundled `jmax` it leaves no room.
+  > - **Applied from the next connection.** `ClientDefinitions` (`dnet_core::feed::applied`, 5 tests) carries the client section; `plan_tunnel` and `probe_job` take it, so **what is raced is what will run**.
+  >   Hysteria 2's congestion profile and Chrome parroting and REALITY's TLS fingerprint come from the feed where it speaks, the bundled default where not. A tunnel already up is never regenerated.
+  >   The endpoint section is only **staged** (`staged_endpoint_updates`), never applied. **AmneziaWG's junk-packet proposal is validated and kept but not applied:** this client keeps those three numbers in the
+  >   endpoint's stored credentials and nothing records whether a person chose them, so a feed could silently overwrite a value someone set.
+  > - **Events.** `ConnectionEvent::DefinitionsChanged` (`Updated { sequence, endpoint_updates }`, `Evicted`, `OutOfDate`, `Discarded`), each with a `because`; sent when it happens, and `OutOfDate` is noticed
+  >   when a client next asks for the state (the feed needs no timer to keep working). Contract: `ipc-protocol.md`.
+  > - **Mutation checks:** 16 of 16 caught (writes not checked, trial skipped, definitions not published or not reset on eviction, stale reported every time or never re-armed, discarded documents unreported,
+  >   AmneziaWG device check skipped, proposed layer and domains not tried, import ignoring the trial, the feed's values ignored by the generators).
+  > - **Not done:** the person's consent flow for the staged endpoint changes (T107's wizard and `dnet-provision`); the `precedence: user, then feed` rule has no "user" yet (no setting to put there); the
+  >   feed is not shown in `GetDiagnostics`.
+- [x] T066b [US1] Implement feed fetching in `dnetd`, per `dnet_core::feed::fetch`. **Built 2026-10-24 (not committed); the live path has not met the real hosts.**
   - HTTPS via rustls; every URL checked with `is_allowed_url` **after parsing**; at most 2
     redirects; 30 s timeout; `read_capped`; no cookies or identifiers.
   - Start-up plus a 6 h schedule with jitter, through the tunnel only.
   - The physical network only through a `UserRequested` IPC request while fail-closed (D2).
   - Offline import as a `Mutating` IPC request carrying envelope bytes.
-- [ ] T066c [US1] Implement `cargo xtask feed-keygen` and `feed-sign`.
+  > **Offline import built 2026-10-24 (not committed).** `Request::ImportFeed` (`FeedImport`, IPC-23, 4 tests) and `dnetctl import-feed --keys-file … --feed-file …` (files bounded by the size cap, a Windows byte-order
+  > mark tolerated, content never printed, nothing interpreted by the tool). The service runs every check a fetched document gets plus the trial; keys are taken first, and if the feed is then refused the error
+  > says the keys were taken. Service-level tests (6): applied and announced, repeated import changes nothing, wrong signing key, a feed that parses but would not generate, garbage not echoed, no trust anchor.
+  > **Fetching built 2026-10-24 (not committed; security review required: it is network code in the SYSTEM service).** `dnetd::feed_fetch` (21 tests) and `FetchFeed` (IPC-23), `dnetctl check-updates`.
+  > - **The rules are enforced by this code, not by the HTTP library:** every URL, the first and each redirect target, is checked with `is_allowed_url` *before* it is requested; redirects are followed one at a
+  >   time by `fetch_asset`, at most two, and a third (or a loop) is refused without its target being requested; a body over the cap is refused (checked in the transport as it is read, and again here). The real
+  >   transport (`HttpTransport`, `reqwest` with rustls) follows no redirect, ignores any proxy, keeps no cookie, is HTTPS-only, has a 30 s timeout and a fixed `User-Agent`.
+  > - **When (D2).** The schedule (start-up delay, then every 6 h plus up to 30 min of jitter) runs a check **only while a tunnel carries traffic**; otherwise it looks again in 5 minutes and never goes out.
+  >   A check the person asks for goes through the tunnel if there is one and directly if not, and the reply says which. A second request while one runs is `ServiceBusy`.
+  > - **A check fetches both documents before offering either**, so a feed that cannot be fetched leaves the keys unapplied too; keys go first; the same verification and the trial generation apply.
+  >   A requested check that finds nothing is announced (`CheckFailed`, `Unreachable` or `Refused`); a scheduled one is only logged (before the publisher has published anything every one would fail).
+  > - **Found while wiring it: a real bug in T146, fixed.** `main` kept the orchestrator handle taken at start-up, but a configuration change replaces the orchestrator, so a stop request after a change would have
+  >   shut down the retired one and left a live tunnel up (SUP-04). Both entry modes now ask the service for the orchestrator *at shutdown*; a test pins that the handle it gives out is the live one.
+  > - **Mutation checks:** 7 of 9 caught at first (the URL check, redirect limit, size cap, claim release, both announcement rules, fetching both before offering either), the two survivors being one equivalent mutant (the schedule's
+  >   match already refuses the physical network, so two layers agree) and one real gap (no fetch test sent a feed that parses but fails the trial), now covered.
+  > - **Not covered by any test, and why:** `HttpTransport` itself (its settings cannot be inspected and it needs the real hosts). It is small, and its job is to do nothing the fetch rules do not allow, but the
+  >   first live run is where it is proven: `dnetctl check-updates` against a published feed (T066d).
+- [x] T066c [US1] Implement `cargo xtask feed-keygen` and `feed-sign`.
   - Signing runs the payload through `dnet_core::feed` parsing before signing.
   - Must reproduce the FEED-15 known-answer vector.
   - Private keys are never written inside the repository.
+  > **Built and run for real 2026-10-22 (not committed).** `crates/xtask/src/feed_tool.rs` (24 tests) and, in `dnet-core`, `feed::sign::{rehearse_keys, rehearse_feed}` (4 new tests).
+  > - `feed-keygen --out <file>`: a key from the operating system's randomness (`getrandom`, already in the lock), a one-line base64 secret file that **never overwrites** (mode 0600 where the platform has it),
+  >   and only the **public** key printed. Refuses a path inside the repository.
+  > - `feed-sign --document keys|feed --payload ... --key ... --root-public x3 [--keys-envelope ...] --out ...`: parses the payload with the client's own parser, signs with `feed::sign::seal` (the function
+  >   FEED-15 pins to an independently produced known-answer signature; the tool's key derivation is also checked against that vector's public key), then **offers the finished envelope to the client's own
+  >   acceptance code as a fresh install would** and writes nothing unless the client would accept it. So it refuses one root (threshold), a root signing a feed, a key the keys document does not list, a feed
+  >   under another keys version, an expired document, the same key twice, and a key file inside the repository; it never overwrites its output.
+  > - **Run end to end with the real commands** (4 keys, keys document signed by 2 of 3 roots, feed signed by the delegated key, and each refusal above): every refusal fired, no refused run left a file, no
+  >   secret was printed. The throwaway keys are in `%TEMP%\feed-smoke-_3a2s9c5`; **delete that directory** (a delete I attempted was held up by a tool gate, so it is still there; it holds only test keys).
+  > - Mutation-checked: 10 mutations caught (writing a key in the repository, using one from it, skipping either rehearsal, the same key twice, overwriting, the input cap, echoing a secret in an error, a
+  >   lax key file, accepting fewer than three roots). One survivor (a key file with whitespace inside it) got its own test. The envelope-size check I first wrote was unreachable (the rehearsal refuses
+  >   an oversized envelope with the client's own rule), so it was removed rather than left as a second rule to drift.
+  > - **Security review is still required before commit** (key material). A runbook for the key ceremony (T066d) is `docs/feed-publishing.md`.
 - [ ] T066d **[OWNER]** Root key ceremony (D3): generate 3 root keys offline on separate media,
   compile their public keys and `MIN_KEYS_VERSION` into `dnetd`, publish the first keys document
   and feed to the `profile-feed` release. Blocks shipping T066a–T066b.
@@ -572,6 +621,8 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
   > `min_packet_size` and `max_packet_size` (`option/hysteria2.go`, `constant/hysteria2.go` at
   > `0b89958`), and its `check` accepts a generated Gecko config. The generator supports both
   > layers. Still open: ADR-0003, choosing the default layer, and tuning.
+  > **ADR-0003 written and accepted 2026-10-24 (option C: Salamander by default, Gecko an offered endpoint option; owner's decision).** It records what is established (core accepts Gecko; the generator, credentials and feed carry both; both ends must agree; provisioning bootstraps
+  > Salamander only) and what is not (no comparison of the two against a real filter, Gecko's cost, tuning), recommends Salamander by default with Gecko as an endpoint option, and lists three questions for the owner.
 - [ ] T068 **[GATE] Plan Phase 4 exit**: HV-01, HV-02, HV-03, HV-04, HV-09, HV-12 pass. HV-03 must show the obfuscated profile connecting **and** the unobfuscated control failing
 
 > **Partial evidence 2026-10-16 (not the gate).** `testing/harness/Invoke-Race.ps1` races the real
@@ -608,16 +659,90 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
 
 **Independent test**: HV-10, HV-11, SC-017.
 
-- [ ] T069 [US1] Wire FakeIP synthesis and reverse lookup into rule evaluation in `crates/dnet-core/src/fakeip.rs` (FR-020, FR-021)
-- [ ] T070 [US1] Implement encrypted-DNS endpoint blocking so applications fall back to system resolution, in `crates/dnet-core/src/doh_block.rs` (FR-025)
-- [ ] T071 [US1] Implement the prominent first-run disclosure and single-action opt-out for encrypted-DNS override, stating the consequence on opt-out, in `crates/dnet-core/src/doh_consent.rs` (FR-025a)
-- [ ] T072 [P] [US5] Implement rule precedence evaluation with configuration-time collision rejection in `crates/dnet-core/src/rule_eval.rs` (FR-022)
-- [ ] T073 [P] [US5] Implement destination-rule enforcement guaranteeing bypassed traffic never traverses the tunnel, in `crates/dnet-core/src/bypass.rs` (SC-017)
-- [ ] T074 [US5] Implement the ETW real-time session on `Microsoft-Windows-Kernel-Network` in `crates/dnet-etw/src/session.rs`, subscribing to `TcpIpConnect` and its IPv6 counterpart — **conditional on SPIKE-O6 (T021) having passed**
-- [ ] T075 [US5] Implement 5-tuple to PID attribution reading **`PID` from the event payload, never from `EVENT_TRACE_HEADER`**, in `crates/dnet-etw/src/attribution.rs` ([research.md](./research.md) §R7)
-- [ ] T076 [US5] Implement short-TTL attribution caching with eviction, resolving a miss to "no application rule matched" and never to a guess, in `crates/dnet-etw/src/cache.rs`
-- [ ] T077 [P] [US6] Implement captive-portal detection and the built-in probe-host exemptions in `crates/dnet-core/src/portal.rs` (FR-026)
-- [ ] T078 [US6] Implement portal-expiry recognition so loss of connectivity reports a captive portal rather than a generic failure, in `crates/dnet-core/src/portal_expiry.rs` (US6-3)
+- [x] T069 [US1] Wire FakeIP synthesis and reverse lookup into rule evaluation in `crates/dnet-core/src/fakeip.rs` (FR-020, FR-021)
+  > **Built 2026-10-22 (not committed), reinterpreted: the synthesis and the reverse lookup are the primary core's, not ours.** The core answers a lookup with a placeholder from a private pool, keeps the
+  > name-to-address table in its own memory (T130: it dies with the core), and routes the next connection by the name. The product cannot read that table and does not need to: rules are evaluated on
+  > *names* (`rule_eval`, T072), and the evaluator never matches a named destination with an address range. What the product owns, and now has in one place (`dnet_core::fakeip`, which
+  > `dnet_config::primary::FAKEIP_INET4/6` re-state): the pool definition, `is_placeholder` (so anything that shows a destination can say "a name" rather than print an address that means nothing outside
+  > the tunnel; IPv4-mapped forms included), and `check_user_range`, which makes `RoutingRule::user` **refuse a range inside the pool** (`RangeInsideFakeIpPool`): nothing real lives there, so such a rule can
+  > only be a mistake. A range that merely *contains* the pool (`0.0.0.0/0`, `198.0.0.0/8`) is fine. Whether the real core really skips address rules for a name it resolved from a placeholder is an
+  > assumption written down in `rule_agreement.rs`; **T079 checks it.** 6 tests; 5 mutations, all caught.
+- [x] T070 [US1] Implement encrypted-DNS endpoint blocking so applications fall back to system resolution, in `crates/dnet-core/src/doh_block.rs` (FR-025)
+  > **Built 2026-10-22 (not committed); live check is the T079 gate (HV-10 with a browser using encrypted DNS).** The mechanism is the one browsers document: make their encrypted resolver unreachable
+  > and they use the system's. 14 well-known resolver suffixes (the browsers' bundled lists; Firefox's canary name is included so it switches its own encrypted DNS off) are refused as a lookup and as
+  > a connection, and port 853 (DNS over TLS and QUIC) is refused. New: `RuleAction::Reject` and `RuleMatcher::EncryptedDnsPort` (port 853, Reject only). Rules are built in at precedences 100–114: after
+  > the local-network and portal bypasses (1–9, which therefore still win, so a resolver on the router keeps working) and before every person's rule (200 and up: `USER_RULES_START`).
+  > - **Only the product may refuse traffic** (`RejectIsBuiltinOnly`), so a person's rule can never silently black-hole something. **A person's rule cannot undo the block**: the store refuses a user
+  >   rule numbered below 200 while the block is in force (`OutranksEncryptedDnsBlock`), and refuses removing a block rule through the rule list (`BuiltinRuleMissing`); only the opt-out (T071) lifts it,
+  >   and the opt-out must lift all of it (`EncryptedDnsBlockLeftBehind`).
+  > - `builtin_rules_for(endpoint, policy)` is `builtin_rules` plus the block; `builtin_rules` itself is unchanged (it is the *required* set). The generator writes `action: "reject"` routes and, for names,
+  >   `reject` DNS rules placed before the FakeIP answer (CFG-13); the DNS chain follows precedence.
+  > - **Said plainly, in the module header:** it is a list of names. A resolver not on it, or reached by a bare address, is not blocked and a program using it keeps bypassing destination rules.
+  > - Tests: 12 in `doh_block`, 2 in `contract.rs` (CFG-13), 2 properties in `rule_agreement.rs` (no user rule can lift what the built-ins refuse; the claim is not vacuous), 5 in the store. **18
+  >   mutations, all caught** (`scratchpad/mut_t070.py`: refusal generated as a bypass, DNS rule missing, wrong port in the evaluator and in the config, user rules allowed to outrank, band collision,
+  >   opt-out leaving rules behind, users allowed to add a refusal, port 853 tunnelled, no block in the default set, the rule list able to lift the block, stale refusals after an opt-out, the store
+  >   accepting an outranking rule, the canary dropped). One property failed on the way and was a mistake in the property, not the code: the local network and the portal hosts outrank the block *by design*.
+  > - **Not done:** the opt-out is not saved (`ConsentState::{to_stored,from_stored}` exist; the saved-configuration format is the IPC/config boundary and needs its own reviewed change), and
+  >   `SetEncryptedDnsHandling` is dispatched since T146 (2026-10-24), and the choice is saved. A restart returns to the protective default (block, disclosure shown again). **Security review is still required before this is
+  >   committed** (it is routing, DNS and core-configuration generation).
+- [x] T071 [US1] Implement the prominent first-run disclosure and single-action opt-out for encrypted-DNS override, stating the consequence on opt-out, in `crates/dnet-core/src/doh_consent.rs` (FR-025a)
+  > **Built 2026-10-22 (not committed); the screen is T106.** `disclosure()` (what is overridden, why, how to turn it off; versioned, so a changed text is shown again), `ConsentState`
+  > (`needs_disclosure`, `acknowledge_disclosure`, `opt_out` in one call returning the consequence the interface must show — "rules for sites and domains will not apply to traffic from programs that use
+  > their own encrypted lookups" —, `restore`, which needs no consent because it only narrows what programs may do). The stored form falls back to the protective default for anything it does not
+  > recognise: a damaged record cannot switch the override off. The text names no technology. Wired into the daemon's store (`opt_out_of_encrypted_dns_block`, `restore_encrypted_dns_block`,
+  > `acknowledge_encrypted_dns_disclosure`), with no IPC path yet (see T070). 8 tests in the module; 4 of the 18 T070 mutations are in this module (all caught).
+- [x] T072 [P] [US5] Implement rule precedence evaluation with configuration-time collision rejection in `crates/dnet-core/src/rule_eval.rs` (FR-022)
+  > **Built 2026-10-22 (not committed).** `evaluate` (lowest precedence that matches decides; ties keep the order given; nothing matching is the tunnel), over a `Flow` that is either a *name* or an
+  > *address*. A named flow is decided by its name and never by a CIDR rule (a name has no address yet, under FakeIP); an application rule applies only when the program is known, so an unknown program is
+  > skipped, never guessed. `normalize_domain` (lower case, one trailing dot dropped, ASCII or `xn--` only, label and length rules), `normalize_application` (case-insensitive, `\\?\` prefix and trailing
+  > separators ignored), IPv4-mapped IPv6 turned into the IPv4 address it is (so `::ffff:10.0.0.1` cannot sidestep a `10.0.0.0/8` rule), and `shadowed` (a rule an earlier one always catches, so the
+  > interface can say so). `RoutingRule::build` now refuses a domain pattern that cannot be a name, which closed a way for a rule to silently do nothing. Collision rejection at configuration time was
+  > already `validate_rule_set`. Pure logic; the tests are in the module.
+- [x] T073 [P] [US5] Implement destination-rule enforcement guaranteeing bypassed traffic never traverses the tunnel, in `crates/dnet-core/src/bypass.rs` (SC-017)
+  > **Built 2026-10-22 (not committed); the live half is T079.** Not a new `bypass.rs`: the guarantee is that the *generated configuration* and the *evaluator* agree, so it is
+  > `crates/dnet-config/tests/rule_agreement.rs` (property tests over generated rule sets and destinations) over `dnet_config::primary::route_rules`, now public. Anything the evaluator calls a bypass is
+  > `direct` in the generated routes, never the tunnel; plaintext DNS is always captured; no rule a person adds can lift what the built-ins refuse (T070). **It found a real leak:** a bypass rule written
+  > `Example.COM.` was emitted as written and the core compares names as it is given them, so the destination went through the tunnel. Patterns are now written in the normal form. The test states the
+  > assumptions it makes about the core (exact, case-insensitive `domain`; suffix `domain_suffix`; `ip_cidr` tested only against a destination given as an address); **they are checked against the real
+  > core in the lab, T079, not here.** I deleted `rule_agreement.proptest-regressions` while iterating, which held the seed of the trailing-dot case; the direct test
+  > `patterns_are_written_in_the_form_a_connection_arrives_in` covers that fix.
+- [x] T074 [US5] Implement the ETW real-time session on `Microsoft-Windows-Kernel-Network` in `crates/dnet-etw/src/session.rs`, subscribing to `TcpIpConnect` and its IPv6 counterpart — **conditional on SPIKE-O6 (T021) having passed**
+  > **Built 2026-10-22 (not committed); it has compiled and linted but NOT been run: starting a trace needs an elevated shell.** SPIKE-O6 passed (ADR-0001, run 2), so this is in scope. `EtwSession::start(cache)`
+  > subscribes to the provider, and for each IPv4/IPv6 connect event reads `PID`, `saddr`, `daddr`, `sport` and `dport` from the payload, decodes them (T075) and inserts into the cache (T076); `stop`/drop
+  > ends the session. Counters only (seen, attributed, undecodable) and **no per-connection logging**, because a line per connection would be the destination log that FR-035 forbids. The callback only
+  > decodes and inserts; a panic or a slow consumer cannot touch traffic. Also `process::image_path(pid)` (the path form application rules are written in; least access that works; run here against this
+  > process). **Not wired into `dnetd`.**
+  > - **Owner, elevated shell:** `cargo test -p dnet-etw -- --ignored --nocapture` runs `live_connects_made_by_this_process_are_attributed_to_it` (50 loopback connections; passes only if ≥ 95 % are
+  >   attributed to this process and none is undecodable). ADR-0001 measured 100 % with the spike. **Unverified until then:** that `ferrisetw`'s address parse (raw bytes as the octets) agrees with the
+  >   kernel's byte order for `saddr`/`daddr`; ports are verified by the ADR, addresses were not measured by the spike. The live test would show it.
+- [x] T075 [US5] Implement 5-tuple to PID attribution reading **`PID` from the event payload, never from `EVENT_TRACE_HEADER`**, in `crates/dnet-etw/src/attribution.rs` ([research.md](./research.md) §R7)
+  > **Built 2026-10-22 (not committed).** Pure, no ETW type: `decode(RawConnect) -> BestEffortAttribution`. The process id is the payload's; **the ports are swapped into host order in exactly one place** (the
+  > binding constraint of ADR-0001, with a test over ports that are not palindromes, and a test that shows reading them as parsed gives the wrong connection); addresses keep the kernel's order; an
+  > IPv4-mapped IPv6 spelling is the same connection as the plain one; process 0, a zero port, a family that does not match the event id, and a non-connect event are refused. The type is named
+  > `BestEffortAttribution` because there is no exact attribution (a missed event, a reused id, the gap before use).
+- [x] T076 [US5] Implement short-TTL attribution caching with eviction, resolving a miss to "no application rule matched" and never to a guess, in `crates/dnet-etw/src/cache.rs`
+  > **Built 2026-10-22 (not committed).** TTL 30 s, capacity 4096 (both parameters), time passed in so every behaviour is tested without waiting. An entry at or past its TTL is **not trusted even before it
+  > is evicted**; the cache never exceeds its capacity however fast connections arrive (oldest first); a connection seen again replaces the earlier answer and keeps its life (the old record does not evict
+  > it); only the **exact** connection (both ends) resolves, with no port-only or nearest match; a miss is `Resolution::NoApplicationRuleMatched`. `SharedCache` survives a poisoned lock.
+  > **Mutation-checked: 12 mutations (both ports unswapped, process 0 accepted, zero ports, family unchecked, mapped addresses, the TTL edge, an expired answer trusted, an unbounded cache, a refreshed
+  > record evicting its live entry in each of the two places, eviction on insert), all caught.** Builds for the Linux target too (the crate has Windows-only modules behind `cfg`).
+- [x] T077 [P] [US6] Implement captive-portal detection and the built-in probe-host exemptions in `crates/dnet-core/src/portal.rs` (FR-026)
+  > **Logic built 2026-10-22 (not committed); not wired: `dnetd` makes no probe request yet.** The probe hosts' exemptions already existed (`builtin_rules`, CAPTIVE_PORTAL_PROBE_SUFFIXES). New: `classify`
+  > (an unchanged known body from the operating system's own two probes is `Open`; a redirect, any other body or an HTML page where text was expected is `Intercepted`, with the login address when given; a
+  > connect failure or timeout is `Unreachable` and **a dead network is never called a portal**; anything it cannot make sense of is `Inconclusive`, never a guess), `combine` (two probes), and
+  > `login_url` — the portal's address comes from whoever runs the network, so it is offered for the person's own browser to open, never fetched by the product, and only if it is plain `http(s)`,
+  > with no credentials, no control character and a bounded length (`fallback_login_url` otherwise). Pure logic.
+  > **Wired 2026-10-24 (not committed; security review required: it makes network requests whose replies are hostile).** `dnetd::portal_probe`: a plain-HTTP fetch of the two pages the operating system itself
+  > fetches, through the physical network, bounded in time and size (head 8 KiB, body 512 bytes, overall timeout), **never following** a redirect (the login address is for the person's browser), anything that
+  > is not an HTTP reply is `Inconclusive`. The request carries nothing about the person: a fixed path and host, a fixed `User-Agent`, no cookie. `RealEffects::reach` takes a reading beside the endpoint
+  > reachability check (within 3 s, so a slow probe never turns an endpoint's answer into "unknown"), and the orchestrator now feeds the engine the environment **after** the check, so a failed connect
+  > blames the portal instead of the endpoint. 27 tests against a local listener standing in for each kind of network (open, redirect, page in place, dead, silent, junk, endless, whitelisted-one-host, a
+  > redirect not followed). Mutation checks: 9 of 9 caught after three gaps in the tests were closed (an endless reply, a non-HTTP reply with a valid code and the right body, a new network starting over).
+  > **Still to do:** an IPC action that opens the checked login address (the failure cannot yet carry it), and a live run on a real portal (HV-11).
+- [x] T078 [US6] Implement portal-expiry recognition so loss of connectivity reports a captive portal rather than a generic failure, in `crates/dnet-core/src/portal_expiry.rs` (US6-3)
+  > **Logic built 2026-10-22; wired 2026-10-24 (see T077).** At connect, one interception counts as the confirmation, so a person who signs in and later loses the portal's session is told so on the next reading (`PortalMemory`); while connected a reading is taken after each failed live check. `PortalWatch::observe` reads the stream of readings: two interceptions in a row make a portal (one odd reply is not one); after
+  > a portal has been signed in to on this network, **one** is enough and is reported as `SessionExpired` (a network that was open a moment ago and intercepts again is, overwhelmingly, a portal session that
+  > ended); `Unreachable` and `Inconclusive` neither confirm nor clear; `Cleared` only on an unchanged probe; a new network starts over. Each change is announced once.
 - [ ] T079 **[GATE] Plan Phase 5 exit**: HV-10 passes **including for a browser using encrypted DNS**; HV-11 passes; SC-017 verified across 1,000 consecutive connections
 
 **Checkpoint**: Routing is correct for the traffic users actually care about.
@@ -675,7 +800,23 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
   >   breaks its connections (FR-016a); decide with the HV-07/HV-08 results in T085, not before.
 - [x] T083 [US3] Implement host-route rewrite **before** tunnel rebind on a carrying-path change, asserted by call ordering rather than timing, in `crates/dnet-netstate/src/rebind.rs` (AW-03, AWG-04)
   > **Done 2026-10-21 (not committed), in `host_route.rs` and `dnetd/src/tunnel.rs` rather than a new `rebind.rs`:** the ordering was already `on_carrying_path_change` (T052). New: `host_route::move_to_gateway`, which does the same two steps in the same order and also returns the route that is *installed afterwards*, because the steps can fail separately: if the rewrite succeeds and the rebind fails the table already holds the new route, and a caller that kept the old one would later remove a route that is not there and leave the new one behind. `Tunnels::carry_over(gateway)` uses it and remembers the installed route. Tests assert call order (`route~` then `rebind`), that a failed rewrite is never followed by a rebind and keeps the old route, that a failed rebind still leaves the stop removing the new route, and that a primary-core tunnel is left alone.
-- [ ] T084 [US3] Implement honest degradation reporting when only one path is available and no move is possible, in `crates/dnet-core/src/degraded.rs` (FR-019, US3-5)
+- [x] T084 [US3] Implement honest degradation reporting when only one path is available and no move is possible, in `crates/dnet-core/src/degraded.rs` (FR-019, US3-5)
+  > **Built 2026-10-22 (not committed). 35 new tests (13 reporter, 6 explanation, 6 monitor, 3 engine, 3 wire, 3 loop, 1 end-to-end through the orchestrator); 16 mutations, each caught.**
+  > - **What it says:** when the carrying path has stayed below `Good` for as long as the failover machine itself waits before leaving a path (10 s), the user is told it is poor and *why the connection is
+  >   staying*: `OnlyPath` (nothing else exists), `NoBetterPath`, `Proving` (a better one is not yet proven), `Dwell` (a move was just made), `Budget` (SC-007's limit). It means "it would have moved if
+  >   it could": a dip is never announced. `Recovered` follows only a prior `Degraded`, after 10 s of good. No claim is made about a path that is not measured, and a path that has gone quiet is not
+  >   "recovered". It is repeated only when it says something new (another reason, or `Poor` to `Unusable`).
+  > - **Where:** `degraded.rs` (reporter, pure), `FailoverState::explain_staying` (shares the `is_better` rule with the decision, extracted so the explanation and the decision cannot disagree: the dwell test
+  >   proves it, by moving as soon as the dwell the explanation named has passed), `PathMonitor::report`, `ConnectionEvent::{Degraded, Recovered}`, `Input::Connectivity`, the wire encoding
+  >   (`quality`, `staying`, a `because` that differs by reason and band and never says "moved"), the watch loop (a second channel, reported after each decision tick) and the orchestrator (one task
+  >   forwards both channels).
+  > - **Limits, stated:** only a *steered* profile (AmneziaWG) is measured, so only for it can a path be called poor; Hysteria 2 and REALITY are observed and have no quality to report (a probe is a real
+  >   packet and nothing would act on the answer). This is not a promise that silence means "fine". The state snapshot (`GetState`) does not carry degradation yet, only the event stream does; making it
+  >   first-class state, per-network quality and the network name is T144.
+  > - **Security review (IPC boundary):** two additive server-to-client events. No new request, no new input from a client. Every field is an enumeration or a decimal interface id; the `because` strings are
+  >   static text chosen by enumeration, so no peer-controlled or personal text (no network names) is in them. A producer error (a `Degraded` of a good network) is refused rather than sent. Nothing here
+  >   touches privileged operations, routing, DNS, credentials or the undo path.
+  > - **Not proven live:** needs a real network that degrades while it is the only one; T085's hardware (and the lab, which has one path) can show it.
 - [ ] T085 **[GATE] SPIKE-R9 / Plan Phase 6 exit**: HV-07 — an open transfer survives an interface change on **both** Tier 1 profiles at the pinned core versions. HV-08 — the Tier 2 profile breaks **and the UI said so beforehand**. **Record each kind's HV-07 result, with the core versions, in `dnet_core::tier::recorded_survival`: only `Survived` makes a profile `Tier1`, and a failure leaves it `Tier2` in configuration and UI. The label follows the measurement, not the intention** ([research.md](./research.md) §R9). A later core pin bump resets the affected kinds to `NotMeasured` until HV-07 is re-run
 
 **Checkpoint**: Failover works, and its limits are labelled truthfully.
@@ -690,17 +831,53 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
 
 ### Contract tests first
 
-- [ ] T086 [P] [US2] Write failing contract tests PRV-01…PRV-09 in `crates/dnet-provision/tests/contract.rs` per [contracts/provisioning.md](./contracts/provisioning.md) §5, against a mocked provider API — **no test creates real cloud resources**
+- [x] T086 [P] [US2] Write failing contract tests PRV-01…PRV-09 in `crates/dnet-provision/tests/contract.rs` per [contracts/provisioning.md](./contracts/provisioning.md) §5, against a mocked provider API — **no test creates real cloud resources**
+  > **Written 2026-10-22 (not committed): 32 tests, all nine PRV contracts and the guarantees around them, run through the public API against `dnet_provision::mock::MockProvider`, the only provider the crate
+  > ships (it keeps what it is asked to make in a table, so a test sees what *exists* after a crash, not only what the job believes).** Honest about the order: the tests were written *after* the code, not
+  > before it, so "failing first" was not shown; **the substitute is mutation testing — 27 mutations across the crate (the intent not written, a ledger failure not stopping a create, a missing keepalive
+  > passing, a root credential accepted, cancellation ignored, a failure not cleaning up, provider text not cleaned, Ed25519 accepted, an unchecked checksum, a printing secret, ...), every one caught**
+  > (`scratchpad/mut_provision.py`). PRV-04 is parameterised over both create calls and uses a real file ledger across a simulated crash (`catch_unwind` after the resource exists); PRV-02 scans every
+  > output of six failure scenarios, with the mock putting the credential into its own error text, and shows the scan is not vacuous.
 
 ### Implementation
 
-- [ ] T087 [US2] Implement credential validation rejecting tenancy/account root credentials and warning on over-privileged scope, in `crates/dnet-provision/src/credential.rs` (PR-01, PR-06)
-- [ ] T088 [US2] Implement DPAPI **user-scope** credential storage with exclusion from logs, diagnostics, IPC, and error text, in `crates/dnet-provision/src/secret.rs` (PR-03, PR-04)
-- [ ] T089 [US2] Implement the provisioning stage machine in `crates/dnet-provision/src/stages.rs` per [contracts/provisioning.md](./contracts/provisioning.md) §2
-- [ ] T090 [US2] Implement `created_resources` recording **before** each create call is issued, never after, in `crates/dnet-provision/src/ledger.rs` (PR-07 — recording after would lose exactly the resources most likely to leak)
-- [ ] T091 [US2] Implement capacity-exhaustion handling returning alternative regions with their added RTT, as a retryable outcome rather than an error, in `crates/dnet-provision/src/capacity.rs` (PR-02 stage, US2-2)
-- [ ] T092 [US2] Implement idempotent cleanup, reporting unremovable resources with identifying detail, in `crates/dnet-provision/src/cleanup.rs` (PR-08, PR-09, PR-11, SC-011)
-- [ ] T093 [US2] Implement server bootstrap installing both server-side cores pinned to the client's bundled versions, generating private keys **on the server**, in `crates/dnet-provision/src/bootstrap.rs` (PR-12, PR-13, PR-14)
+- [x] T087 [US2] Implement credential validation rejecting tenancy/account root credentials and warning on over-privileged scope, in `crates/dnet-provision/src/credential.rs` (PR-01, PR-06)
+  > **Built 2026-10-22 (not committed).** The provider says what a credential *is* (`Inspection`: owner or dedicated user; valid, invalid, expired or revoked; the permissions it holds); this decides. Invalid,
+  > expired and revoked are told apart; **a root credential is refused however valid and however much it holds**; missing permissions are named; extra permissions are accepted with a list the person must
+  > acknowledge (`Validated::needs_acknowledgement`). Pure logic, 6 tests.
+- [x] T088 [US2] Implement DPAPI **user-scope** credential storage with exclusion from logs, diagnostics, IPC, and error text, in `crates/dnet-provision/src/secret.rs` (PR-03, PR-04)
+  > **Built 2026-10-22 (not committed); run on this machine (Windows 11).** `Secret` (wipes on drop, prints `<redacted>` from `Debug`, `Display` and `{:#?}`; the only read is `expose_secret`);
+  > `CredentialVault` with `MemoryVault` and `DpapiUserVault` (**user scope — no machine-scope flag, which a test scans the source for**; the name is DPAPI entropy, so a blob copied to another name does
+  > not open; a changed file does not open; names are `a-z0-9-` so none can mean a path). Plus `Sanitizer`, which removes the credential (and any 8-or-more-character fragment of it, so a truncated echo is
+  > caught; linear time, since a signing key is over a thousand characters) and control characters from every provider-originated string. Not run on Linux (the DPAPI vault compiles out there).
+- [x] T089 [US2] Implement the provisioning stage machine in `crates/dnet-provision/src/stages.rs` per [contracts/provisioning.md](./contracts/provisioning.md) §2
+  > **Built 2026-10-22 (not committed).** `run(params, services) -> Outcome`: `Provisioned`, `NeedsAcknowledgement`, `CapacityUnavailable` (retryable, nothing created), `Cancelled`, `Failed{stage, reason,
+  > cleanup}`. A failure cleans up after itself; cancellation is checked before every stage; progress `Event`s carry stage names only (no provider text), so they can go straight to the IPC stream. The
+  > client's AmneziaWG key pair is made here (`client_keys`, X25519 checked against the RFC 7748 vectors) so only its **public** half reaches the server; the obfuscation parameters are fresh per endpoint,
+  > inside the feed's bounds. **Not wired into `dnetd`:** `StartProvisioning` carries no payload yet (Phase 9), and there is no concrete provider.
+- [x] T090 [US2] Implement `created_resources` recording **before** each create call is issued, never after, in `crates/dnet-provision/src/ledger.rs` (PR-07 — recording after would lose exactly the resources most likely to leak)
+  > **Built 2026-10-22 (not committed).** Append-only JSON lines, each flushed (`sync_data`) before the call returns; the in-memory view moves only after the line is on disk. Intent → provider id → removed.
+  > **A job that cannot write its intent makes nothing** (`LedgerUnavailable`). A torn last line is ignored and removed; a damaged line anywhere else is refused (nobody can say what exists, and guessing is
+  > how things leak). **A real bug was found and fixed by the first run of the tests:** ending a torn line with a newline turned the fragment into a damaged middle line that the next open refused; the
+  > tail is now repaired (a complete last event keeps its newline added, a fragment is cut). Not testable: that `sync_data` really reaches the disk.
+- [x] T091 [US2] Implement capacity-exhaustion handling returning alternative regions with their added RTT, as a retryable outcome rather than an error, in `crates/dnet-provision/src/capacity.rs` (PR-02 stage, US2-2)
+  > **Built 2026-10-22 (not committed).** `Capacity::{Available, Unavailable{alternatives}}`; `rank` puts the nearest first, drops the full region itself, keeps each region once at its smallest added latency,
+  > and keeps five. An empty list is a valid answer. Nothing has been created at that point, so there is nothing to clean up.
+- [x] T092 [US2] Implement idempotent cleanup, reporting unremovable resources with identifying detail, in `crates/dnet-provision/src/cleanup.rs` (PR-08, PR-09, PR-11, SC-011)
+  > **Built 2026-10-22 (not committed).** Works from the ledger, newest first (rules before the machine they belong to). A resource whose id was never recorded is found by its **token** (the name the job
+  > chose); one nothing carries was never made. Already-gone is success. Run twice it gives the same report and the second makes no provider call. What cannot be removed is listed with its kind, region, id
+  > (or the name to search for) and the provider's reason, with the credential removed — never dropped.
+- [x] T093 [US2] Implement server bootstrap installing both server-side cores pinned to the client's bundled versions, generating private keys **on the server**, in `crates/dnet-provision/src/bootstrap.rs` (PR-12, PR-13, PR-14)
+  > **Built 2026-10-22 (not committed). The script has not been run on a real server (that is T098); it is checked for what it contains and that it parses.** Modelled on the harness endpoint's three server
+  > scripts. `script(plan)` makes one idempotent POSIX shell script from validated values only; `BootstrapReport::parse` reads the one line it prints. **Each core is downloaded over https, hashed, and only
+  > then made executable; a mismatch stops everything (PR-12), and the report must name the same checksums and versions the client pinned.** Keys are made on the server (AmneziaWG pair, Hysteria 2
+  > certificate, REALITY pair, the shared secrets) **only if their file is absent** and nothing deletes state (PR-14, structurally tested, with `sh -n` run on the real text); the client's private key
+  > is not an input (PR-13). The configuration is checked by the core's own `check` before it is put in place. Licence and source of both cores are written beside them (PR-15). **Every value that enters
+  > the script is checked against a narrow alphabet first** (the script runs as root): 12 hostile shapes are refused in every field, and the error never repeats the value. The report is read as hostile
+  > input (strict schema, no value quoted in an error, secrets redacted from `Debug`).
+  > - **Gap, said plainly: nothing builds or publishes Linux server binaries of the two cores.** `xtask fetch-vendor` builds the Windows client cores; `ServerCores` takes pinned URLs and checksums from
+  >   the caller, and there are none yet (ADR-0004 notes the cores publish no binaries). That is a release-engineering task (a CI job producing Linux builds as pinned release assets) and blocks T098.
+  > - Written for Ubuntu and Oracle Linux style images (apt or dnf; systemd; iptables optional). Not tried on either.
   > **Constraint (binding, owner decision 2026-09-12): the Hysteria 2 endpoint certificate MUST use
   > an ECDSA or RSA key, never Ed25519.**
   > - **Why.** The client generator (T056) keeps Chrome QUIC handshake mimicry on by default. Chrome
@@ -710,10 +887,22 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
   >   certificates alike.
   > - **Enforcement.** Bootstrap refuses to finish if the generated key is Ed25519.
   > - **Test.** A PRV test asserts the certificate's key algorithm.
-- [ ] T094 [US2] Implement idle-reclamation keepalive installation, failing the job if absent, in `crates/dnet-provision/src/keepalive.rs` (PR-15 stage, PRV-09, [research.md](./research.md) §R10)
-- [ ] T095 [US2] Implement reachability verification gating `Endpoint` creation — a job failing here yields no endpoint, in `crates/dnet-provision/src/verify.rs` (PR-10)
-- [ ] T096 [US2] Implement post-provisioning credential deletion, defaulting to delete, in `crates/dnet-provision/src/revoke.rs` (PR-05)
-- [ ] T097 [P] [US2] Implement manual endpoint addition bypassing cloud provisioning entirely, in `crates/dnet-provision/src/manual.rs` (FR-010, US2-5)
+- [x] T094 [US2] Implement idle-reclamation keepalive installation, failing the job if absent, in `crates/dnet-provision/src/keepalive.rs` (PR-15 stage, PRV-09, [research.md](./research.md) §R10)
+  > **Built 2026-10-22 (not committed); whether it actually keeps an instance from being reclaimed is T098's measurement, not a claim made here.** A systemd timer runs a four-minute idle-priority counter
+  > loop every forty (about a tenth of the time, validated between 8 % and 50 %), with no network and no disk. The provider's rule is a property of the provider and changes; the schedule is deliberately
+  > not tuned to the edge of any such rule. The job **fails if the keepalive is not installed and running afterwards** (or cannot be checked), and cleans up.
+- [x] T095 [US2] Implement reachability verification gating `Endpoint` creation — a job failing here yields no endpoint, in `crates/dnet-provision/src/verify.rs` (PR-10)
+  > **Built 2026-10-22 (not committed).** `Reachability` is a trait; `require_one` needs at least one profile to have worked end to end, and nothing tried is not a pass. A failing job returns `Failed`,
+  > which has no endpoint to give, and its resources are removed. **The daemon's `Reachability` (the profile prober against the new endpoint's address) is not written.**
+- [x] T096 [US2] Implement post-provisioning credential deletion, defaulting to delete, in `crates/dnet-provision/src/revoke.rs` (PR-05)
+  > **Built 2026-10-22 (not committed).** `Disposition::default()` is `Delete`; `Keep` is an explicit choice. It removes the stored copy, and `REMINDER` says plainly that the key still exists in the
+  > cloud account until the person deletes it there ("deleted" must not be read as "revoked").
+- [x] T097 [P] [US2] Implement manual endpoint addition bypassing cloud provisioning entirely, in `crates/dnet-provision/src/manual.rs` (FR-010, US2-5)
+  > **Built 2026-10-22 (not committed).** A label, an address and a port make an `Endpoint` with origin `Manual`: no provider, no cloud credential, nothing created, nothing to clean up, and deleting it
+  > never offers to remove cloud resources. Refuses an unspecified, multicast or broadcast address, a name that cannot be a host name, a bad label, port 0.
+  > **Phase 8, what is not done (and so what blocks T098):** no concrete provider (an Oracle Cloud client with request signing and a way to run the script, by SSH or the provider's own mechanism); the
+  > Linux builds of the two cores; the daemon's wiring (`StartProvisioning`/`CancelProvisioning` carry no payload yet; where the vault and the ledger live; the reachability prober); and the wizard UI
+  > (T107). **Security review is required before commit** (credential handling, key material, root-run script).
 - [ ] T098 **[GATE] Plan Phase 1 exit**: one command yields a reachable endpoint that survives idle reclamation; PRV-01…PRV-09 pass
 - [ ] T098a **[GATE] Deferred SPIKE-R4 (T055)**: run `testing/spike-r4/Invoke-SpikeR4.ps1` against the endpoint T098 provisioned, which is off-subnet by construction. Exit criteria are T055's own: `PASS` with a looping negative control. `INVALID`, `INCONCLUSIVE` or `VACUOUS` do not satisfy it. On `FAIL`, stop and revisit §R4 before any Phase 5–7 work that depends on the Profile A transport path is accepted
 
@@ -727,18 +916,36 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
 
 **Independent test**: SC-009 and SC-010, measured on a real stranger with a clean machine.
 
-- [ ] T099 [US1] Scaffold the Tauri v2 + Svelte 5 application in `apps/dnet-tray/`, unprivileged, with no capability to alter system state directly
-- [ ] T100 [US1] Implement the IPC client in `apps/dnet-tray/src-tauri/src/ipc.rs` using `dnet-ipc`, treating all responses as untrusted
+- [x] T099 [US1] Scaffold the Tauri v2 + Svelte 5 application in `apps/dnet-tray/`, unprivileged, with no capability to alter system state directly
+  > **Acceptance criteria added 2026-10-21 (T142, ADR-0007, accepted 2026-10-24):** R1 the tray icon and menu are native and updated from Rust; R2 the web view is destroyed after a grace period and created hidden, shown on first paint; R3 plain Svelte 5 + Vite SPA (no SvelteKit, no component library), native `<dialog>`; R4 the web view never touches the pipe, minimal Tauri capabilities, CSP `default-src 'self'`; R6 CSS that works in WebKitGTK; R7 colours only from `docs/design/tokens.css`, with CI asserting the 30 contrast pairs. Windows subsystem build (no console host).
+  > **Built 2026-10-24 (not committed).** `apps/dnet-tray` (Svelte 5 runes, Vite 8, TypeScript, pnpm with a 14-day `minimumReleaseAge` and no install scripts; strict CSP, no `{@html}`, no inline style) and `apps/dnet-tray/src-tauri` (Tauri 2, **detached from the Cargo workspace** so its dependency tree is not paid for by every other build). R1: the tray and its four-line menu are native (`dnet-view::tray`, words shared with the window through `crates/dnet-view/words.json`). R2: no window at start-up; created hidden, shown on page load, hidden on close and destroyed after a 120 s grace unless reopened (`dnet-view::session::Grace`, tested); nothing is sent to it while hidden. R4: the capability list is exactly the 12 commands in `build.rs` plus event listen/unlisten; **verified in the running window**: `plugin:window|close` and an unknown command are refused by the framework, the page loads only from `tauri.localhost` and `ipc.localhost`, the CSP is applied. R7: a test fails on a colour literal and asserts all 30 contrast pairs in both themes from `tokens.css`. JavaScript is 43 KB gzipped of 150; no fonts shipped (system faces).
+  > - **Not done:** an installer (T114, WebView2 prerequisite wording, R5); real icons (the files are the spike's placeholder dot, and the tray shows one icon for every state, so the lamp is not in the tray yet); a single-instance guard; `pnpm build` is not yet run by the shell's own build (CI runs it first); a Linux build of the shell (compile_error on non-Windows, ADR-0005 not approved); the size and memory measurements with the real UI (T116).
+- [x] T100 [US1] Implement the IPC client in `apps/dnet-tray/src-tauri/src/ipc.rs` using `dnet-ipc`, treating all responses as untrusted
+  > **Built 2026-10-24 (not committed), as `crates/dnet-view` (in the workspace, so it is tested and linted everywhere) rather than `src-tauri/src/ipc.rs`.** `Bridge` is every command the window may give and every question it may ask, over a `Link` (one request, one reply; `PipeLink` is the Windows pipe, trust `ServiceOwnedOnly` unless `--allow-unprivileged-service`, version checked once, T132). Replies are decoded with the typed `dnet-ipc` decoders (which refuse what contradicts itself); a service too old for `GetPaths`/`GetStats` reads as "not measured", never as fine; a refusal is the service's own `detail`, cleaned and bounded; an answer that is not what the contract promises is a refusal, never a success (an opt-out with no stated consequence, a change not confirmed, a check with no route). A mistake in a new endpoint is caught before anything is sent, and the connection file's text is never echoed. 60 tests in `dnet-view` (mutation-checked: 21 mutants, 20 killed, 1 equivalent) plus golden fixtures that the window's own parser reads, plus `dnetd`'s `the_window_can_read_what_the_service_really_says`, which feeds the **real** service replies through `dnet-view` (it exists because the first fixtures said `Reliable` where the service says `Deterministic`; the live run of the window found it, and the test fails if the name regresses).
+  > - **Not done:** `dnet-view` has never talked to a *new* `dnetd` over the real pipe (only to the owner's older running one, which lacks `encrypted_dns` in `ListRules`; the window then says so, in the Rules and Settings views). Security review is required before commit: this is a new client of the IPC boundary that sends endpoint credentials.
 - [ ] T101 [P] [US1] Implement the tray icon and the single Stabilize toggle in `apps/dnet-tray/src/lib/Tray.svelte` (FR-036)
-- [ ] T102 [P] [US1] Implement the status view showing connection state, active profile **and its tier**, active endpoint, and carrying path in `apps/dnet-tray/src/lib/Status.svelte` (FR-037, IPC-05)
-- [ ] T103 [P] [US1] Implement distinguishable, actionable failure presentation for all seven causes in `apps/dnet-tray/src/lib/Failure.svelte` (FR-039, SC-020)
-- [ ] T104 [US1] Implement the Tier 2 consent dialog warning that established connections will not survive an interface change, in `apps/dnet-tray/src/lib/TierConsent.svelte` (FR-016b)
+  > **Built 2026-10-24 (not committed), in Rust (`dnet-view::tray` for the words, `src-tauri/src/shell.rs` for the menu), not `src/lib/Tray.svelte`: R1 says the tray depends on no JavaScript.** Four lines: the state (a failure by its own title), the one control (Stabilize / Turn off / Working…, disabled when there is nothing to press), Open, and "Quit this app (the connection stays up)"; a left click opens it. The tray follows the service every 15 s while the window is hidden and at once when the service reports an event. A refused press (including the Tier 2 consent) opens the window, where the reason and the consent can be shown.
+  > - **Not done / unverified:** the tray menu has been built and the shell started, but **nobody has clicked it** (no screen-driving was available); the icon does not change with the state; a refusal from the menu is not shown as text in the menu itself.
+- [x] T102 [P] [US1] Implement the status view showing connection state, active profile **and its tier**, active endpoint, and carrying path in `apps/dnet-tray/src/lib/Status.svelte` (FR-037, IPC-05)
+  > **Built 2026-10-24 (not committed), as the home view of the "Orbit" window** (`App.svelte`, `Scene`, `Caption`, `Strip`, `Drawer`; not `Status.svelte`): state in words and in the figure's form (ring, sphere, cube; never colour alone), the method and its **tier** and the carrying network on one line (`Hysteria 2 · Tier 2 · via Hostel-5G`), the endpoint in the reason, every network with its role, and latency/jitter/loss/stability that show "no measurement" and not a number when nothing was measured. 221 tests, axe clean in every view.
+  > - **Not done:** a screen-reader pass (T111); a two-network live check (no second real network yet).
+- [x] T103 [P] [US1] Implement distinguishable, actionable failure presentation for all seven causes in `apps/dnet-tray/src/lib/Failure.svelte` (FR-039, SC-020)
+  > **Built 2026-10-24 (not committed).** All seven causes, each with the service's own title, detail and advice (`dnet_core::failure::explain`, shown whole: a test found the advice being cut at 120 characters, and the bound is now 400 on both sides), one primary action each (`ACTION_FOR_CAUSE`: the window's short label; the service's sentence is shown as advice), announced assertively. Golden fixtures for all seven are read by both the Rust and the TypeScript side.
+  > - **Not done:** `CaptivePortalUnsatisfied` offers "Open login page" but the service gives clients no address, so it says what to do instead (see Known gaps in CLAUDE.md).
+- [x] T104 [US1] Implement the Tier 2 consent dialog warning that established connections will not survive an interface change, in `apps/dnet-tray/src/lib/TierConsent.svelte` (FR-016b)
+  > **Built 2026-10-24 (not committed), as one `Consent` component for every consent** (native `<dialog>`, equal-weight buttons, focus on the safe one, Esc declines, the consequence is a callout before the buttons; each instance has its own label id — a test found duplicates). Asked when the service answers `TierDowngradeRequiresConsent`; declining sends nothing more.
 - [ ] T105 [US1] Implement the Brutal opt-in dialog warning that it degrades every other user on the same access point, in `apps/dnet-tray/src/lib/BrutalConsent.svelte` (FR-006)
-- [ ] T106 [US1] Implement the encrypted-DNS override disclosure with one-click opt-out in `apps/dnet-tray/src/lib/DnsConsent.svelte` (FR-025a)
+  > **Not built (2026-10-24).** The consent component exists and carries the wording (`en.consent.brutal`), but nothing in the window turns Brutal on: the service answers "not available" for `EnableBrutal`, so a switch would be a fake.
+- [x] T106 [US1] Implement the encrypted-DNS override disclosure with one-click opt-out in `apps/dnet-tray/src/lib/DnsConsent.svelte` (FR-025a)
+  > **Built 2026-10-24 (not committed).** The service's own disclosure (`disclosure.json`, pinned to `dnet_core::doh_consent::disclosure()` by a Rust test) is shown once at first run and again in the opt-out consent in Settings, which states the consequence before the button; the switch stays where it was until answered; a setting that could not be read is not offered for change.
 - [ ] T107 [US2] Implement the provisioning wizard, including the guided least-privilege credential creation and revocation instructions **shown before the credential is requested**, in `apps/dnet-tray/src/lib/wizard/` (PR-02, US2-1)
-- [ ] T108 [P] [US5] Implement rule management UI labelling application rules **best-effort** in the interface itself, in `apps/dnet-tray/src/lib/Rules.svelte` (FR-023, Principle VI)
-- [ ] T109 [P] [US1] Implement the acceptable-use warning shown before first connection in `apps/dnet-tray/src/lib/FirstRun.svelte` (FR-032)
-- [ ] T110 [P] [US1] Implement the About screen carrying third-party attribution — **the only UI surface permitted to name the primary transport core** (Constitution licence obligation 1)
+  > **Not built (2026-10-24).** `Wizard.svelte` lists the seven steps (`en.wizard.steps`) and says plainly that setting up a server is not available in this build: `capabilities.provisioning` is false because no provider is connected and `dnetd` does not call `dnet-provision`. The credential-guidance and revocation screens are the work of this task.
+- [x] T108 [P] [US5] Implement rule management UI labelling application rules **best-effort** in the interface itself, in `apps/dnet-tray/src/lib/Rules.svelte` (FR-023, Principle VI)
+  > **Built 2026-10-24 (not committed), read-only.** The list with the built-in rules marked and "Best effort" said in the row itself. **Adding and removing rules is not built** (the service answers "not available" for them).
+- [x] T109 [P] [US1] Implement the acceptable-use warning shown before first connection in `apps/dnet-tray/src/lib/FirstRun.svelte` (FR-032)
+  > **Built 2026-10-24 (not committed).** Shown before anything else on first run; nothing is switched on until it is acknowledged (the control takes the person back to it); the acknowledgement is stored with the time and the exact text shown. Declining changes nothing.
+- [x] T110 [P] [US1] Implement the About screen carrying third-party attribution — **the only UI surface permitted to name the primary transport core** (Constitution licence obligation 1)
+  > **Built 2026-10-24 (not committed), at `apps/dnet-tray/src/lib/About.svelte` — the one file `lint-branding` allows to name the primary core, Wintun and the other component.** The wording follows `THIRD-PARTY-NOTICES.md`; a test asserts no other source file names them.
 - [ ] T111 **[GATE] Plan Phase 7 exit**: a person who has never provisioned a server reaches a verified working endpoint in under 20 minutes unaided (SC-009) and a working connection without documentation beyond the wizard (SC-010)
 
 **Checkpoint**: Feature complete.
@@ -747,16 +954,40 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
 
 ## Phase 10: Polish & Cross-Cutting Concerns
 
-- [ ] T112 [P] Implement the diagnostic bundle excluding credential material and browsing destinations by default, in `crates/dnetd/src/diagnostics.rs` (FR-035, IPC-07)
+- [x] T112 [P] Implement the diagnostic bundle excluding credential material and browsing destinations by default, in `crates/dnetd/src/diagnostics.rs` (FR-035, IPC-07)
+  > **Built 2026-10-22 (not committed); `GetDiagnostics` now returns it instead of the placeholder.** Two layers so that one mistake does not leak. **By construction:** the bundle is made field by field from
+  > typed facts; a rule contributes its action, kind and reliability but never its pattern, an endpoint its health and origin but never its address or name, a network its kind and quality but never its
+  > name, and credentials are not among the facts. **By redaction:** the service also passes every sensitive value it knows (each endpoint address and label, each user-rule pattern, each network name), and
+  > every string in the finished bundle is scrubbed of them, ignoring case, longest first (`<removed>`) — for the text that does pass through (a failure's `detail`) and for the day someone adds a field
+  > carelessly. Three extras help a developer and cost privacy, so each is off by default and a separate choice (`Options`): endpoint addresses and names, rule patterns, Wi-Fi names; turning one on
+  > takes it off the redaction list. An unmeasured network claims no quality (no numbers at all). Lists are cut at 64 entries with a count of what was left out, so the bundle fits a reply.
+  > - Tests (16): IPC-07's own contract test ("a bundle after a session containing a known domain does not contain that domain"), plus: nothing sensitive in the default bundle, nor in the structure before
+  >   redaction; case-insensitive, every occurrence; non-ASCII; extras one at a time; never a credential or even the reference to one; bounded under 500 endpoints and rules. **10 of 11 mutations caught**;
+  >   the survivor is a last-resort re-check of the finished text, unreachable unless the redaction itself were broken (kept as defence in depth, not testable without a seam).
+  > - **Not done:** the options are not reachable by a client (a request carries no payload yet, Phase 9), so every bundle is the default one; the service's own **log files are not part of the bundle**
+  >   (there is no log file to attach yet); a bundle is not written to disk or sent anywhere. **Security review is required before commit** (IPC boundary; personal data).
 - [ ] T113 [P] Add the statement that obfuscation conceals content and protocol but **not** traffic volume or destination, to README, first-run flow, and About screen (FR-033, Principle VI)
+  > **README done (T121).** First-run flow and About screen wait for the UI (T109, T110); the wording to use is the README's first bullet under "Read this before relying on it".
 - [ ] T114 Build the WiX/NSIS installer in `installer/`, registering `dnetd` as a LocalSystem service and bundling `THIRD-PARTY-NOTICES.md` and every dependency licence text. Install the cores as `primary-core.exe` and `amneziawg-go.exe` **beside `dnetd.exe`**: start-up recovery (T038) reaps orphans by exactly those full paths, so any other layout silently reaps nothing. Place the signed `wintun.dll` **beside each core executable** (the patched primary core loads it only from its own directory, digest-verified; ADR-0004 Finding 4), in an Administrators-only directory; run `cargo xtask verify-vendor` on the staged payload. Create `%PROGRAMDATA%\DNet Engine` (and `run`, `state` beneath it) **owned by SYSTEM or Administrators with a protected DACL**, replacing or refusing a directory that already exists with another owner. Any user can pre-create a `%PROGRAMDATA%` subdirectory and, as its owner, regain rights to replace the generated core config (T049) or the undo journal (T037) inside it
 - [ ] T115 Verify installer size at or below 60 MB (SC-012); if exceeded, reduce bundled artifacts before relaxing the target
 - [ ] T116 Measure idle RSS at or below 150 MB combined and idle CPU below 1% on a four-core machine (SC-013, SC-014)
+  > **Define both states (T142, proposed SC-013 rewording):** idle with the window **closed**, combined **private** memory; and with the window open. Method: `testing/spike-ui/Measure-Footprint.ps1`. Baseline from the spike: 3.5 MB closed, 94 MB open (floor; a real UI adds heap). Proposed limits: ≤ 150 MB closed combined with the cores, ≤ 300 MB open, window open → loaded ≤ 600 ms.
 - [ ] T117 Verify no measurable slowdown to a concurrent compile, test suite, and editor while connected (SC-015)
 - [ ] T118 Run HV-14 and SUP-T2 — after killing `dnetd` mid-session, no core survives, no route or DNS change remains, networking identical to pre-installation (SC-016, FR-029)
-- [ ] T119 Confirm coverage at or above 80% outside `apps/` and `vendor/` (SC-022)
-- [ ] T120 Audit that zero tests target a live managed network (SC-021, Principle III)
-- [ ] T121 [P] Write `README.md` positioning the product as a self-hosted network resilience and tunnel client, never as a firewall bypass, with the acceptable-use warning (FR-032, Constitution Legal posture)
+- [x] T119 Confirm coverage at or above 80% outside `apps/` and `vendor/` (SC-022)
+  > **Measured 2026-10-24** with `cargo llvm-cov --workspace --summary-only` on the owner's Windows machine, unprivileged, `#[ignore]` tests not run: **90.5% of lines, 89.9% of regions, 90.1% of functions** across the
+  > whole workspace (no `apps/` or `vendor/` exist yet). By design the low files are the ones that only a live or elevated run exercises: `dnetd::effects` 18% (the real effects), `dnet-netstate::win_route` 40%,
+  > `win_bringup` 0%, `dnet-supervisor::windows_runtime` 0%, `dnet-etw::session` 0%, `dnetd::{main,svc,console}` 0%, `dnetd::winwatch` 36%, and the build tool's `fetch_vendor` 36%, `verify_vendor` 42%,
+  > `lint_branding` 0% (the last two are run as commands by CI rather than unit-tested). CI's own coverage step covers four crates; this figure is the whole workspace. Re-run after the elevated tests.
+- [x] T120 Audit that zero tests target a live managed network (SC-021, Principle III)
+  > **Audited 2026-10-24.** Every hostname in the Rust sources is a reserved example or test name, one of the two feed hosts in `dnet_core::feed::fetch` (constants and negative test inputs, never requested), or the
+  > operating system's two captive-portal probe hosts, which only `dnetd::portal_probe::detect` requests, and no test calls `detect` (the tests use `detect_at` against listeners on 127.0.0.1). The harness
+  > (`testing/`) addresses only its own Docker network (172.32.0.0/24) and the documentation range (203.0.113.80, the WSL lab). The 14 `#[ignore]` tests touch the local routing table, files and the local ETW
+  > session, never a remote host. Method: pattern search of `crates/` and `testing/` for hostnames and non-private addresses, reviewed by hand. Re-run it after adding any network code.
+- [x] T121 [P] Write `README.md` positioning the product as a self-hosted network resilience and tunnel client, never as a firewall bypass, with the acceptable-use warning (FR-032, Constitution Legal posture)
+  > **Written 2026-10-22 (not committed).** Positions it as a self-hosted tunnel client and resilience layer, states what it is *not* (a firewall bypass, anonymity, a server or service), carries the
+  > acceptable-use warning ("Using it responsibly"), the FR-033 statement (obfuscation hides content and protocol, **not** volume or destination), the kill-switch and Tier-2 and best-effort-rule limits,
+  > an honest status table, how it is built, how to test it, and the licence. It names no vendor product (`lint-branding` covers `README.md`). Counts as the README half of T113.
 - [ ] T122 Final `cargo xtask lint-branding` and `verify-vendor` audit across the release artifact
 
 ### Connect orchestration (added 2026-10-16; proposed, not in the original plan)
@@ -805,7 +1036,7 @@ polish phase only because the original list ended there; by dependency they belo
   >   grammar, the stale-acknowledgement rule and the refused-config gate each failed as they should. Real DPAPI
   >   runs in the unelevated tests. **Not run (need an elevated shell):** the three `--ignored` tests that
   >   restrict a directory and read it back (`cargo test -p dnet-config -p dnet-netstate -- --ignored`).
-  > - **Not done, and why.** Saving is unused until configuration requests carry payloads (Phase 9), and user
+  > - **Not done, and why.** (Saving is used since T146.) User
   >   routing rules are not persisted yet (US5, Phase 6). The gap that left T126/T127 with nothing to connect to
   >   is closed by T128.
 - [x] T125 Define the IPC payloads for connect, disconnect, status and the event stream, carrying `ConnectionEvent` with its `because` (`dnet-ipc`, IPC-04, IPC-06)
@@ -934,7 +1165,18 @@ polish phase only because the original list ended there; by dependency they belo
   >   wrong host, and the name it meant is revealed to it. Alternating the pool between `198.18.0.0/16` and `198.19.0.0/16` per
   >   tunnel would turn that into the same harmless miss. It changes `contracts/core-config.md` (CC-02) and the deterministic
   >   output (CC-09), so it needs its own task and a decision.
-- [ ] T131 Stop a remembered fake address from aliasing a different name in the next session: alternate the FakeIP pool between the two /16 halves of `198.18.0.0/15` (and the IPv6 pool) per tunnel start, keeping config generation deterministic for a given input (CC-09). Update `contracts/core-config.md` CC-02, the bypass-overlap guard test, and add a lab check that a stale address from the previous session is refused, not answered with another name
+- [x] T131 Stop a remembered fake address from aliasing a different name in the next session: alternate the FakeIP pool between the two /16 halves of `198.18.0.0/15` (and the IPv6 pool) per tunnel start, keeping config generation deterministic for a given input (CC-09). Update `contracts/core-config.md` CC-02, the bypass-overlap guard test, and add a lab check that a stale address from the previous session is refused, not answered with another name
+  > **Built 2026-10-22 (not committed); the lab check is not written (needs a live run).** Decisions (delegated by the owner): the half is an **input** to generation (`FakeIpHalf`, `PrimaryCoreInput.fakeip`),
+  > so the output stays a pure function of its input; the daemon alternates it on every start with `FakeIpRotation` (an atomic toggle, so concurrent starts never share a half), taking one even for a start that
+  > fails. IPv4 `198.18.0.0/16` / `198.19.0.0/16`; IPv6 `fc00::/19` / `fc00:2000::/19`. The first half after the daemon starts follows the clock's low bit (even odds across a restart). The whole-pool constants
+  > stay, so the built-in bypass guard still forbids overlapping the whole pool. `contracts/core-config.md` CC-02 amended; CFG-14 added.
+  > - Tests: 3 in `contract.rs` (CFG-14: exact split of both pools; only the ranges differ between halves, each deterministic; the rotation alternates from either start), 1 in `plan.rs` (the plan carries the half it
+  >   was given), 1 in `effects.rs`. The pinned core's own `check` now runs on every case in both halves, with and without the encrypted-DNS block (see T070).
+  > - **Mutation-checked: 7 caught** (rotation that never alternates, generator ignoring the half for v4 and v6, overlapping halves, a half outside the pool, the plan ignoring the half, a fixed first half).
+  >   **One survivor, said plainly:** `RealEffects::start_tunnel` calling `self.fakeip.take()` — replacing it with a constant passes every test, because `start_tunnel` needs the real machine (credentials, files,
+  >   cores) and has no unit test. It is one line, and it is what the lab check below exists to prove.
+  > - **Still to do in the lab:** connect, note a fake address handed out, disconnect, reconnect, and confirm the old address is refused by the core (`missing fakeip record`) and not answered with another name.
+  >   Residual: a daemon restart gives even odds of reusing the half in use before it.
 - [x] T132 Give the control protocol a version and make every client check it (IPC-15)
   > **Built 2026-10-21 (not committed). Found while sorting the product shape (ADR-0006): the protocol had no version at all.** A GUI or any other
   > client is updated separately from the service, as with Docker Desktop and Docker Engine, so each must be able to tell whether the other still
@@ -1048,8 +1290,92 @@ polish phase only because the original list ended there; by dependency they belo
   > - **Branding lint:** the adapter library's file name and the vendor-name assertion in `effects.rs` are assembled at run time, as `lint-branding` itself does, so the lint stays strict instead of gaining an exemption.
   > - **Examined and found sound:** process spawns (the only production one, the resolver flush, builds an absolute path from the system's own `SystemRoot`; the other two are tests); no secret reaches
   >   a `tracing` call; every `unsafe` block in `dnet-supervisor/src/orphans.rs` carries its justification.
-  > - **Not done, and why:** dependency advisories (`cargo audit` is not installed here: the owner installs it, then run `cargo audit`); the profile feed parser and its rollback protection do not exist yet
+  > - **Not done, and why:** dependency advisories (run afterwards: see T143); the profile feed parser and its rollback protection do not exist yet
   >   (T066a–d), so there is nothing to audit; the Windows service stop path and undo recovery were reviewed in earlier tasks and have not changed since.
+- [x] T142 [US1] Review the UI stack and design before T099: measure the mandated stack, write the design system, record the decision (ADR-0007)
+  > **Done 2026-10-21 (not committed). ADR-0007 approved by the owner 2026-10-24; the SC-013 rewording is applied in `spec.md`. D-UI-1…5 in `docs/design/design-system.md` §17 stand as recorded.**
+  > - **Measured** (`testing/spike-ui/`, throwaway, detached from the workspace): Tauri 2.12.5 + WebView2 as a tray-resident app is **3.5 MB private with no window**, **94 MB with the window open
+  >   (8 processes)**, back to **4.8 MB** one sample after the window is destroyed; a window opens in **~440 ms**. A native toolkit (Slint, software renderer) is 2.9 / 4.9 MB. The stack's "near-zero idle
+  >   footprint" is true **only if the web view is destroyed**, so that is now a constraint (R2), and the tray menu must be native (R1) because a web view is too slow to open for a menu.
+  > - **Decision:** keep Tauri v2 + Svelte 5 (a two-way door: the UI is a client of the pipe protocol), under eight binding constraints R1–R8 (ADR-0007 §5). Alternatives are compared in §3; only the two
+  >   that could realistically win were measured, the rest are marked "not measured".
+  > - **Design system v2** (`docs/design/design-system.md`, `tokens.css`, `preview.html`): an "instrument panel" identity (ink surfaces, one paper action colour, four lamp colours used only for state, mono
+  >   readouts), shape before colour, a native tray, window lifecycle, WCAG 2.2 mapping, UI safety rules, performance rules. `preview.html` is a working mock of every state in both themes and recomputes the
+  >   30 contrast pairs live (the first version checked 22).
+  > - **The first run of the contrast check found a real defect in the previous design:** control borders were below the 3:1 non-text floor in both themes (2.25 dark, 2.55 light); fixed in the tokens.
+  >   A second defect found in review: the consent dialog's risky choice was styled as the primary action; both now have equal weight and focus starts on the safe choice.
+  > - **Version 3 ("Orbit"), same day, from the owner's feedback** that v2 looked like a first scaffold: a rotating dot figure at the centre whose *form* is the state (ring, ring + sweep, sphere,
+  >   half-lit sphere, cube) and which is the on/off control; each network a labelled moon with a dotted beam (flowing only on the one carrying traffic); one compact instrument strip (latency, jitter,
+  >   loss, stability) plus a drawer; a floating dock instead of a sidebar; a dot-matrix wordmark plate instead of title text; an ambient colour wash; Bahnschrift display face (ships with Windows, no
+  >   payload). **The first run of the extended contrast check (30 pairs, ambient wash included) failed in the light theme** (tertiary text 4.29–4.38 : 1); the token was darkened. The scene costs
+  >   0.3–1.3 ms per frame at a 30 fps cap (measured in a browser tab; re-measure in the real window, T116).
+  > - **Honesty calls in v3:** using several networks at once is aggregation, deferred to v2 by the constitution, so the preview shows it only as a labelled concept; "how much it improved" is shown as
+  >   counters of what the product did, never as a percentage. Decisions D-UI-1…4 were delegated to the assistant by the owner and are recorded as made (`design-system.md` §21).
+  > - **Not done:** no application code (T099 onward), no screen-reader pass (T111), no measurement with the real UI (T116). The data the new design needs is not yet exposed: see T144.
+- [x] T143 Dependency advisories and the Rust 1.83 floor
+  > **2026-10-21 (not committed).**
+  > - `cargo audit` (advisory database of 2026-10-21) reported **10 advisories in 4 crates**, all in the TLS/QUIC stack that `reqwest` brings into `dnet-provision`: `rustls` 0.23.44 (5), `rustls-webpki`
+  >   0.103.15, `webpki-roots` 1.0.9, `quinn-proto` 0.11.17 (3, severity 7.5). Fixed by a compatible lockfile update to 0.23.46 / 0.103.16 / 1.0.10 / 0.11.19; `cargo audit` is now clean; fmt, clippy and all
+  >   1,119 tests pass. `quinn` is a reqwest dependency for other targets only: it is not in the Windows or Linux build graph (`cargo tree`), so the three QUIC advisories were not reachable in a shipped binary.
+  > - **Finding, not fixed (owner decision): the declared minimum Rust version, 1.83, was already not true.** CI builds only on `stable`, and the committed lockfile contains crates that need edition 2024
+  >   (`base64ct` 1.8.3, `cpufeatures` 0.3.1), which Cargo 1.83 cannot even parse. An MSRV-aware lockfile (`CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback`) does build on 1.83, **but it keeps
+  >   `quinn-proto` 0.11.14, the vulnerable one**: the fixed releases need Rust 1.85 and pull in more edition-2024 crates. So the floor and a clean audit cannot both hold on 1.83.
+  >   Options: (a) raise the floor to 1.85 (recommended: it is Feb 2025; the ecosystem has moved; nothing enforces 1.83 today); (b) keep 1.83 with the MSRV-aware lock and an audit ignore for the three
+  >   unreachable QUIC advisories, justified in `audit.toml`; (c) drop `reqwest`'s transitive QUIC by pinning features. Until decided, the lock is the audited one and CLAUDE.md's "MSRV is Rust 1.83" is not enforced.
+  > - **Decided (owner delegated it): the floor is now Rust 1.88.** Checking 1.85 (my first recommendation) showed the current dependency set already needs **1.88** (the `icu_*` crates, through `idna`),
+  >   so 1.85 would have been false too. `Cargo.toml`, `CLAUDE.md` and a new CI job (`msrv`, toolchain 1.88, `cargo check --workspace --all-targets`) say 1.88; verified here on 1.88.0 for the
+  >   whole workspace on Windows with `RUSTFLAGS=-D warnings`, and for the portable crates on the Linux target. Also added a CI job `linux-portable` (clippy on the portable crates), which CLAUDE.md
+  >   required and CI never ran. Neither job has run in CI yet.
+  > - Raising the floor changed what clippy asks for: `is_multiple_of` (stable since 1.87) replaced three hand-written `% n == 0` tests (`install_trust.rs`, `reality.rs`, `orchestrator.rs`; behaviour
+  >   identical, since the divisor is never zero there).
+- [x] T144 [US3] Give the interface the data its design needs: the list of networks, their quality, the session counters, the network name (additive control-protocol change)
+  > **Built 2026-10-22 (not committed); live runs pending (see the end of this note).** Every layer: `dnet-core` (`path_monitor` history and snapshot, `degraded` reporter, `telemetry` counters and
+  > per-network history, `Degraded`/`Recovered` session events), `dnet-ipc` (`GetPaths`, `GetStats`, the two events, `netview` decoders — contract IPC-12b, IPC-16 —, additive: an older service answers
+  > `InvalidRequest` and `dnetctl` says the service is older), `dnetd` (`telemetry`, `netwatch` publishing a board of readings and names, the orchestrator feeding counters), `dnet-netstate::wifi`
+  > (the network name from the system's wireless API) and `dnetctl paths` / `dnetctl stats`. What is honest by construction: **only the profile the engine steers is measured**, so every other network
+  > reports `measured: false` and the decoder refuses a reply that claims otherwise; a reading older than three probe intervals is labelled last-known with its `as_of`; "typical" appears only after 8
+  > answers and is the middle 80 %; "improvement" is **counters of what the product did**, never a percentage; there is no "drops" or "interruption" figure because it is not measured (a network change is
+  > counted, and whether it drops connections follows from the tier). **Network names are untrusted** (they are chosen by whoever runs the access point) and are cleaned of control and bidirectional
+  > characters on both ends.
+  > - Tests across the five crates; the work was mutation-checked in rounds (28 mutations, all caught after one survivor — the name-length clamp — got its own test).
+  > - **Finding:** on Windows 11 the network name needs the *Location* permission; without it the system returns an empty name. The code treats that as "name unavailable" and shows the interface kind
+  >   instead; it is not an error. Whether the SYSTEM service gets names is **untested** (see the morning checklist).
+  > - **Security review is still required before commit** (IPC boundary; SSIDs are personal data). Names are excluded from the diagnostics bundle by default (T112, not built).
+  > - **Run by the owner:** `cargo run -p dnet-netstate --example wifi_names` (normal and elevated), then `dnetctl paths` and `dnetctl stats` against a running service.
+  > **Proposed 2026-10-21 (design-system §19), as built above.** The engine already models, per network, kind (Wi-Fi, cellular, Ethernet), role (carrying, standby, unusable) and smoothed latency, jitter and loss
+  > (`dnet-core::path`, `quality`), but the control protocol sends only the connection state. Needed: (1) `GetPaths` and a path-quality event; (2) the Wi-Fi *name* (a system Wi-Fi query in `dnet-netstate`;
+  > a name can reveal location, so it is shown only locally and excluded from the diagnostics bundle by default); (3) a short history in the service (for the 40-sample traces and "typical over 10 min");
+  > (4) session counters, which needs **measuring interruptions** (a drop and its length are not measured today; path and method changes already are recorded); (5) an `as_of` timestamp on replies, so the
+  > window can say "updated 1 s ago" and never show a stale reading as current. Additive, with the compatibility rule of IPC-15 (a protocol version bump); **security review is mandatory** (it is the IPC
+  > boundary, and SSIDs are personal data). Throughput is **not** exposed: it is measured once, at connect.
+- [x] T146 [US1] Let a client add, remove, enable and disable endpoints and choose encrypted-DNS handling (`dnet-ipc`, `dnetd`, `dnetctl`; IPC-17 to IPC-22)
+  > **Built 2026-10-24 (not committed); security review is required before commit** (IPC boundary, key and credential material, the profile/endpoint inventory the core configuration is generated from,
+  > and a change to the encrypted-DNS rules). Contract: `ipc-protocol.md` §Configuration requests.
+  > - **Wire (`dnet-ipc`).** `AddEndpoint(NewEndpoint)`, `RemoveEndpoint`, `SetEndpointEnabled`, `SetEncryptedDnsHandling`. Strict: exact fields, nothing defaulted, an unknown field refused **without repeating its
+  >   name** (a real leak found by test: the error used to echo the client's text). `NewEndpoint` is valid by construction, by the rules the saved configuration applies on read. There is **no `port`**: each
+  >   credential bundle carries its own, and the listing shows the first one the bundle has. 17 tests in `tests/configuration.rs`, IPC-17 to IPC-21.
+  > - **Daemon (`dnetd::configure`).** Each change is a transaction over the store, the sealed credentials and the file, restored from a copy on any failure. Add: seal after the file is encoded, write the file
+  >   last, forget the sealed credentials if the write fails. Remove: write the file first, forget the credentials second (a stray blob at worst, never an endpoint without credentials). An endpoint holding
+  >   cloud resources is **refused** (removing it here would orphan them and leave them billed; that is the provisioning flow's job). Opting out of the encrypted-DNS block returns the consequence to show.
+  >   21 tests against a state file and a secret store that can be made to fail.
+  > - **Idle only, then rebuilt.** `DnetService` refuses a change while connected or being connected (`Handle::is_idle`), saves it, and replaces the orchestrator with one built from the changed store
+  >   (`Handle::retire` stops the old one without waiting; it is idle, so there is nothing to undo). The store lock is held throughout, so no connect can slip between the two. 9 tests, 4 of them with a
+  >   real orchestrator.
+  > - **`dnetctl`.** `add-endpoint <label> --host <address> (--credentials-file <path> | --credentials-stdin)`, `remove-endpoint`, `enable-endpoint`, `disable-endpoint`, `encrypted-dns block|allow`.
+  >   **Credentials are never accepted as an argument** (shell history, process list). The file is read with a size bound, a Windows byte-order mark is tolerated, the content is never printed, and the person
+  >   is told to delete the file. Everything is checked with the service's own rules before anything is sent. A reply that is not what was promised (an add without an id, an opt-out without its consequence)
+  >   is reported as unexpected, not as success. 25 new tests (7 parsing, 10 end to end against the real server dispatch, 8 for reading credentials).
+  > - **Mutation checks.** `mut_configure.py`: 14 mutations, 13 caught at once; the survivor was an up-front duplicate-label check that the store enforces anyway, so it was **removed** rather than kept as dead
+  >   defence. `mut_ctl.py`: 8 of 8 caught.
+  > - **Not done.** Rules, profile settings, Brutal and provisioning requests are still "not available". Credentials travel over the control pipe, which only the interactive console user may use, and are
+  >   sealed on arrival; the pipe's own confidentiality against an administrator is the same as for every other request. The sealed store and the trusted config file are exercised against memory, and
+  >   against the real DPAPI/ACL code only by earlier tests: **a live check as the installed service is still the owner's** (`dnetctl add-endpoint` against a running `dnetd`, then `dnetctl endpoints`,
+  >   `connect`, restart the service and `endpoints` again).
+- [ ] T145 [US1] Build the "Orbit" window against a mock of T144, in `apps/dnet-tray` (after T099/T100)
+  > **Proposed 2026-10-21.** The home view, the core figure, the network chips, the strip and drawer, the dock, the plate, per `docs/design/design-system.md` v3 and `preview.html` (the reference). Acceptance:
+  > the preview's states in both themes; reduced motion; forced colours; the 30 contrast pairs as a unit test; scene cost ≤ 4 ms/frame in the Tauri window; axe clean; nothing runs while hidden (ADR-0007 R2, R8).
+  > **Built 2026-10-24 (not committed), against the mock and then against the real service.** The home view, figure (ring/sphere/cube, 30 fps cap, stops when hidden, one still frame under reduced motion), network chips, strip and drawer, dock, plate and heartbeat, the dark and light themes (looked at in the browser pane and in the real Tauri window), 30 contrast pairs × 2 themes as unit tests, axe clean on every view, nothing running while hidden. 221 tests; 12 + 8 mutants checked.
+  > - **Open (acceptance not yet met):** scene cost ≤ 4 ms/frame **measured in the Tauri window** (not measured; the budget logic is in `scene.ts`); forced colours (a stylesheet block exists; no test, not seen) and reduced motion (the attribute is tested; not seen on a screen); window-open memory and cold-open time (T116).
 - [x] T127 Implement `dnetctl` (connect, disconnect, status, events) so the whole path can be driven and tested before the tray exists
   > **Built 2026-10-21 (not committed); proven against the real daemon unprivileged, live gate run pending.**
   > - `dnet_ipc::client` (12 tests): the client half of the pipe, reusable by the tray. Replies are read as untrusted input

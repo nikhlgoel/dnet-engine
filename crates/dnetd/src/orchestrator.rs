@@ -58,6 +58,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::netwatch::{self, NetworkWatch};
+use crate::telemetry::Telemetry;
 
 /// The result of a race: the decision and what each probe that reported saw.
 pub type RaceOutcome = (RaceDecision, Vec<(ProfileId, ProfileProbe)>);
@@ -181,9 +182,38 @@ pub struct Handle {
     /// published state alone cannot answer "is a connect already under way?": it lags the request
     /// by however long the actor takes, and two quick connects would both see "disconnected".
     connecting: Arc<AtomicBool>,
+    /// What the networks look like and what the session has done (T144).
+    telemetry: Telemetry,
 }
 
 impl Handle {
+    /// The networks being watched and how good each is, or `None` when nothing is connected.
+    pub fn paths(&self) -> Option<dnet_core::telemetry::PathsSnapshot> {
+        self.telemetry.paths()
+    }
+
+    /// What the product did during this connection, or `None` when nothing is connected.
+    pub fn stats(&self) -> Option<dnet_core::telemetry::StatsSummary> {
+        self.telemetry.stats(now())
+    }
+
+    /// Nothing is connected, being connected, or pending: the only time the endpoints and rules the
+    /// orchestrator was built from may be replaced.
+    pub fn is_idle(&self) -> bool {
+        !self.connecting.load(Ordering::SeqCst)
+            && matches!(
+                self.stored().status,
+                ConnectionStatus::Disconnected | ConnectionStatus::Failed
+            )
+    }
+
+    /// Stop this orchestrator without waiting, for replacing it while idle. Whatever it would have
+    /// disconnected is nothing, so there is no work to wait for; after this it accepts no connect.
+    pub fn retire(&self) {
+        let (done, _unused) = oneshot::channel();
+        let _ = self.messages.try_send(Msg::Shutdown { done });
+    }
+
     /// Ask to connect, optionally with one named profile. Progress arrives on the event stream, not
     /// here (contract §Connect).
     ///
@@ -288,6 +318,7 @@ pub fn spawn<E: Effects>(engine: Engine, effects: Arc<E>, bus: EventBus, timing:
     let current = Arc::new(AtomicU64::new(0));
     let connecting = Arc::new(AtomicBool::new(false));
     let state = Arc::new(Mutex::new(snapshot_of(&engine)));
+    let telemetry = Telemetry::new();
 
     tokio::spawn(execute(
         Arc::clone(&effects),
@@ -306,6 +337,7 @@ pub fn spawn<E: Effects>(engine: Engine, effects: Arc<E>, bus: EventBus, timing:
         current,
         connecting: Arc::clone(&connecting),
         state: Arc::clone(&state),
+        telemetry: telemetry.clone(),
     };
     tokio::spawn(actor.run(message_rx));
 
@@ -313,6 +345,7 @@ pub fn spawn<E: Effects>(engine: Engine, effects: Arc<E>, bus: EventBus, timing:
         messages: message_tx,
         state,
         connecting,
+        telemetry,
     }
 }
 
@@ -332,6 +365,7 @@ struct Actor<E: Effects> {
     /// See [`Handle`]: cleared once the state a connect led to has been published.
     connecting: Arc<AtomicBool>,
     state: Arc<Mutex<StateSnapshot>>,
+    telemetry: Telemetry,
 }
 
 impl<E: Effects> Actor<E> {
@@ -389,6 +423,7 @@ impl<E: Effects> Actor<E> {
         for action in actions {
             match action {
                 Action::Emit(event) => {
+                    self.telemetry.record(&event, now());
                     if let Err(e) = self.bus.publish(&event) {
                         // A producer without a real `because` is a defect; say so, keep going.
                         tracing::error!(error = %e, ?event, "an event could not be published");
@@ -423,8 +458,13 @@ impl<E: Effects> Actor<E> {
             }
         }
 
+        let connected = matches!(self.engine.phase(), Phase::Connected { .. });
+        if was_connected && !connected {
+            self.telemetry.end_session();
+        }
         if !was_connected {
             if let Phase::Connected { profile, endpoint } = self.engine.phase().clone() {
+                self.telemetry.begin_session(now());
                 self.start_monitor(profile.clone(), endpoint);
                 self.start_path_watch(&profile, endpoint);
             }
@@ -444,6 +484,7 @@ impl<E: Effects> Actor<E> {
             self.attempt,
         );
         let (moved, mut moves) = mpsc::channel(8);
+        let (told, mut tells) = mpsc::channel(8);
         let alive = {
             let current = Arc::clone(&current);
             move || current.load(Ordering::SeqCst) == attempt
@@ -453,13 +494,26 @@ impl<E: Effects> Actor<E> {
             netwatch::Settings::default(),
             alive,
             moved,
+            told,
+            netwatch::Board {
+                telemetry: self.telemetry.clone(),
+                attempt,
+            },
         ));
+        // Both kinds of news go to the engine as they come, in the order each is produced. The task
+        // ends when the loop does (both senders are dropped) or when the attempt is replaced.
         tokio::spawn(async move {
-            while let Some(netwatch::PathMove { from, to }) = moves.recv().await {
+            loop {
+                let input = tokio::select! {
+                    Some(netwatch::PathMove { from, to }) = moves.recv() => {
+                        Input::PathChanged { from, to }
+                    }
+                    Some(change) = tells.recv() => Input::Connectivity(change),
+                    else => return,
+                };
                 if current.load(Ordering::SeqCst) != attempt {
                     return;
                 }
-                let input = Input::PathChanged { from, to };
                 if reports.send(Msg::Report { attempt, input }).await.is_err() {
                     return;
                 }
@@ -488,9 +542,14 @@ impl<E: Effects> Actor<E> {
                     return;
                 }
                 tick += 1;
-                let mut inputs = vec![Input::Environment(effects.environment())];
-                inputs.push(Input::LiveCheck(effects.live_check(&profile).await));
-                if tick % probe_every == 0 {
+                // The check first: when it fails, the effects look at the network as part of it (is it
+                // a portal whose session ended?), and the environment must be read after that.
+                let check = effects.live_check(&profile).await;
+                let mut inputs = vec![
+                    Input::Environment(effects.environment()),
+                    Input::LiveCheck(check),
+                ];
+                if tick.is_multiple_of(probe_every) {
                     inputs.push(Input::EndpointProbe {
                         endpoint,
                         outcome: effects.probe_endpoint(endpoint).await,
@@ -534,12 +593,15 @@ async fn execute<E: Effects>(
                 let answer = tokio::time::timeout(timing.reach_timeout, effects.reach(&endpoints))
                     .await
                     .unwrap_or_else(|_| vec![Reach::Unknown; endpoints.len()]);
-                let _ = reports
-                    .send(Msg::Report {
-                        attempt,
-                        input: Input::Reach(answer),
-                    })
-                    .await;
+                // Looking at the endpoints also looked at the network (is a portal in the way?), and
+                // that is only worth knowing before the engine decides what to blame: so the
+                // environment goes first, and the engine reads the answer with it already in hand.
+                for input in [
+                    Input::Environment(effects.environment()),
+                    Input::Reach(answer),
+                ] {
+                    let _ = reports.send(Msg::Report { attempt, input }).await;
+                }
             }
             WorkKind::StartRace { profiles, endpoint } => {
                 if let Some(previous) = race.take() {
@@ -739,20 +801,25 @@ mod tests {
         /// What the direct reachability check finds, and how long it takes to find it.
         reach_answer: Mutex<Reach>,
         reach_delay: Mutex<Duration>,
+        /// Looking at the endpoints also finds a captive portal (as the real effects do).
+        portal_found_by_reach: AtomicBool,
         /// Health probes of this endpoint fail.
         failing_endpoint: Mutex<Option<EndpointId>>,
         /// The watch handed to the orchestrator when a tunnel comes up, if the test wants one.
         watch: Mutex<Option<TestWatch>>,
     }
 
-    /// A watch that only follows: the machine says which adapter carries the tunnel.
+    /// A watch: the machine says which adapter carries the tunnel. By default it only follows; one
+    /// built with `steered` also has a path to measure, and what its probes see is the test's to set.
     struct TestWatch {
         carrying: Arc<Mutex<Option<dnet_core::ids::InterfaceId>>>,
         changes: mpsc::Receiver<()>,
+        steered: Option<Arc<Mutex<Option<dnet_core::probe_plan::Observation>>>>,
     }
 
+    /// What a probe sees: whatever the test last said, and nothing by default.
     #[derive(Clone)]
-    struct IdleProber;
+    struct IdleProber(Option<Arc<Mutex<Option<dnet_core::probe_plan::Observation>>>>);
 
     impl netwatch::PathProber for IdleProber {
         async fn observe(
@@ -760,26 +827,44 @@ mod tests {
             _: netwatch::ProbeTarget,
             _: dnet_core::probe_plan::Strategy,
         ) -> Option<dnet_core::probe_plan::Observation> {
-            None
+            self.0.as_ref().and_then(|seen| *seen.lock().unwrap())
         }
     }
 
     impl NetworkWatch for TestWatch {
         type Prober = IdleProber;
         fn prober(&self) -> IdleProber {
-            IdleProber
+            IdleProber(self.steered.clone())
         }
         fn changes(&mut self) -> impl Future<Output = Option<()>> + Send {
             self.changes.recv()
         }
         fn paths(&mut self) -> Result<Vec<dnet_core::path::NetworkPath>, String> {
-            Ok(Vec::new())
+            // One network with a gateway, the one the tunnel is on, when there is something to
+            // measure; none otherwise.
+            let Some(id) = self.steered.as_ref().and(*self.carrying.lock().unwrap()) else {
+                return Ok(Vec::new());
+            };
+            Ok(vec![dnet_core::path::NetworkPath {
+                interface_id: id,
+                kind: dnet_core::path::PathKind::Wifi,
+                gateway: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1))),
+                quality: dnet_core::path::PathQuality::unmeasured(),
+                role: dnet_core::path::PathRole::Standby,
+                preference: 10,
+            }])
         }
         fn carrying_now(
             &mut self,
             _: &[dnet_core::path::NetworkPath],
         ) -> Option<dnet_core::ids::InterfaceId> {
             *self.carrying.lock().unwrap()
+        }
+        fn names(&mut self) -> std::collections::HashMap<dnet_core::ids::InterfaceId, String> {
+            match (self.steered.as_ref(), *self.carrying.lock().unwrap()) {
+                (Some(_), Some(id)) => [(id, "Test-Net".to_owned())].into(),
+                _ => Default::default(),
+            }
         }
         fn carrier(&self) -> dnet_core::profile::Carrier {
             dnet_core::profile::Carrier::Udp
@@ -788,10 +873,10 @@ mod tests {
             false
         }
         fn can_steer(&self) -> bool {
-            false
+            self.steered.is_some()
         }
         fn needs_gateway(&self) -> bool {
-            false
+            self.steered.is_some()
         }
         async fn carry_over(&mut self, _: &dnet_core::path::NetworkPath) -> Result<(), String> {
             Err("this watch only follows".to_owned())
@@ -812,6 +897,7 @@ mod tests {
                 start_delay: Mutex::new(Duration::ZERO),
                 reach_answer: Mutex::new(Reach::Reachable),
                 reach_delay: Mutex::new(Duration::ZERO),
+                portal_found_by_reach: AtomicBool::new(false),
                 failing_endpoint: Mutex::new(None),
                 watch: Mutex::new(None),
             })
@@ -832,6 +918,9 @@ mod tests {
             let delay = *self.reach_delay.lock().unwrap();
             tokio::time::sleep(delay).await;
             self.record("reach");
+            if self.portal_found_by_reach.load(Ordering::SeqCst) {
+                self.environment.lock().unwrap().captive_portal = true;
+            }
             vec![*self.reach_answer.lock().unwrap(); endpoints.len()]
         }
         async fn race(
@@ -1033,6 +1122,7 @@ mod tests {
         *script.watch.lock().unwrap() = Some(TestWatch {
             carrying: Arc::clone(&carrying_now),
             changes,
+            steered: None,
         });
         script
             .races
@@ -1040,6 +1130,33 @@ mod tests {
             .unwrap()
             .push_back(Some(selected("hy2-default")));
         (rig_with(script, vec![endpoint("home")]), carrying_now, poke)
+    }
+
+    /// A rig whose machine has one network, the one the tunnel is on, and whose probes see whatever
+    /// the returned handle says.
+    fn rig_steered(
+        carrying: u64,
+    ) -> (
+        Rig,
+        Arc<Mutex<Option<dnet_core::probe_plan::Observation>>>,
+        mpsc::Sender<()>,
+    ) {
+        let script = Script::new();
+        let seen = Arc::new(Mutex::new(Some(
+            dnet_core::probe_plan::Observation::Answered(Duration::from_millis(10)),
+        )));
+        let (poke, changes) = mpsc::channel(4);
+        *script.watch.lock().unwrap() = Some(TestWatch {
+            carrying: Arc::new(Mutex::new(Some(dnet_core::ids::InterfaceId::new(carrying)))),
+            changes,
+            steered: Some(Arc::clone(&seen)),
+        });
+        script
+            .races
+            .lock()
+            .unwrap()
+            .push_back(Some(selected("hy2-default")));
+        (rig_with(script, vec![endpoint("home")]), seen, poke)
     }
 
     fn path_changes(bus: &EventBus) -> usize {
@@ -1589,6 +1706,27 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn a_portal_found_while_the_endpoints_were_checked_is_what_a_failed_connect_blames() {
+        // The environment was read before the check; the portal is found by it. The engine must be
+        // told again before it decides what to blame, or the user is told the endpoint is down when
+        // the network only wants a login.
+        let rig = rig();
+        rig.script
+            .portal_found_by_reach
+            .store(true, Ordering::SeqCst);
+        *rig.script.reach_answer.lock().unwrap() = Reach::Unreachable;
+        rig.script.races.lock().unwrap().push_back(Some((
+            RaceDecision::NoneUsable,
+            vec![(id("hy2-default"), ProfileProbe::HandshakeFailed)],
+        )));
+
+        rig.handle.connect(None).unwrap();
+        let failed = until(&rig.handle, |s| s.status == ConnectionStatus::Failed).await;
+
+        assert_eq!(failed.failure, Some(FailureCause::CaptivePortalUnsatisfied));
+    }
+
     // ---------------------------------------------------------------- what clients see
 
     #[test]
@@ -1641,5 +1779,109 @@ mod tests {
         let idle = snapshot_of(&engine);
         assert_eq!(idle.posture, RoutingPosture::FailClosed);
         assert_eq!(idle.status, ConnectionStatus::Disconnected);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_poor_network_with_no_way_out_reaches_the_event_stream_and_so_does_its_recovery() {
+        let (rig, seen, _poke) = rig_steered(3);
+        rig.handle.connect(None).unwrap();
+        until(&rig.handle, |s| s.status == ConnectionStatus::Connected).await;
+        tokio::time::sleep(Duration::from_secs(25)).await;
+        assert!(
+            !event_names(&rig.bus).iter().any(|n| n == "Degraded"),
+            "a good network is not degraded"
+        );
+
+        *seen.lock().unwrap() = Some(dnet_core::probe_plan::Observation::Silent);
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        assert!(
+            event_names(&rig.bus).iter().any(|n| n == "Degraded"),
+            "{:?}",
+            event_names(&rig.bus)
+        );
+        // Not a failure and not a move: the connection carries on where it is.
+        assert_eq!(rig.handle.snapshot().status, ConnectionStatus::Connected);
+        assert_eq!(
+            path_changes(&rig.bus),
+            1,
+            "only the path found at the start"
+        );
+
+        *seen.lock().unwrap() = Some(dnet_core::probe_plan::Observation::Answered(
+            Duration::from_millis(10),
+        ));
+        tokio::time::sleep(Duration::from_secs(300)).await;
+        assert!(
+            event_names(&rig.bus).iter().any(|n| n == "Recovered"),
+            "{:?}",
+            event_names(&rig.bus)
+        );
+    }
+
+    // ------------------------------------------------------------ what the interface is shown (T144)
+
+    #[tokio::test(start_paused = true)]
+    async fn the_networks_and_the_session_are_there_while_connected_and_gone_after() {
+        let (rig, _seen, _poke) = rig_steered(3);
+        assert!(
+            rig.handle.paths().is_none(),
+            "nothing is watched before a connection"
+        );
+        assert!(rig.handle.stats().is_none());
+
+        rig.handle.connect(None).unwrap();
+        until(&rig.handle, |s| s.status == ConnectionStatus::Connected).await;
+        tokio::time::sleep(Duration::from_secs(25)).await;
+
+        let paths = rig.handle.paths().expect("the network is being watched");
+        assert_eq!(paths.paths.len(), 1);
+        assert_eq!(paths.paths[0].name.as_deref(), Some("Test-Net"));
+        assert!(paths.paths[0].measured);
+        let stats = rig.handle.stats().expect("a connection is being counted");
+        assert!(stats.connected_for >= Duration::from_secs(20), "{stats:?}");
+        assert_eq!(
+            stats.network_changes, 0,
+            "the first path found is not a change"
+        );
+
+        rig.handle.disconnect().unwrap();
+        until(&rig.handle, |s| s.status == ConnectionStatus::Disconnected).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert!(rig.handle.paths().is_none(), "no longer watched");
+        assert!(rig.handle.stats().is_none(), "no longer counted");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_change_of_network_is_counted() {
+        let (rig, carrying, poke) = rig_watching(3);
+        rig.handle.connect(None).unwrap();
+        until(&rig.handle, |s| s.status == ConnectionStatus::Connected).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        *carrying.lock().unwrap() = Some(dnet_core::ids::InterfaceId::new(4));
+        poke.send(()).await.unwrap();
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        let stats = rig.handle.stats().unwrap();
+        assert_eq!(stats.network_changes, 1);
+        assert_eq!(
+            stats.changes_that_drop_connections, 1,
+            "hy2-default is Tier 2: a change of network breaks established connections"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_connection_that_ends_is_no_longer_counted() {
+        let (rig, carrying, poke) = rig_watching(3);
+        rig.handle.connect(None).unwrap();
+        until(&rig.handle, |s| s.status == ConnectionStatus::Connected).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        *carrying.lock().unwrap() = Some(dnet_core::ids::InterfaceId::new(4));
+        poke.send(()).await.unwrap();
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(rig.handle.stats().unwrap().network_changes, 1);
+
+        rig.handle.disconnect().unwrap();
+        until(&rig.handle, |s| s.status == ConnectionStatus::Disconnected).await;
+        assert!(rig.handle.stats().is_none());
     }
 }

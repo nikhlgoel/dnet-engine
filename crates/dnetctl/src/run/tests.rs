@@ -79,6 +79,11 @@ struct Stub {
     log: Mutex<Vec<String>>,
     connect: Mutex<Result<(), IpcError>>,
     disconnect: Mutex<Result<(), IpcError>>,
+    /// Whether a configuration change (add, remove, enable, encrypted DNS) is accepted.
+    change: Mutex<Result<(), IpcError>>,
+    /// What `GetPaths` and `GetStats` answer.
+    paths: Mutex<Result<String, IpcError>>,
+    stats: Mutex<Result<String, IpcError>>,
     bus: EventBus,
 }
 
@@ -91,6 +96,13 @@ impl Stub {
             log: Mutex::new(Vec::new()),
             connect: Mutex::new(Ok(())),
             disconnect: Mutex::new(Ok(())),
+            change: Mutex::new(Ok(())),
+            paths: Mutex::new(Ok(dnet_ipc::netview::encode_paths(
+                &Default::default(),
+                false,
+                0,
+            ))),
+            stats: Mutex::new(Ok(dnet_ipc::netview::encode_stats(None))),
             bus: EventBus::new(),
         })
     }
@@ -141,8 +153,41 @@ impl Service for Stub {
                 .unwrap()
                 .clone()
                 .map(|()| r#"{"accepted":true}"#.to_string()),
+            Request::AddEndpoint(_) => self.change.lock().unwrap().clone().map(|()| {
+                r#"{"endpoint":"11111111-2222-4333-8444-555555555555"}"#.to_string()
+            }),
+            Request::FetchFeed => self
+                .change
+                .lock()
+                .unwrap()
+                .clone()
+                .map(|()| r#"{"started":true,"route":"physical"}"#.to_string()),
+            Request::ImportFeed(_) => self
+                .change
+                .lock()
+                .unwrap()
+                .clone()
+                .map(|()| r#"{"imported":true,"changes":["Updated"]}"#.to_string()),
+            Request::RemoveEndpoint { .. } | Request::SetEndpointEnabled { .. } => self
+                .change
+                .lock()
+                .unwrap()
+                .clone()
+                .map(|()| r#"{"applied":true}"#.to_string()),
+            Request::SetEncryptedDnsHandling { block } => {
+                self.change.lock().unwrap().clone().map(|()| {
+                    if *block {
+                        r#"{"block":true}"#.to_string()
+                    } else {
+                        r#"{"block":false,"consequence":"Rules for sites will not apply to some programs."}"#
+                            .to_string()
+                    }
+                })
+            }
             Request::ListProfiles => Ok(r#"{"profiles":[{"id":"hy2-default","kind":"Hysteria2","tier":"Tier2","carrier":"Udp","brutal":false}]}"#.to_string()),
             Request::ListEndpoints => Ok(r#"{"endpoints":[]}"#.to_string()),
+            Request::GetPaths => self.paths.lock().unwrap().clone(),
+            Request::GetStats => self.stats.lock().unwrap().clone(),
             _ => Ok("{}".to_string()),
         }
     }
@@ -412,6 +457,140 @@ async fn profiles_and_endpoints_are_listed() {
     let (code, endpoints) = go(&["endpoints"], &stub).await;
     assert_eq!(code, exit::OK);
     assert_eq!(endpoints.out(), "No endpoints are configured.");
+}
+
+// ------------------------------------------------------------------ the networks and the session (T144)
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+fn one_network() -> String {
+    use dnet_core::ids::InterfaceId;
+    use dnet_core::path::{PathKind, PathRole};
+    use dnet_core::quality::QualityBand;
+    use dnet_core::telemetry::{PathView, PathsSnapshot};
+    let snapshot = PathsSnapshot {
+        paths: vec![PathView {
+            id: InterfaceId::new(7),
+            kind: PathKind::Wifi,
+            name: Some("Hostel-5G".into()),
+            role: PathRole::Carrying,
+            measured: true,
+            band: Some(QualityBand::Good),
+            rtt: Some(Duration::from_millis(43)),
+            jitter: Some(Duration::from_millis(4)),
+            loss: Some(0.02),
+            trace_ms: vec![Some(40.0)],
+            typical_ms: None,
+        }],
+        degradation: None,
+    };
+    dnet_ipc::netview::encode_paths(&snapshot, true, now_ms())
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_networks_are_shown_with_their_names_and_roles() {
+    let stub = Stub::new(vec![]);
+    *stub.paths.lock().unwrap() = Ok(one_network());
+
+    let (code, shown) = go(&["paths"], &stub).await;
+
+    assert_eq!(code, exit::OK, "{}", shown.err());
+    assert!(shown.out().contains("Hostel-5G (Wi-Fi)"), "{}", shown.out());
+    assert!(shown.out().contains("carrying"), "{}", shown.out());
+    assert_eq!(stub.requests_named("GetPaths"), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn nothing_connected_is_said_as_nothing_watched() {
+    let stub = Stub::new(vec![]);
+    let (code, shown) = go(&["paths"], &stub).await;
+    assert_eq!(code, exit::OK);
+    assert!(
+        shown.out().contains("Nothing is being watched"),
+        "{}",
+        shown.out()
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn paths_json_is_the_services_own_answer() {
+    let stub = Stub::new(vec![]);
+    *stub.paths.lock().unwrap() = Ok(one_network());
+    let (code, shown) = go(&["paths", "--json"], &stub).await;
+    assert_eq!(code, exit::OK);
+    let value: serde_json::Value = serde_json::from_str(&shown.out()).expect("valid JSON");
+    assert_eq!(value["paths"][0]["id"], "7");
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_session_is_counted_plainly() {
+    let stub = Stub::new(vec![]);
+    *stub.stats.lock().unwrap() = Ok(dnet_ipc::netview::encode_stats(Some(
+        dnet_core::telemetry::StatsSummary {
+            connected_for: Duration::from_secs(90),
+            network_changes: 1,
+            changes_that_drop_connections: 1,
+            method_switches: 0,
+            endpoint_switches: 0,
+            degraded_periods: 0,
+            longest_degraded: Duration::ZERO,
+        },
+    )));
+    let (code, shown) = go(&["stats"], &stub).await;
+    assert_eq!(code, exit::OK, "{}", shown.err());
+    assert!(shown.out().contains("1 min 30 s"), "{}", shown.out());
+    assert!(shown.out().contains("Tier 2"), "{}", shown.out());
+
+    let idle = Stub::new(vec![]);
+    let (code, shown) = go(&["stats"], &idle).await;
+    assert_eq!(code, exit::OK);
+    assert!(
+        shown.out().contains("Nothing is connected"),
+        "{}",
+        shown.out()
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_service_that_predates_the_request_is_told_to_update_not_shown_as_empty() {
+    for command in ["paths", "stats"] {
+        let stub = Stub::new(vec![]);
+        let unknown = IpcError::InvalidRequest {
+            detail: "unknown request \"GetPaths\"".into(),
+        };
+        *stub.paths.lock().unwrap() = Err(unknown.clone());
+        *stub.stats.lock().unwrap() = Err(unknown);
+
+        let (code, shown) = go(&[command], &stub).await;
+
+        assert_eq!(code, exit::REFUSED, "{command}");
+        assert!(
+            shown.err().contains("older than dnetctl"),
+            "{command}: {}",
+            shown.err()
+        );
+        assert!(
+            shown.out().is_empty(),
+            "{command}: nothing is printed as if it were an answer"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reply_that_is_not_what_it_should_be_is_refused_not_shown() {
+    let stub = Stub::new(vec![]);
+    *stub.paths.lock().unwrap() =
+        Ok(r#"{"as_of_unix_ms":1,"watching":true,"paths":"fine"}"#.into());
+    *stub.stats.lock().unwrap() = Ok(r#"{"connected":true}"#.into());
+    for command in ["paths", "stats"] {
+        let (code, shown) = go(&[command], &stub).await;
+        assert_ne!(code, exit::OK, "{command}");
+        assert!(shown.out().is_empty(), "{command}: {}", shown.out());
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -955,5 +1134,450 @@ async fn the_conventional_version_flags_work() {
         let (code, shown) = go(&[flag], &stub).await;
         assert_eq!(code, exit::OK, "{flag}");
         assert!(shown.out().contains("dnetctl:"), "{flag}");
+    }
+}
+
+// ------------------------------------------------------------------ configuration changes (Phase 9a)
+
+const AN_ID: &str = "11111111-2222-4333-8444-555555555555";
+
+/// A credentials file in a directory that goes away with the guard.
+fn credentials_file() -> (tempfile::TempDir, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("creds.json");
+    std::fs::write(&path, crate::input::tests::credentials_json()).unwrap();
+    let path = path.to_string_lossy().into_owned();
+    (dir, path)
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_endpoint_is_added_from_a_file_and_the_person_is_told_to_delete_it() {
+    let stub = Stub::new(vec![]);
+    let (_dir, path) = credentials_file();
+
+    let (code, shown) = go(
+        &[
+            "add-endpoint",
+            "home",
+            "--host",
+            "203.0.113.9",
+            "--credentials-file",
+            &path,
+        ],
+        &stub,
+    )
+    .await;
+
+    assert_eq!(code, exit::OK, "{}", shown.err());
+    assert!(shown.out().contains("Endpoint added"), "{}", shown.out());
+    assert!(shown.out().contains(AN_ID), "{}", shown.out());
+    assert!(
+        shown.out().contains("delete it"),
+        "the file holds the keys: {}",
+        shown.out()
+    );
+    assert!(!shown.out().contains(crate::input::tests::SENTINEL));
+    assert_eq!(stub.requests_named("AddEndpoint"), 1);
+    let sent = stub
+        .log()
+        .into_iter()
+        .find(|r| r.contains("AddEndpoint"))
+        .unwrap();
+    assert!(
+        sent.contains(r#""label":"home""#) && sent.contains("203.0.113.9"),
+        "{sent}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn what_cannot_be_a_valid_endpoint_is_a_usage_error_and_sends_nothing() {
+    let stub = Stub::new(vec![]);
+    let (_dir, path) = credentials_file();
+    let missing = format!("{path}.missing");
+
+    for args in [
+        // A host with a scheme and a port in it.
+        vec![
+            "add-endpoint",
+            "home",
+            "--host",
+            "https://x:443",
+            "--credentials-file",
+            &path,
+        ],
+        // An address no server can have.
+        vec![
+            "add-endpoint",
+            "home",
+            "--host",
+            "0.0.0.0",
+            "--credentials-file",
+            &path,
+        ],
+        // A label with a control character.
+        vec![
+            "add-endpoint",
+            "ho\u{7}me",
+            "--host",
+            "203.0.113.9",
+            "--credentials-file",
+            &path,
+        ],
+        // A file that is not there.
+        vec![
+            "add-endpoint",
+            "home",
+            "--host",
+            "203.0.113.9",
+            "--credentials-file",
+            &missing,
+        ],
+    ] {
+        let (code, shown) = go(&args, &stub).await;
+        assert_eq!(code, exit::USAGE, "{args:?}: {}", shown.err());
+        assert!(
+            shown.err().starts_with("dnetctl:"),
+            "{args:?}: {}",
+            shown.err()
+        );
+    }
+    assert!(
+        stub.log().is_empty(),
+        "nothing reached the service: {:?}",
+        stub.log()
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_credentials_file_that_is_not_credentials_is_refused_without_showing_it() {
+    let stub = Stub::new(vec![]);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("not-creds.json");
+    std::fs::write(
+        &path,
+        format!("{} is not json", crate::input::tests::SENTINEL),
+    )
+    .unwrap();
+
+    let (code, shown) = go(
+        &[
+            "add-endpoint",
+            "home",
+            "--host",
+            "203.0.113.9",
+            "--credentials-file",
+            &path.to_string_lossy(),
+        ],
+        &stub,
+    )
+    .await;
+
+    assert_eq!(code, exit::USAGE);
+    assert!(!shown.err().contains("SENTINEL"), "{}", shown.err());
+    assert!(stub.log().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_endpoint_is_removed_enabled_and_disabled_by_id() {
+    let stub = Stub::new(vec![]);
+
+    let (code, shown) = go(&["remove-endpoint", AN_ID], &stub).await;
+    assert_eq!(code, exit::OK, "{}", shown.err());
+    assert!(shown.out().contains("removed"), "{}", shown.out());
+
+    let (code, shown) = go(&["disable-endpoint", AN_ID], &stub).await;
+    assert_eq!(code, exit::OK);
+    assert!(shown.out().contains("disabled"), "{}", shown.out());
+
+    let (code, shown) = go(&["enable-endpoint", AN_ID], &stub).await;
+    assert_eq!(code, exit::OK);
+    assert!(shown.out().contains("enabled"), "{}", shown.out());
+
+    let sent: Vec<String> = stub
+        .log()
+        .into_iter()
+        .filter(|r| r.contains("Endpoint"))
+        .collect();
+    assert_eq!(sent.len(), 3, "{sent:?}");
+    assert!(sent[0].contains("RemoveEndpoint") && sent[0].contains(AN_ID));
+    assert!(sent[1].contains(r#""enabled":false"#), "{}", sent[1]);
+    assert!(sent[2].contains(r#""enabled":true"#), "{}", sent[2]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_endpoint_id_that_is_not_one_is_a_usage_error_and_is_not_repeated() {
+    let stub = Stub::new(vec![]);
+    for command in ["remove-endpoint", "enable-endpoint", "disable-endpoint"] {
+        let (code, shown) = go(&[command, "SENTINEL-not-an-id"], &stub).await;
+        assert_eq!(code, exit::USAGE, "{command}");
+        assert!(!shown.err().contains("SENTINEL"), "{}", shown.err());
+    }
+    assert!(stub.log().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn blocking_and_allowing_encrypted_dns_say_what_each_means() {
+    let stub = Stub::new(vec![]);
+
+    let (code, shown) = go(&["encrypted-dns", "block"], &stub).await;
+    assert_eq!(code, exit::OK, "{}", shown.err());
+    assert!(shown.out().contains("blocked"), "{}", shown.out());
+
+    let (code, shown) = go(&["encrypted-dns", "allow"], &stub).await;
+    assert_eq!(code, exit::OK, "{}", shown.err());
+    assert!(shown.out().contains("no longer blocked"), "{}", shown.out());
+    assert!(
+        shown.out().contains("Rules for sites will not apply"),
+        "allowing must show what it costs: {}",
+        shown.out()
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn json_prints_the_services_own_reply() {
+    let stub = Stub::new(vec![]);
+    let (code, shown) = go(&["encrypted-dns", "allow", "--json"], &stub).await;
+    assert_eq!(code, exit::OK);
+    let value: serde_json::Value = serde_json::from_str(&shown.out()).unwrap();
+    assert_eq!(value["block"], false);
+    assert!(value["consequence"].is_string());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_refusal_is_shown_with_its_reason_and_fails() {
+    let stub = Stub::new(vec![]);
+    *stub.change.lock().unwrap() = Err(IpcError::InvalidRequest {
+        detail: "disconnect before changing endpoints".into(),
+    });
+
+    for args in [
+        vec!["remove-endpoint", AN_ID],
+        vec!["enable-endpoint", AN_ID],
+        vec!["encrypted-dns", "allow"],
+    ] {
+        let (code, shown) = go(&args, &stub).await;
+        assert_eq!(code, exit::REFUSED, "{args:?}");
+        assert!(
+            shown.err().contains("disconnect before changing"),
+            "{}",
+            shown.err()
+        );
+        assert!(
+            shown.out().is_empty(),
+            "no success text on a refusal: {}",
+            shown.out()
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reply_that_is_not_what_was_promised_is_not_reported_as_success() {
+    // An add that does not name the new endpoint, and an opt-out that does not say what it costs.
+    let (_dir, path) = credentials_file();
+    for (args, reply) in [
+        (
+            vec![
+                "add-endpoint",
+                "home",
+                "--host",
+                "203.0.113.9",
+                "--credentials-file",
+                path.as_str(),
+            ],
+            "{}",
+        ),
+        (vec!["encrypted-dns", "allow"], r#"{"block":false}"#),
+    ] {
+        let (code, shown) =
+            go_with(&args, &Scripted(frame::encode(reply).unwrap()), pending()).await;
+        assert_eq!(code, exit::UNEXPECTED, "{args:?}: {}", shown.out());
+        assert!(shown.out().is_empty(), "{}", shown.out());
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn nothing_is_sent_to_a_service_this_program_cannot_talk_to() {
+    let versioned = Versioned::reporting(99, 100);
+    let (code, _) = go_with(&["remove-endpoint", AN_ID], &versioned, pending()).await;
+    assert_eq!(code, exit::INCOMPATIBLE);
+    assert_eq!(*versioned.seen.lock().unwrap(), ["GetVersion"]);
+}
+
+// ------------------------------------------------------------------ importing a profile update
+
+fn document_file(dir: &tempfile::TempDir, name: &str, text: &str) -> String {
+    let path = dir.path().join(name);
+    std::fs::write(&path, text).unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+#[tokio::test(start_paused = true)]
+async fn signed_documents_are_handed_over_from_files_and_the_change_is_described() {
+    let stub = Stub::new(vec![]);
+    let dir = tempfile::tempdir().unwrap();
+    let keys = document_file(&dir, "keys.json", r#"{"payloadType":"keys"}"#);
+    let feed = document_file(&dir, "feed.json", r#"{"payloadType":"feed"}"#);
+
+    let (code, shown) = go(
+        &["import-feed", "--keys-file", &keys, "--feed-file", &feed],
+        &stub,
+    )
+    .await;
+
+    assert_eq!(code, exit::OK, "{}", shown.err());
+    assert!(
+        shown.out().contains("definitions updated"),
+        "{}",
+        shown.out()
+    );
+    assert!(shown.out().contains("next connection"), "{}", shown.out());
+    let sent = stub
+        .log()
+        .into_iter()
+        .find(|r| r.contains("ImportFeed"))
+        .unwrap();
+    assert!(sent.contains("keys") && sent.contains("feed"), "{sent}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_import_that_changes_nothing_says_so() {
+    let stub = Stub::new(vec![]);
+    let dir = tempfile::tempdir().unwrap();
+    let feed = document_file(&dir, "feed.json", "{}");
+    let (code, shown) = go_with(
+        &["import-feed", "--feed-file", &feed],
+        &Scripted(frame::encode(r#"{"imported":true,"changes":[]}"#).unwrap()),
+        pending(),
+    )
+    .await;
+    assert_eq!(code, exit::OK, "{}", shown.err());
+    assert!(shown.out().contains("Nothing changed"), "{}", shown.out());
+    drop(stub);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_file_that_cannot_be_a_signed_document_is_a_usage_error_and_sends_nothing() {
+    let stub = Stub::new(vec![]);
+    let dir = tempfile::tempdir().unwrap();
+    let huge = document_file(
+        &dir,
+        "huge.json",
+        &"x".repeat(dnet_core::feed::ENVELOPE_MAX_BYTES + 1),
+    );
+    let missing = format!("{}.missing", huge);
+    let binary = dir.path().join("binary.json");
+    std::fs::write(&binary, [0xff, 0xfe, 0x00, 0x80]).unwrap();
+
+    for path in [huge, missing, binary.to_string_lossy().into_owned()] {
+        let (code, shown) = go(&["import-feed", "--feed-file", &path], &stub).await;
+        assert_eq!(code, exit::USAGE, "{path}: {}", shown.err());
+    }
+    assert!(stub.log().is_empty(), "{:?}", stub.log());
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_services_refusal_of_a_document_is_shown_with_its_reason() {
+    let stub = Stub::new(vec![]);
+    *stub.change.lock().unwrap() = Err(IpcError::InvalidRequest {
+        detail: "the feed was refused: it is older than the one already accepted".into(),
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let feed = document_file(&dir, "feed.json", "{}");
+
+    let (code, shown) = go(&["import-feed", "--feed-file", &feed], &stub).await;
+
+    assert_eq!(code, exit::REFUSED);
+    assert!(shown.err().contains("older than"), "{}", shown.err());
+    assert!(shown.out().is_empty(), "{}", shown.out());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reply_that_is_not_what_an_import_promises_is_not_success() {
+    let dir = tempfile::tempdir().unwrap();
+    let feed = document_file(&dir, "feed.json", "{}");
+    for reply in [
+        r#"{}"#,
+        r#"{"imported":false,"changes":[]}"#,
+        r#"{"imported":true}"#,
+    ] {
+        let (code, shown) = go_with(
+            &["import-feed", "--feed-file", &feed],
+            &Scripted(frame::encode(reply).unwrap()),
+            pending(),
+        )
+        .await;
+        assert_eq!(code, exit::UNEXPECTED, "{reply}: {}", shown.out());
+        assert!(shown.out().is_empty());
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_change_name_from_the_service_is_printed_as_plain_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let feed = document_file(&dir, "feed.json", "{}");
+    let (code, shown) = go_with(
+        &["import-feed", "--feed-file", &feed],
+        &Scripted(frame::encode("{\"imported\":true,\"changes\":[\"\\u001b[31mred\"]}").unwrap()),
+        pending(),
+    )
+    .await;
+    assert_eq!(code, exit::OK);
+    assert!(!shown.out().contains('\u{1b}'), "{:?}", shown.out());
+}
+
+// ------------------------------------------------------------------ asking for updates
+
+#[tokio::test(start_paused = true)]
+async fn asking_for_updates_says_which_network_the_check_uses() {
+    let stub = Stub::new(vec![]);
+    let (code, shown) = go(&["check-updates"], &stub).await;
+    assert_eq!(code, exit::OK, "{}", shown.err());
+    assert!(
+        shown.out().contains("directly over your network"),
+        "{}",
+        shown.out()
+    );
+    assert!(shown.out().contains("dnetctl events"), "{}", shown.out());
+    assert_eq!(stub.requests_named("FetchFeed"), 1);
+
+    let (code, shown) = go_with(
+        &["check-updates"],
+        &Scripted(frame::encode(r#"{"started":true,"route":"tunnel"}"#).unwrap()),
+        pending(),
+    )
+    .await;
+    assert_eq!(code, exit::OK);
+    assert!(
+        shown.out().contains("through your connection"),
+        "{}",
+        shown.out()
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_check_that_is_already_under_way_is_a_refusal_that_may_pass() {
+    let stub = Stub::new(vec![]);
+    *stub.change.lock().unwrap() = Err(IpcError::ServiceBusy);
+    let (code, shown) = go(&["check-updates"], &stub).await;
+    assert_eq!(code, exit::REFUSED);
+    assert!(shown.err().contains("try again"), "{}", shown.err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reply_that_does_not_say_how_the_check_goes_is_not_success() {
+    for reply in [
+        r#"{}"#,
+        r#"{"started":false,"route":"tunnel"}"#,
+        r#"{"started":true}"#,
+        r#"{"started":true,"route":"somewhere"}"#,
+    ] {
+        let (code, shown) = go_with(
+            &["check-updates"],
+            &Scripted(frame::encode(reply).unwrap()),
+            pending(),
+        )
+        .await;
+        assert_eq!(code, exit::UNEXPECTED, "{reply}");
+        assert!(shown.out().is_empty());
     }
 }

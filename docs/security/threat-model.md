@@ -41,6 +41,10 @@ Method: STRIDE against the trust boundaries in
 | T1.3 | Tampering | Malformed frames crash or corrupt the service | Length-prefix validation; oversized and truncated input rejected without panicking (IPC-08) | Low |
 | T1.4 | DoS | Connection flooding starves the service | Bounded concurrent connections; no orphaned tasks (IPC-09) | Medium |
 | T1.5 | Elevation | A future browser stub is hijacked by another extension | Extension ID pinned; stub is unprivileged and crosses TB1 like any client | Low |
+| T1.6 | Elevation | Code running as the console user itself (malware in the user's session, a compromised browser) calls a mutating request: connects, or adds its own endpoint and connects, and so sends the machine's traffic to a server it chose | **Accepted.** The console user is the product's owner and its authority: mutation is allowed to the interactive console user and no one else (T1.1), and adding an endpoint is the feature (FR-010). A request that needs the user's own token cannot be told apart from the user, and the unprivileged tray (no elevation prompt per action) is a design decision. Other users, services and other sessions are kept out by T1.1; this is about code that already is the user | Accepted (see §4) |
+| T1.7 | Elevation | Text from outside (a Wi-Fi name, a service reply) becomes markup or script in the window's web view and then calls the window's commands, which include connect and add-endpoint | Every string is drawn as text (a test forbids `{@html}`, `innerHTML`, `eval` and inline `style=`); it is cleaned of control, bidirectional and zero-width characters on **both** sides of the door (`dnet-view::text`, `sanitize.ts`); the page's CSP is `default-src 'self'` with no remote content, and was seen applied in the running window; the capability list is the 12 commands in `build.rs` plus event listen/unlisten, and the framework was seen refusing a window command and an unknown one; the web view never touches the pipe (ADR-0007 R4). WebView2 will take a remote-debugging port from an environment variable, but only code that already runs as the user can set it (T1.6) | Low |
+| T1.8 | Info disclosure | Endpoint credentials, typed or loaded from a file in the window, are kept or leaked | The file's text lives in the form only until it is submitted or the form is closed; it goes once over Tauri's in-process IPC to `dnet-view`, which checks it with the service's own rules and sends it in one request; no output of `dnet-view` ever contains it (a test with a known secret asserts this); the window stores only two keys in the web view's storage (`dnet.prefs.v1`: theme and motion; `dnet.acceptable-use.v1`: the time and the text shown) | Low |
+| T1.9 | Spoofing | Another program creates a pipe with the service's name so the tray talks to it, shows it a person's credentials or shows the person what it says | `PipeLink::service()` uses `Trust::ServiceOwnedOnly`: the pipe's owner must be SYSTEM or Administrators, or the client refuses and says whose pipe it is; `--allow-unprivileged-service` lifts this for a development run and says so | Low (the flag, if used, removes it) |
 
 ### TB2 — supervised cores
 
@@ -102,7 +106,11 @@ key ceremony (T066a–d) exist.
 ## 4. Out of scope
 
 Compromised local machine · malicious Administrator · physical access · cloud provider compromise ·
-targeted cryptanalysis of the underlying transports · consequences of acceptable-use violations.
+targeted cryptanalysis of the underlying transports · consequences of acceptable-use violations ·
+**code already running as the interactive console user** (T1.6): it holds the same authority as the person
+at the keyboard, so the product does not try to tell it from them. If this is ever to change, the change is
+a per-action elevation prompt for `AddEndpoint`, `ImportFeed` and `SetEncryptedDnsHandling`, which is a
+decision about the tray's design, not a patch.
 
 ---
 

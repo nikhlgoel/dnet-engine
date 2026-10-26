@@ -1,0 +1,19 @@
+[package]
+name = "dnet-view"
+description = "What the window is told: the service's replies as small validated view-models, and the commands the window may give."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+dnet-config = { workspace = true }
+dnet-core = { workspace = true }
+dnet-ipc = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "net"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "io-util", "sync"] }

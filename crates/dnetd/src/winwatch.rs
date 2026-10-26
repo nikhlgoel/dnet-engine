@@ -108,6 +108,12 @@ impl NetworkWatch for WindowsWatch {
         choose_carrying(routed, known)
     }
 
+    /// The Wi-Fi network each wireless adapter is on, when the system will say (T144). A read-only
+    /// local query that takes milliseconds; when it cannot be answered there are simply no names.
+    fn names(&mut self) -> std::collections::HashMap<InterfaceId, String> {
+        dnet_netstate::wifi::connected_networks()
+    }
+
     fn carrier(&self) -> Carrier {
         self.setup.carrier
     }

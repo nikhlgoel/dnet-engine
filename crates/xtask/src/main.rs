@@ -7,6 +7,7 @@ use anyhow::{bail, Result};
 use std::path::PathBuf;
 
 mod embedded;
+mod feed_tool;
 mod fetch_vendor;
 mod import_harness;
 mod lint_branding;
@@ -24,6 +25,14 @@ fn main() -> Result<()> {
         Some("import-harness-endpoint") => {
             let rest: Vec<String> = std::env::args().skip(2).collect();
             import_harness::run(&root, &rest)
+        }
+        Some("feed-keygen") => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            feed_tool::run_keygen(&root, &rest)
+        }
+        Some("feed-sign") => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            feed_tool::run_sign(&root, &rest)
         }
         Some(other) => {
             eprintln!("unknown task: {other}");
@@ -43,6 +52,15 @@ fn print_help() {
     eprintln!("  fetch-vendor    download and hash-verify pinned third-party binaries");
     eprintln!("  verify-vendor   assert signed Wintun DLL; reject its source and embedded copies");
     eprintln!("  lint-branding   assert the primary core vendor name stays in attribution files");
+    eprintln!("  feed-keygen --out <file>");
+    eprintln!(
+        "                  make a feed key outside the repository; prints only the public key"
+    );
+    eprintln!(
+        "  feed-sign --document keys|feed --payload <file> --key <file>... --root-public <key> x3"
+    );
+    eprintln!("            [--min-keys-version N] [--keys-envelope <file>] --out <file>");
+    eprintln!("                  sign a feed document; writes nothing a client would refuse (ADR-0002 §8)");
     eprintln!("  import-harness-endpoint --host <ip> [--dry-run] [--replace] [--label <name>]");
     eprintln!(
         "                  put the simulated harness endpoint into the saved configuration and"

@@ -14,9 +14,13 @@
 
 use std::time::Duration;
 
+mod support;
+
+use dnet_core::degraded::NoMove;
 use dnet_core::ids::{EndpointId, InterfaceId, ProfileId};
 use dnet_core::profile::CoreBinding;
-use dnet_core::session::{ConnectionEvent, FailureCause};
+use dnet_core::quality::QualityBand;
+use dnet_core::session::{CheckFailure, ConnectionEvent, DefinitionsChange, FailureCause};
 use dnet_core::tier::FailoverTier;
 use dnet_ipc::authz::{ClientIdentity, ConsoleSession};
 use dnet_ipc::frame;
@@ -145,6 +149,8 @@ fn ipc10_every_request_round_trips() {
         Request::GetVersion,
         Request::GetState,
         Request::GetSession,
+        Request::GetPaths,
+        Request::GetStats,
         Request::ListEndpoints,
         Request::ListProfiles,
         Request::ListRules,
@@ -160,14 +166,24 @@ fn ipc10_every_request_round_trips() {
             endpoint: None,
         },
         Request::Disconnect,
-        Request::AddEndpoint,
-        Request::RemoveEndpoint,
-        Request::SetEndpointEnabled,
+        Request::AddEndpoint(Box::new(support::new_endpoint())),
+        Request::RemoveEndpoint {
+            endpoint: EndpointId::new(),
+        },
+        Request::SetEndpointEnabled {
+            endpoint: EndpointId::new(),
+            enabled: true,
+        },
+        Request::SetEndpointEnabled {
+            endpoint: EndpointId::new(),
+            enabled: false,
+        },
         Request::AddRule,
         Request::RemoveRule,
         Request::SetProfileParams,
         Request::EnableBrutal,
-        Request::SetEncryptedDnsHandling,
+        Request::SetEncryptedDnsHandling { block: true },
+        Request::SetEncryptedDnsHandling { block: false },
         Request::StartProvisioning,
         Request::CancelProvisioning,
         Request::Subscribe,
@@ -474,6 +490,39 @@ fn every_event() -> Vec<ConnectionEvent> {
         to: InterfaceId::new(7),
         tier_at_time: FailoverTier::Tier2,
     });
+    for staying in ALL_NO_MOVE {
+        for band in [QualityBand::Poor, QualityBand::Unusable] {
+            events.push(ConnectionEvent::Degraded {
+                path: InterfaceId::new(7),
+                band,
+                staying,
+            });
+        }
+    }
+    events.push(ConnectionEvent::Recovered {
+        path: InterfaceId::new(7),
+    });
+    for change in [
+        DefinitionsChange::Updated {
+            sequence: u64::MAX,
+            endpoint_updates: 0,
+        },
+        DefinitionsChange::Updated {
+            sequence: 17,
+            endpoint_updates: 2,
+        },
+        DefinitionsChange::Evicted,
+        DefinitionsChange::OutOfDate,
+        DefinitionsChange::Discarded,
+        DefinitionsChange::CheckFailed {
+            reason: CheckFailure::Unreachable,
+        },
+        DefinitionsChange::CheckFailed {
+            reason: CheckFailure::Refused,
+        },
+    ] {
+        events.push(ConnectionEvent::DefinitionsChanged { change });
+    }
     events.extend(
         every_cause()
             .into_iter()
@@ -481,6 +530,14 @@ fn every_event() -> Vec<ConnectionEvent> {
     );
     events
 }
+
+const ALL_NO_MOVE: [NoMove; 5] = [
+    NoMove::OnlyPath,
+    NoMove::NoBetterPath,
+    NoMove::Proving,
+    NoMove::Dwell,
+    NoMove::Budget,
+];
 
 #[test]
 fn ipc12_every_event_carries_a_because_that_explains_it() {
@@ -496,6 +553,82 @@ fn ipc12_every_event_carries_a_because_that_explains_it() {
         assert_eq!(view.event, name);
         assert_eq!(view.because, because);
     }
+}
+
+#[test]
+fn ipc12_a_degradation_names_the_path_how_poor_and_why_the_connection_stays() {
+    let mut reasons = std::collections::HashSet::new();
+    for staying in ALL_NO_MOVE {
+        let v = parse(
+            &encode_event(&ConnectionEvent::Degraded {
+                path: InterfaceId::new(u64::MAX),
+                band: QualityBand::Poor,
+                staying,
+            })
+            .unwrap(),
+        );
+        assert_eq!(v["event"], "Degraded");
+        assert_eq!(v["path"], "18446744073709551615", "ids travel as strings");
+        assert_eq!(v["quality"], "Poor");
+        let key = v["staying"].as_str().expect("a machine-readable reason");
+        assert!(["OnlyPath", "NoBetterPath", "Proving", "Dwell", "Budget"].contains(&key));
+        let because = v["because"].as_str().unwrap().to_lowercase();
+        // It says the connection is not being moved: it must never claim, or imply, that it was.
+        for word in ["moved to", "switched to", "now using", "failed over"] {
+            assert!(!because.contains(word), "{key}: {because}");
+        }
+        reasons.insert(because);
+    }
+    assert_eq!(reasons.len(), 5, "each reason is told differently");
+
+    let poor = parse(
+        &encode_event(&ConnectionEvent::Degraded {
+            path: InterfaceId::new(1),
+            band: QualityBand::Poor,
+            staying: NoMove::OnlyPath,
+        })
+        .unwrap(),
+    );
+    let bad = parse(
+        &encode_event(&ConnectionEvent::Degraded {
+            path: InterfaceId::new(1),
+            band: QualityBand::Unusable,
+            staying: NoMove::OnlyPath,
+        })
+        .unwrap(),
+    );
+    assert_eq!(bad["quality"], "Unusable");
+    assert_ne!(
+        poor["because"], bad["because"],
+        "how bad is part of the story"
+    );
+}
+
+#[test]
+fn ipc12_a_degradation_is_never_encoded_as_good() {
+    // A producer that hands over a `Good` band has made a mistake; it is surfaced, not sent.
+    let wrong = ConnectionEvent::Degraded {
+        path: InterfaceId::new(1),
+        band: QualityBand::Good,
+        staying: NoMove::OnlyPath,
+    };
+    assert!(matches!(
+        encode_event(&wrong),
+        Err(IpcError::InvalidRequest { .. })
+    ));
+}
+
+#[test]
+fn ipc12_a_recovery_names_the_path() {
+    let v = parse(
+        &encode_event(&ConnectionEvent::Recovered {
+            path: InterfaceId::new(7),
+        })
+        .unwrap(),
+    );
+    assert_eq!(v["event"], "Recovered");
+    assert_eq!(v["path"], "7");
+    assert!(!v["because"].as_str().unwrap().trim().is_empty());
 }
 
 #[test]

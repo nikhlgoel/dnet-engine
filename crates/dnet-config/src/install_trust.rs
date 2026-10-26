@@ -84,7 +84,7 @@ fn mask_of(text: &str) -> u32 {
     if let Some(hex) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
         return u32::from_str_radix(hex, 16).unwrap_or(u32::MAX);
     }
-    if text.is_empty() || text.len() % 2 != 0 {
+    if text.is_empty() || !text.len().is_multiple_of(2) {
         return u32::MAX;
     }
     let mut mask = 0u32;

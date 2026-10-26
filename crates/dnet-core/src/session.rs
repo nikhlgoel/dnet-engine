@@ -6,8 +6,10 @@
 
 use std::time::Instant;
 
+use crate::degraded::NoMove;
 use crate::ids::{EndpointId, InterfaceId, ProfileId, SessionId};
 use crate::profile::CoreBinding;
+use crate::quality::QualityBand;
 use crate::tier::FailoverTier;
 
 /// Why a connection failed.
@@ -75,10 +77,58 @@ pub enum ConnectionEvent {
         /// connections survived (data-model §5.1).
         tier_at_time: FailoverTier,
     },
+    /// The carrying path is poor and the connection is staying on it (T084, FR-019). Says which
+    /// path, how poor, and why nothing was done about it.
+    Degraded {
+        path: InterfaceId,
+        /// `Poor` or `Unusable`.
+        band: QualityBand,
+        staying: NoMove,
+    },
+    /// The carrying path is good again, and has stayed so.
+    Recovered { path: InterfaceId },
     /// A supervised core was restarted.
     CoreRestarted { core: CoreBinding, attempt: u32 },
+    /// The connection-method definitions the service holds changed (T066a, ADR-0002 §6). Not about
+    /// any one connection: it is sent when it happens, and a client that connects later is shown it
+    /// by the status, not by replay.
+    DefinitionsChanged { change: DefinitionsChange },
     /// The session failed.
     Failed { cause: FailureCause },
+}
+
+/// What changed about the connection-method definitions (the signed profile feed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DefinitionsChange {
+    /// A newer feed was accepted. Its client section applies from the next connection;
+    /// `endpoint_updates` profiles also propose a change to the person's server, which waits for
+    /// their approval.
+    Updated {
+        sequence: u64,
+        endpoint_updates: u32,
+    },
+    /// A new set of signing keys no longer includes the key that signed the applied feed, so the
+    /// feed was dropped and the built-in definitions are back in use (rule R).
+    Evicted,
+    /// The applied feed has expired. Its definitions stay in use; they may be out of date.
+    OutOfDate,
+    /// A stored document could not be verified again at start-up and was set aside; the built-in
+    /// definitions are in use for what it covered.
+    Discarded,
+    /// The person asked to check for updated definitions and the check did not produce any (T066b).
+    /// A scheduled check that fails is only logged: it would otherwise report, every six hours, that
+    /// nothing is published.
+    CheckFailed { reason: CheckFailure },
+}
+
+/// Why a requested check for updated definitions produced nothing. Deliberately coarse: the reason is
+/// shown to a person, and the detail of a failed request is whatever the network chose to send.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckFailure {
+    /// The place the updates are published could not be reached, or did not answer as expected.
+    Unreachable,
+    /// Documents arrived but did not pass verification, so none was used.
+    Refused,
 }
 
 /// One period of being connected. Append-only.

@@ -10,6 +10,7 @@
 mod cli;
 #[cfg(test)]
 mod fuzz;
+mod input;
 mod render;
 mod run;
 

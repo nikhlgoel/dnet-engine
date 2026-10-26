@@ -8,12 +8,16 @@
 
 use dnet_core::failure::explain;
 use dnet_core::tier::FailoverTier;
+use dnet_ipc::netview::{Kind, PathsReply, Quality, Role, StatsReply};
 use dnet_ipc::protocol::{ConnectionStatus, RoutingPosture, StateSnapshot, Warning};
 use dnet_ipc::wire::EventView;
 use serde_json::Value;
 
 /// The longest string printed in one piece.
 const MAX_SHOWN: usize = 400;
+
+/// A reading older than this is shown as the last known, not as current.
+const STALE_AFTER_SECS: u64 = 15;
 
 /// `text` with every character that could drive the terminal or disguise other text replaced by
 /// `?`, and cut to a sensible length.
@@ -209,6 +213,172 @@ pub fn endpoints(reply: &Value) -> Result<String, String> {
         })
         .collect();
     Ok(table(&["ENDPOINT", "ADDRESS", "ENABLED", "HEALTH"], &rows))
+}
+
+fn kind_label(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Wifi => "Wi-Fi",
+        Kind::Cellular => "Mobile",
+        Kind::Ethernet => "Cable",
+        Kind::Other => "Other",
+    }
+}
+
+fn role_label(role: Role) -> &'static str {
+    match role {
+        Role::Carrying => "carrying",
+        Role::Standby => "standby",
+        Role::Unusable => "unavailable",
+    }
+}
+
+fn quality_label(quality: Quality) -> &'static str {
+    match quality {
+        Quality::Good => "good",
+        Quality::Poor => "poor",
+        Quality::Unusable => "very poor",
+    }
+}
+
+/// How long ago a reading was, for a sentence.
+fn age(seconds: u64) -> String {
+    match seconds {
+        0..=1 => "just now".to_string(),
+        2..=119 => format!("{seconds} s ago"),
+        _ => format!("{} min ago", seconds / 60),
+    }
+}
+
+/// Why the connection stays on a poor network, as the service names it.
+fn staying_words(staying: &str) -> &'static str {
+    match staying {
+        "OnlyPath" => "it is the only network available, so there is nothing to switch to",
+        "NoBetterPath" => "the other networks are no better",
+        "Proving" => "a better network exists but has not yet proven stable",
+        "Dwell" => "the connection was moved a moment ago and waits before moving again",
+        "Budget" => "the limit on moves in ten minutes has been reached",
+        _ => "the service gave a reason this program does not know",
+    }
+}
+
+/// The `GetPaths` answer: the networks, which carries, how good each is, and whether to believe it.
+///
+/// `now_unix_ms` is this computer's clock. A reading older than [`STALE_AFTER_SECS`] is shown as the
+/// last known, never as current.
+pub fn paths(reply: &PathsReply, now_unix_ms: u64) -> String {
+    let seconds = now_unix_ms.saturating_sub(reply.as_of_unix_ms) / 1000;
+    let mut lines = Vec::new();
+    if !reply.watching {
+        lines.push(
+            "Nothing is being watched: no tunnel is up, so the networks are not measured."
+                .to_string(),
+        );
+        return lines.join("\n");
+    }
+    lines.push(if seconds > STALE_AFTER_SECS {
+        format!(
+            "Last known {} (not current: the service has not updated this for a while)",
+            age(seconds)
+        )
+    } else {
+        format!("Networks, {}", age(seconds))
+    });
+    if reply.paths.is_empty() {
+        lines.push("No network is available.".to_string());
+    } else {
+        let rows: Vec<Vec<String>> = reply
+            .paths
+            .iter()
+            .map(|p| {
+                let name = match &p.name {
+                    Some(name) => format!("{} ({})", plain(name), kind_label(p.kind)),
+                    None => format!("{} (adapter {})", kind_label(p.kind), plain(&p.id)),
+                };
+                let measured = |value: Option<String>| {
+                    if p.measured {
+                        value.unwrap_or_else(|| "-".to_string())
+                    } else {
+                        "not measured".to_string()
+                    }
+                };
+                vec![
+                    name,
+                    role_label(p.role).to_string(),
+                    measured(p.rtt_ms.map(|ms| format!("{ms:.0} ms"))),
+                    measured(p.jitter_ms.map(|ms| format!("{ms:.0} ms"))),
+                    measured(p.loss.map(|l| format!("{:.1} %", l * 100.0))),
+                    match (p.measured, p.typical_ms) {
+                        (true, Some((lo, hi))) => format!("{lo:.0}-{hi:.0} ms"),
+                        _ => "-".to_string(),
+                    },
+                ]
+            })
+            .collect();
+        lines.push(table(
+            &["NETWORK", "ROLE", "LATENCY", "JITTER", "LOSS", "USUALLY"],
+            &rows,
+        ));
+    }
+    if let Some(d) = &reply.degraded {
+        lines.push(format!(
+            "The connection is on a {} network and is staying there: {}.",
+            quality_label(d.quality),
+            staying_words(&d.staying)
+        ));
+    }
+    lines.join("\n")
+}
+
+/// A length of time in words.
+fn duration(seconds: u64) -> String {
+    let (h, m, s) = (seconds / 3600, seconds % 3600 / 60, seconds % 60);
+    match (h, m) {
+        (0, 0) => format!("{s} s"),
+        (0, _) => format!("{m} min {s} s"),
+        _ => format!("{h} h {m} min"),
+    }
+}
+
+/// The `GetStats` answer: counts of what the product did. Nothing here compares with not using it.
+pub fn stats(reply: &StatsReply) -> String {
+    let StatsReply::Connected {
+        connected_for_s,
+        network_changes,
+        changes_that_drop_connections,
+        method_switches,
+        endpoint_switches,
+        degraded_periods,
+        longest_degraded_s,
+    } = reply
+    else {
+        return "Nothing is connected, so nothing is being counted.".to_string();
+    };
+    let mut lines = vec![
+        format!("Connected for:          {}", duration(*connected_for_s)),
+        if *changes_that_drop_connections > 0 {
+            format!(
+                "Network changes:        {network_changes} ({changes_that_drop_connections} under a Tier 2 profile, which breaks established connections)"
+            )
+        } else {
+            format!("Network changes:        {network_changes}")
+        },
+        format!("Method switches:        {method_switches}"),
+        format!("Endpoint switches:      {endpoint_switches}"),
+    ];
+    lines.push(if *degraded_periods == 0 {
+        "Poor-network periods:   0".to_string()
+    } else {
+        format!(
+            "Poor-network periods:   {degraded_periods} (longest {})",
+            duration(*longest_degraded_s)
+        )
+    });
+    lines.push(
+        "Counted on this computer since the connection came up. These are counts of what \
+         happened, not a comparison with not using DNet Engine."
+            .to_string(),
+    );
+    lines.join("\n")
 }
 
 #[cfg(test)]
@@ -417,5 +587,146 @@ mod tests {
         // A row with missing fields shows '?', not a crash.
         let text = profiles(&json!({"profiles": [{"id": "p"}]})).unwrap();
         assert!(text.contains('?'), "{text}");
+    }
+
+    // ------------------------------------------------ the networks and the session (T144)
+
+    fn path(id: &str, name: Option<&str>, role: Role) -> dnet_ipc::netview::PathReply {
+        dnet_ipc::netview::PathReply {
+            id: id.into(),
+            kind: Kind::Wifi,
+            name: name.map(str::to_owned),
+            role,
+            measured: true,
+            quality: Some(Quality::Good),
+            rtt_ms: Some(43.2),
+            jitter_ms: Some(4.1),
+            loss: Some(0.023),
+            trace_ms: vec![],
+            typical_ms: Some((38.0, 52.0)),
+        }
+    }
+
+    fn reply(paths: Vec<dnet_ipc::netview::PathReply>) -> PathsReply {
+        PathsReply {
+            as_of_unix_ms: 1_000_000,
+            watching: true,
+            paths,
+            degraded: None,
+        }
+    }
+
+    #[test]
+    fn a_network_is_named_with_its_kind_its_role_and_what_was_measured() {
+        let text = paths(
+            &reply(vec![path("7", Some("Hostel-5G"), Role::Carrying)]),
+            1_002_000,
+        );
+        assert!(text.contains("Hostel-5G (Wi-Fi)"), "{text}");
+        assert!(text.contains("carrying"), "{text}");
+        assert!(text.contains("43 ms"), "{text}");
+        assert!(text.contains("2.3 %"), "{text}");
+        assert!(text.contains("38-52 ms"), "{text}");
+        assert!(text.contains("2 s ago"), "{text}");
+    }
+
+    #[test]
+    fn a_network_with_no_name_is_told_apart_by_its_adapter() {
+        let text = paths(
+            &reply(vec![
+                path("7", None, Role::Carrying),
+                path("9", None, Role::Standby),
+            ]),
+            1_000_500,
+        );
+        assert!(text.contains("Wi-Fi (adapter 7)"), "{text}");
+        assert!(text.contains("Wi-Fi (adapter 9)"), "{text}");
+    }
+
+    #[test]
+    fn a_network_that_was_not_measured_is_not_shown_as_fine() {
+        let mut p = path("9", Some("Phone"), Role::Standby);
+        p.measured = false;
+        p.quality = None;
+        p.rtt_ms = None;
+        p.jitter_ms = None;
+        p.loss = None;
+        p.typical_ms = None;
+        let text = paths(&reply(vec![p]), 1_000_500);
+        assert!(text.contains("not measured"), "{text}");
+        assert!(!text.contains(" 0 ms") && !text.contains("0.0 %"), "{text}");
+    }
+
+    #[test]
+    fn an_old_reading_is_called_last_known_not_current() {
+        let text = paths(
+            &reply(vec![path("7", Some("A"), Role::Carrying)]),
+            1_000_000 + 90_000,
+        );
+        assert!(text.contains("Last known"), "{text}");
+        assert!(text.contains("not current"), "{text}");
+        let fresh = paths(
+            &reply(vec![path("7", Some("A"), Role::Carrying)]),
+            1_000_000 + 5_000,
+        );
+        assert!(!fresh.contains("Last known"), "{fresh}");
+    }
+
+    #[test]
+    fn nothing_watched_is_said_plainly_and_not_as_no_networks() {
+        let mut r = reply(vec![]);
+        r.watching = false;
+        let text = paths(&r, 1_000_000);
+        assert!(text.contains("Nothing is being watched"), "{text}");
+        assert!(!text.contains("No network is available"), "{text}");
+        let looking = paths(&reply(vec![]), 1_000_000);
+        assert!(looking.contains("No network is available"), "{looking}");
+    }
+
+    #[test]
+    fn a_degradation_says_why_the_connection_stays() {
+        let mut r = reply(vec![path("7", Some("A"), Role::Carrying)]);
+        r.degraded = Some(dnet_ipc::netview::DegradedReply {
+            path: "7".into(),
+            quality: Quality::Poor,
+            staying: "OnlyPath".into(),
+        });
+        let text = paths(&r, 1_000_000);
+        assert!(text.contains("poor network and is staying there"), "{text}");
+        assert!(text.contains("only network available"), "{text}");
+    }
+
+    #[test]
+    fn a_hostile_name_reaches_the_terminal_as_plain_text() {
+        let text = paths(
+            &reply(vec![path("7", Some("Free\u{1b}[2J WiFi"), Role::Carrying)]),
+            1_000_000,
+        );
+        assert!(!text.contains('\u{1b}'), "{text:?}");
+    }
+
+    #[test]
+    fn the_session_is_counted_without_comparing_it_with_anything() {
+        let text = stats(&StatsReply::Connected {
+            connected_for_s: 11_520,
+            network_changes: 2,
+            changes_that_drop_connections: 1,
+            method_switches: 1,
+            endpoint_switches: 0,
+            degraded_periods: 1,
+            longest_degraded_s: 6,
+        });
+        assert!(text.contains("3 h 12 min"), "{text}");
+        assert!(text.contains("2 (1 under a Tier 2 profile"), "{text}");
+        assert!(text.contains("1 (longest 6 s)"), "{text}");
+        assert!(text.contains("not a comparison with not using"), "{text}");
+        assert!(
+            !text.contains('%'),
+            "no percentage of improvement is ever invented: {text}"
+        );
+        assert_eq!(
+            stats(&StatsReply::NotConnected),
+            "Nothing is connected, so nothing is being counted."
+        );
     }
 }

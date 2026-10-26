@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "headline": "Some programs hide the sites they look up. DNet turns that off.",
+  "what": "Web browsers and some other programs can send their name lookups over an encrypted connection of their own. While DNet is connected it makes them use the system's lookup instead, by blocking the well-known encrypted lookup services.",
+  "why": "Your rules for sites and domains can only work if DNet can see which site a program is asking for. A program that hides its lookups cannot be routed by site, so a rule such as \"keep this site off the tunnel\" would quietly not apply to it.",
+  "howToOptOut": "You can turn this off in one step in Settings. Programs will then keep using their own encrypted lookups.",
+  "consequenceOfOptingOut": "Rules for sites and domains will not apply to traffic from programs that use their own encrypted lookups. Those programs will be routed by address only."
+}

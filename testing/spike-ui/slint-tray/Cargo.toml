@@ -1,0 +1,19 @@
+[package]
+name = "spike-slint-tray"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Measurement spike: a native toolkit as a tray-resident app, for comparison with the mandated stack. Not product code."
+
+# Detached from the main workspace on purpose (see the Tauri spike).
+[workspace]
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[dependencies]
+slint = { version = "1.18.1", default-features = false, features = ["std", "backend-winit", "renderer-software", "compat-1-2"] }
+tray-icon = "0.26.1"

@@ -1,0 +1,12 @@
+{
+  "off": "Not connected",
+  "probe": "Finding a way through",
+  "ok": "Connected",
+  "warn": "Connected, but slow",
+  "serviceDown": "The background service did not answer.",
+  "stabilize": "Stabilize",
+  "working": "Working…",
+  "turnOff": "Turn off",
+  "open": "Open",
+  "quit": "Quit this app (the connection stays up)"
+}

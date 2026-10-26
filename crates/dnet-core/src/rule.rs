@@ -32,6 +32,10 @@ pub enum RuleAction {
     /// DNS-capture rule, so no plaintext port-53 query can leak to the local network
     /// (DNS-leak prevention).
     Capture,
+    /// Refuse it: the lookup gets no answer and the connection is not made. Used only by built-in
+    /// rules (the encrypted-DNS block, T070), so a person's rule can never silently black-hole
+    /// traffic they did not mean to.
+    Reject,
 }
 
 /// A parsed CIDR block.
@@ -103,6 +107,9 @@ pub enum RuleMatcher {
     /// before any address- or domain-based rule so no query can be routed around the
     /// tunnel. Only ever paired with `RuleAction::Capture`.
     DnsPort,
+    /// Destination port 853, DNS over TLS (TCP) and over QUIC (UDP). Only ever paired with
+    /// `RuleAction::Reject` (T070).
+    EncryptedDnsPort,
 }
 
 /// A statement that traffic matching a criterion is tunnelled or bypassed.
@@ -147,15 +154,30 @@ impl RoutingRule {
             RuleMatcher::Domain(p) | RuleMatcher::DomainSuffix(p) | RuleMatcher::Application(p) => {
                 p.trim().is_empty()
             }
-            RuleMatcher::IpCidr(_) | RuleMatcher::DnsPort => false,
+            RuleMatcher::IpCidr(_) | RuleMatcher::DnsPort | RuleMatcher::EncryptedDnsPort => false,
         };
         if pattern_empty {
             return Err(DomainError::EmptyPattern);
+        }
+        // A name pattern must be one a connection could carry: it goes into a generated configuration,
+        // and a pattern that cannot match anything is a rule that silently does nothing.
+        if let RuleMatcher::Domain(p) | RuleMatcher::DomainSuffix(p) = &matcher {
+            crate::rule_eval::check_domain_pattern(p)?;
+        }
+        // The product's own rules may name the pool's neighbours; a person's may not sit inside it.
+        if let (RuleMatcher::IpCidr(range), false) = (&matcher, builtin) {
+            crate::fakeip::check_user_range(range)?;
         }
         // Port-53 traffic must always be *captured*: never tunnelled-with-fallback and
         // never bypassed, or a query could reach the physical network.
         if matches!(matcher, RuleMatcher::DnsPort) && action != RuleAction::Capture {
             return Err(DomainError::DnsPortRequiresCapture);
+        }
+        if matches!(matcher, RuleMatcher::EncryptedDnsPort) && action != RuleAction::Reject {
+            return Err(DomainError::EncryptedDnsPortRequiresReject);
+        }
+        if action == RuleAction::Reject && !builtin {
+            return Err(DomainError::RejectIsBuiltinOnly);
         }
         Ok(Self {
             id,
@@ -278,6 +300,31 @@ mod tests {
                 Err(DomainError::EmptyPattern)
             );
         }
+    }
+
+    #[test]
+    fn a_domain_pattern_that_cannot_be_a_name_is_refused_when_the_rule_is_made() {
+        for bad in ["a b.com", "x\u{7}.com", "ünï.com", "a..b", "-x.com"] {
+            for matcher in [
+                RuleMatcher::Domain(bad.into()),
+                RuleMatcher::DomainSuffix(bad.into()),
+            ] {
+                assert!(
+                    matches!(
+                        RoutingRule::user(matcher, RuleAction::Tunnel, 1),
+                        Err(DomainError::InvalidDomainPattern(_))
+                    ),
+                    "{bad:?}"
+                );
+            }
+        }
+        // An application path is not a domain name, and keeps its own rules.
+        assert!(RoutingRule::user(
+            RuleMatcher::Application(r"C:\Program Files\a b.exe".into()),
+            RuleAction::Tunnel,
+            1
+        )
+        .is_ok());
     }
 
     #[test]

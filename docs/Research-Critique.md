@@ -481,6 +481,13 @@ defines the `cargo xtask` alias that CI and the docs already assumed. Still **no
   Phase 0 before committing to D5's per-process path. *Blocking the per-process routing feature only.*
   **CLOSED 2026-09-11.** SPIKE-O6 passed: remote coverage 100%, cost 0.000%. FR-023 is retained.
   See `docs/adr/0001-etw-attribution.md` and BUG-006.
+- **O8 (NEW)** Is Tauri v2 + Svelte 5 the right stack for the UI, and is the memory budget stated in a state
+  and metric that can be measured? **CLOSED 2026-10-24.** ADR-0007 is Accepted by the owner: the mandated
+  stack is retained under eight binding constraints (R1 to R8: a native tray, the web view destroyed when
+  not wanted, plain Svelte 5 with Vite, the web view never touching the pipe, WebView2 as a stated
+  prerequisite, CSS that also works in WebKitGTK, tokens only, a bounded scene). SC-013 is reworded to
+  "idle, window closed, combined private memory ≤ 150 MB; window open ≤ 300 MB; open to loaded ≤ 600 ms".
+  The constitution is unchanged.
 - **O7 (NEW)** Confirm the pinned sing-box version's Hysteria 2 implementation supports Gecko, not
   only Salamander. Gecko is comparatively recent; the core may lag the protocol specification.
   *Blocking Phase 4 profile tuning, not Phase 3.*

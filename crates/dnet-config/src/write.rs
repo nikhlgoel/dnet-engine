@@ -183,6 +183,76 @@ pub mod win {
         result
     }
 
+    /// Test support: make `path` owned by the current user's own account (not the Administrators group).
+    ///
+    /// A directory made by an elevated process is owned by Administrators, which the code under test
+    /// rightly trusts; a directory made by an ordinary user is not. The tests that stand for "someone
+    /// else pre-created this" must not depend on which of the two the shell running them happens to be
+    /// (GitHub's Windows runners are elevated), so they say it outright.
+    #[cfg(test)]
+    pub fn make_owned_by_current_user(path: &Path) -> io::Result<()> {
+        use windows::Win32::Security::GetSecurityDescriptorOwner;
+
+        // `whoami /user /fo csv /nh` prints `"DOMAIN\name","S-1-5-21-..."`.
+        let out = std::process::Command::new("whoami")
+            .args(["/user", "/fo", "csv", "/nh"])
+            .output()?;
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        let sid = text
+            .trim()
+            .rsplit(',')
+            .next()
+            .map(|s| s.trim().trim_matches('"').to_owned())
+            .filter(|s| s.starts_with("S-1-"))
+            .ok_or_else(|| io::Error::other("could not read the current user's SID"))?;
+
+        let sddl_w = wide(&format!("O:{sid}"));
+        let path_w = wide_path(path);
+        let mut descriptor = PSECURITY_DESCRIPTOR::default();
+        // SAFETY: `sddl_w` is NUL-terminated and outlives the call; `descriptor` is a valid out-pointer,
+        // LocalAlloc'd on success and freed below on every path.
+        unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                PCWSTR(sddl_w.as_ptr()),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                None,
+            )
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        }
+        let result = (|| {
+            let mut owner = PSID::default();
+            let mut defaulted = BOOL::default();
+            // SAFETY: `descriptor` is valid from the call above; `owner` points into it and is only used
+            // while it is alive.
+            unsafe {
+                GetSecurityDescriptorOwner(descriptor, &mut owner, &mut defaulted)
+                    .map_err(|e| io::Error::other(e.to_string()))?;
+            }
+            // SAFETY: `path_w` is NUL-terminated; only the owner is set.
+            let status = unsafe {
+                SetNamedSecurityInfoW(
+                    PCWSTR(path_w.as_ptr()),
+                    SE_FILE_OBJECT,
+                    OWNER_SECURITY_INFORMATION,
+                    owner,
+                    PSID::default(),
+                    None,
+                    None,
+                )
+            };
+            if status.is_err() {
+                return Err(io::Error::from_raw_os_error(status.0 as i32));
+            }
+            Ok(())
+        })();
+        // SAFETY: `descriptor` was allocated by ConvertStringSecurityDescriptor... above.
+        unsafe {
+            let _ = LocalFree(HLOCAL(descriptor.0));
+        }
+        result
+    }
+
     /// Read `path`'s DACL back as SDDL (for verification).
     pub fn read_dacl_sddl(path: &Path) -> io::Result<String> {
         read_sddl(path, DACL_SECURITY_INFORMATION)
@@ -314,7 +384,7 @@ mod tests {
     #[test]
     fn default_run_dir_is_under_programdata() {
         let dir = default_run_dir();
-        assert!(dir.ends_with(r"DNet Engine\run"));
+        assert!(dir.ends_with(std::path::Path::new("DNet Engine").join("run")));
     }
 
     /// The full directory-first flow needs rights to set a DACL on a directory and then
@@ -334,13 +404,36 @@ mod tests {
 
 #[cfg(all(test, windows))]
 mod private_dir_tests {
-    use super::win::{apply_protected_dacl, read_owner_and_dacl_sddl};
+    use super::win::{apply_protected_dacl, make_owned_by_current_user, read_owner_and_dacl_sddl};
     use super::*;
 
-    /// A temporary directory is owned by an ordinary user: exactly who could pre-create one under
-    /// `%PROGRAMDATA%`. These tests run unelevated, like the rest of the suite.
+    /// A directory owned by an ordinary user: exactly who could pre-create one under `%PROGRAMDATA%`. Each test
+    /// makes that so itself, so it holds whether or not the shell running the tests is elevated.
     fn cleanup(dir: &Path) {
         let _ = apply_protected_dacl(dir, "D:P(A;OICI;FA;;;WD)");
+    }
+
+    /// The helper the tests above rely on really does what they assume. Elevated, a new directory is owned
+    /// by `BA` (Administrators); after the helper it must be owned by the user's own account, which is what
+    /// makes the refusal tests mean the same thing in every shell.
+    #[test]
+    fn the_owner_helper_leaves_an_ordinary_user_as_the_owner() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("config");
+        std::fs::create_dir(&dir).unwrap();
+
+        make_owned_by_current_user(&dir).unwrap();
+
+        let sddl = read_owner_and_dacl_sddl(&dir).unwrap();
+        cleanup(&dir);
+        assert!(
+            sddl.starts_with("O:S-1-"),
+            "owned by an account's own SID, not a group alias: {sddl}"
+        );
+        assert!(
+            !sddl.starts_with("O:SY") && !sddl.starts_with("O:BA"),
+            "{sddl}"
+        );
     }
 
     #[test]
@@ -348,6 +441,7 @@ mod private_dir_tests {
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("config");
         std::fs::create_dir(&dir).unwrap();
+        make_owned_by_current_user(&dir).unwrap();
         let before = read_owner_and_dacl_sddl(&dir).unwrap();
 
         let err = prepare_private_dir(&dir).unwrap_err();
@@ -365,6 +459,7 @@ mod private_dir_tests {
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("config");
         std::fs::create_dir(&dir).unwrap();
+        make_owned_by_current_user(&dir).unwrap();
 
         let err = write_restricted(&dir, "primary-core.json", b"credentials").unwrap_err();
 

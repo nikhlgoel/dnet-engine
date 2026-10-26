@@ -1,0 +1,20 @@
+{
+  "activeEndpoint": null,
+  "activeProfile": null,
+  "failure": null,
+  "lastBecause": null,
+  "paths": {
+    "asOfMs": 1730000000000,
+    "degraded": null,
+    "paths": [],
+    "watching": false
+  },
+  "posture": {
+    "kind": "FailClosed"
+  },
+  "stats": {
+    "connected": false
+  },
+  "status": "Disconnected",
+  "warnings": []
+}

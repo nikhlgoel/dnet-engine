@@ -1,0 +1,28 @@
+{
+  "activeEndpoint": {
+    "id": "5b1f0c1e-8a43-4c51-9a79-0f6d1a9c2f10",
+    "label": "oracle-mumbai"
+  },
+  "activeProfile": {
+    "id": "hy2-default",
+    "kind": "Hysteria2",
+    "tier": "Tier1"
+  },
+  "failure": null,
+  "lastBecause": null,
+  "paths": {
+    "asOfMs": 1730000001000,
+    "degraded": null,
+    "paths": [],
+    "watching": false
+  },
+  "posture": {
+    "kind": "Tunnelled",
+    "tier": "Tier1"
+  },
+  "stats": {
+    "connected": false
+  },
+  "status": "Connected",
+  "warnings": []
+}

@@ -162,6 +162,7 @@ mod pure {
             rules: &rules,
             amneziawg_adapter: None,
             primary_transport: Some(PrimaryTransport::Hysteria2(&transport)),
+            fakeip: dnet_config::primary::FakeIpHalf::Low,
         })?;
         let mut value: Value = serde_json::from_str(&to_json(&config))?;
         if control {
@@ -729,6 +730,7 @@ mod win {
             rules: &rules,
             amneziawg_adapter: Some(ADAPTER),
             primary_transport: None,
+            fakeip: dnet_config::primary::FakeIpHalf::Low,
         })?;
         let config_path = write::write_restricted(
             &args.run_dir.join("config"),

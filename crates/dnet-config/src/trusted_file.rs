@@ -252,12 +252,14 @@ mod tests {
         assert!(!err.to_string().contains("planted"));
     }
 
-    /// The defence against a pre-created directory. A temporary directory is owned by an ordinary
-    /// user, which is exactly who could plant one under `%PROGRAMDATA%`, so it must be refused
-    /// without elevation. Nothing may be written into it.
+    /// The defence against a pre-created directory: one owned by an ordinary user, which is exactly who
+    /// could plant one under `%PROGRAMDATA%`. The test makes it so itself, so it holds whether or not the
+    /// shell is elevated. Nothing may be written into it.
     #[test]
     fn a_directory_owned_by_an_ordinary_user_is_refused_and_nothing_is_written() {
         let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("state")).unwrap();
+        win::make_owned_by_current_user(&dir.path().join("state")).unwrap();
         let file = TrustedFile::new(dir.path().join("state").join("config.json"));
 
         let err = file.write(b"secret-ish").unwrap_err();
@@ -276,6 +278,7 @@ mod tests {
     #[test]
     fn removing_inside_a_directory_owned_by_an_ordinary_user_is_refused_and_the_file_stays() {
         let dir = tempfile::tempdir().unwrap();
+        win::make_owned_by_current_user(dir.path()).unwrap();
         let path = dir.path().join("secret-x.bin");
         std::fs::write(&path, b"keep me").unwrap();
 

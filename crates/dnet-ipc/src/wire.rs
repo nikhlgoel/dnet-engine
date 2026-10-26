@@ -12,8 +12,10 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
+use dnet_core::degraded::NoMove;
 use dnet_core::failure::{core_description, explain};
-use dnet_core::session::ConnectionEvent;
+use dnet_core::quality::QualityBand;
+use dnet_core::session::{CheckFailure, ConnectionEvent, DefinitionsChange};
 use dnet_core::tier::FailoverTier;
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
@@ -37,6 +39,49 @@ fn invalid(detail: impl Into<String>) -> IpcError {
 }
 
 // ------------------------------------------------------------------ event encoding
+
+/// What a degradation says: how poor the path is, and why the connection is staying on it. Each
+/// reason is told differently, and none claims a move: the whole point of the notice is that there
+/// was none (FR-019).
+fn degraded_because(band: QualityBand, staying: NoMove) -> Result<String, IpcError> {
+    let how = match band {
+        QualityBand::Poor => "the network carrying your connection is slow or dropping packets",
+        QualityBand::Unusable => "the network carrying your connection is dropping most packets",
+        // Degraded means below good. A producer that says otherwise has a bug; send nothing.
+        QualityBand::Good => return Err(invalid("a degradation cannot be of a good network")),
+    };
+    let why = match staying {
+        NoMove::OnlyPath => "it is the only network available, so there is nothing to switch to",
+        NoMove::NoBetterPath => "the other networks are no better, so the connection stays where it is",
+        NoMove::Proving => {
+            "a better network exists but has not yet proven stable, so the connection has not moved"
+        }
+        NoMove::Dwell => "the connection was moved a moment ago and waits before moving again",
+        NoMove::Budget => {
+            "the limit on moves in ten minutes has been reached, so the connection stays where it is"
+        }
+    };
+    Ok(format!("{how}, and {why}"))
+}
+
+fn band_str(band: QualityBand) -> &'static str {
+    match band {
+        QualityBand::Good => "Good",
+        QualityBand::Poor => "Poor",
+        QualityBand::Unusable => "Unusable",
+    }
+}
+
+/// The machine-readable name of why a connection is staying on a poor network.
+pub(crate) fn staying_name(staying: NoMove) -> &'static str {
+    match staying {
+        NoMove::OnlyPath => "OnlyPath",
+        NoMove::NoBetterPath => "NoBetterPath",
+        NoMove::Proving => "Proving",
+        NoMove::Dwell => "Dwell",
+        NoMove::Budget => "Budget",
+    }
+}
 
 fn path_change_because(tier: FailoverTier) -> &'static str {
     match tier {
@@ -97,6 +142,24 @@ fn event_value(event: &ConnectionEvent) -> Result<Value, IpcError> {
             }),
             path_change_because(*tier_at_time).to_string(),
         ),
+        ConnectionEvent::Degraded {
+            path,
+            band,
+            staying,
+        } => (
+            "Degraded",
+            json!({
+                "path": interface_str(*path),
+                "quality": band_str(*band),
+                "staying": staying_name(*staying),
+            }),
+            degraded_because(*band, *staying)?,
+        ),
+        ConnectionEvent::Recovered { path } => (
+            "Recovered",
+            json!({ "path": interface_str(*path) }),
+            "the network carrying your connection is working normally again".to_string(),
+        ),
         ConnectionEvent::CoreRestarted { core, attempt } => (
             "CoreRestarted",
             json!({ "core": core_binding_str(core), "attempt": attempt }),
@@ -104,6 +167,11 @@ fn event_value(event: &ConnectionEvent) -> Result<Value, IpcError> {
                 "{} stopped unexpectedly and was restarted (attempt {attempt})",
                 core_description(core)
             ),
+        ),
+        ConnectionEvent::DefinitionsChanged { change } => (
+            "DefinitionsChanged",
+            definitions_fields(*change),
+            definitions_because(*change),
         ),
         ConnectionEvent::Failed { cause } => (
             "Failed",
@@ -119,6 +187,59 @@ fn event_value(event: &ConnectionEvent) -> Result<Value, IpcError> {
         object.insert("because".into(), Value::String(because));
     }
     Ok(fields)
+}
+
+fn definitions_fields(change: DefinitionsChange) -> Value {
+    match change {
+        DefinitionsChange::Updated {
+            sequence,
+            endpoint_updates,
+        } => json!({
+            "change": "Updated",
+            // A sequence is a 64-bit number: a JSON number would lose bits above 2^53.
+            "sequence": sequence.to_string(),
+            "endpoint_updates": endpoint_updates,
+        }),
+        DefinitionsChange::Evicted => json!({ "change": "Evicted" }),
+        DefinitionsChange::OutOfDate => json!({ "change": "OutOfDate" }),
+        DefinitionsChange::Discarded => json!({ "change": "Discarded" }),
+        DefinitionsChange::CheckFailed { reason } => json!({
+            "change": "CheckFailed",
+            "reason": match reason {
+                CheckFailure::Unreachable => "Unreachable",
+                CheckFailure::Refused => "Refused",
+            },
+        }),
+    }
+}
+
+fn definitions_because(change: DefinitionsChange) -> String {
+    match change {
+        DefinitionsChange::Updated {
+            sequence,
+            endpoint_updates: 0,
+        } => format!("connection method definitions updated (sequence {sequence})"),
+        DefinitionsChange::Updated {
+            sequence,
+            endpoint_updates,
+        } => format!(
+            "connection method definitions updated (sequence {sequence}); {endpoint_updates} of              them also propose a change to your server, which waits for your approval"
+        ),
+        DefinitionsChange::Evicted => "a newer set of signing keys no longer includes the key              that signed the last update, so the built-in definitions are back in use"
+            .to_string(),
+        DefinitionsChange::OutOfDate => "the connection method definitions have not been              refreshed lately and may be out of date; the last ones are still in use"
+            .to_string(),
+        DefinitionsChange::Discarded => "the saved update could not be checked again and was              set aside, so the built-in definitions are in use"
+            .to_string(),
+        DefinitionsChange::CheckFailed {
+            reason: CheckFailure::Unreachable,
+        } => "the place connection method updates are published could not be reached, so the              definitions in use are unchanged"
+            .to_string(),
+        DefinitionsChange::CheckFailed {
+            reason: CheckFailure::Refused,
+        } => "an update was found but did not pass verification, so it was not used and the              definitions in use are unchanged"
+            .to_string(),
+    }
 }
 
 /// Encode an event in its wire form (no sequence number; [`EventBus::publish`] adds one).

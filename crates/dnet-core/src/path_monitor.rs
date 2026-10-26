@@ -25,10 +25,12 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
+use crate::degraded::{Change, Degradation, DegradationReporter, Look};
 use crate::failover::{Decision, FailoverConfig, FailoverState};
 use crate::ids::InterfaceId;
 use crate::path::{NetworkPath, PathKind, PathQuality, PathRole};
 use crate::quality::PathSample;
+use crate::telemetry::{PathHistory, PathView, PathsSnapshot};
 
 /// The carrying path kept its adapter but its gateway changed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +76,10 @@ pub struct PathMonitor {
     cadence: ProbeCadence,
     paths: Vec<NetworkPath>,
     state: FailoverState,
+    /// What the user has been told about the carrying path being poor (T084).
+    reporter: DegradationReporter,
+    /// The recent readings of each path, for traces and "what is normal here" (T144).
+    history: PathHistory,
     /// When each path was last handed out to be probed.
     probed_at: HashMap<InterfaceId, Instant>,
     /// When each path last produced a sample.
@@ -111,6 +117,8 @@ impl PathMonitor {
             cadence: ProbeCadence::default(),
             paths: Vec::new(),
             state: FailoverState::new(),
+            reporter: DegradationReporter::new(),
+            history: PathHistory::new(),
             probed_at: HashMap::new(),
             sampled_at: HashMap::new(),
         }
@@ -211,6 +219,9 @@ impl PathMonitor {
         });
         self.sampled_at
             .retain(|id, _| observed.iter().any(|p| p.interface_id == *id));
+        // A path that goes is forgotten, history included: if it comes back it starts afresh.
+        self.history
+            .retain(|id| observed.iter().any(|p| p.interface_id == id));
         self.paths = observed;
         self.apply_roles();
         PathsDelta {
@@ -225,6 +236,7 @@ impl PathMonitor {
         if let Some(p) = self.paths.iter_mut().find(|p| p.interface_id == path) {
             p.quality = p.quality.observe(sample);
             self.sampled_at.insert(path, now);
+            self.history.record(path, sample);
         }
     }
 
@@ -260,6 +272,68 @@ impl PathMonitor {
         self.state = next;
         self.apply_roles();
         decision
+    }
+
+    /// What the user should be told about the carrying path at `now`, if that has changed (T084).
+    ///
+    /// Call it after [`evaluate`](Self::evaluate), on the same tick: a move that has just been made
+    /// is already reflected. It reads the same evidence the decision does, so a path whose probes
+    /// have gone quiet is "unmeasured" here too, and nothing is claimed about it.
+    #[must_use]
+    pub fn report(&mut self, now: Instant) -> Option<Change> {
+        let evidence = self.evidence(now);
+        let carrying = self.state.carrying();
+        let band = carrying
+            .and_then(|id| evidence.iter().find(|p| p.interface_id == id))
+            .filter(|p| p.quality.is_measured())
+            .map(|p| p.quality.band(&self.cfg.thresholds));
+        let staying = self.state.explain_staying(&evidence, now, &self.cfg);
+        self.reporter.observe(
+            Look {
+                carrying,
+                band,
+                staying,
+            },
+            now,
+            self.cfg.degrade_for,
+            self.cfg.recover_for,
+        )
+    }
+
+    /// The networks as the interface shows them at `now` (T144). A network whose measurements have
+    /// gone stale is `measured: false` and has no band, latency or loss: nothing is claimed about it.
+    /// Its history is still shown as history.
+    #[must_use]
+    pub fn snapshot(&self, now: Instant) -> PathsSnapshot {
+        let evidence = self.evidence(now);
+        let paths = evidence
+            .iter()
+            .map(|p| {
+                let measured = p.quality.is_measured();
+                PathView {
+                    id: p.interface_id,
+                    kind: p.kind,
+                    name: None,
+                    role: p.role,
+                    measured,
+                    band: measured.then(|| p.quality.band(&self.cfg.thresholds)),
+                    rtt: p.quality.rtt_ewma.filter(|_| measured),
+                    jitter: p.quality.jitter_ewma.filter(|_| measured),
+                    loss: measured.then_some(p.quality.loss_ewma),
+                    trace_ms: self.history.trace(p.interface_id),
+                    typical_ms: self.history.typical(p.interface_id),
+                }
+            })
+            .collect();
+        PathsSnapshot {
+            paths,
+            degradation: self.reporter.current(),
+        }
+    }
+
+    /// The degradation that has been reported and not recovered from, if any.
+    pub fn degradation(&self) -> Option<Degradation> {
+        self.reporter.current()
     }
 
     /// Exactly the carrying path is `Carrying`; paths the system calls unusable stay so.
@@ -823,5 +897,260 @@ mod tests {
         m.paths_changed(vec![wifi(1)]);
         m.observe(id(99), PathSample::Lost, Instant::now());
         assert_eq!(m.paths().len(), 1);
+    }
+
+    // ------------------------------------------------------------------ reporting degradation (T084)
+
+    use crate::degraded::{Change, Degradation, NoMove};
+    use crate::quality::QualityBand;
+
+    /// One evaluation tick, as the daemon makes it: decide, then ask what the user should be told.
+    fn tick(m: &mut PathMonitor, at: Instant) -> (Decision, Option<Change>) {
+        let decision = m.evaluate(at);
+        (decision, m.report(at))
+    }
+
+    /// Tick every second from `from` to `to` inclusive, as the daemon's loop effectively does, and
+    /// return the last tick's outcome and every change reported on the way.
+    fn run(m: &mut PathMonitor, c: &Clock, from: u64, to: u64) -> (Decision, Vec<(u64, Change)>) {
+        let mut changes = Vec::new();
+        let mut last = Decision::Stay;
+        for s in from..=to {
+            let (d, change) = tick(m, c.at(s));
+            last = d;
+            if let Some(change) = change {
+                changes.push((s, change));
+            }
+        }
+        (last, changes)
+    }
+
+    #[test]
+    fn the_only_network_going_bad_is_reported_with_the_reason_that_nothing_else_exists() {
+        let c = Clock::new();
+        let mut m = monitor();
+        m.paths_changed(vec![wifi(1)]);
+        let _ = tick(&mut m, c.at(0));
+        lose(&mut m, c.at(0), 1, 3);
+
+        for s in 0..10 {
+            assert_eq!(tick(&mut m, c.at(s)).1, None, "second {s}: too soon to say");
+        }
+        let (decision, change) = tick(&mut m, c.at(10));
+
+        assert_eq!(decision, Decision::Stay, "there is nowhere to move");
+        assert_eq!(
+            change,
+            Some(Change::Degraded(Degradation {
+                path: id(1),
+                band: QualityBand::Poor,
+                staying: NoMove::OnlyPath,
+            }))
+        );
+        assert_eq!(m.degradation().map(|d| d.path), Some(id(1)));
+        assert_eq!(tick(&mut m, c.at(11)).1, None, "said once");
+    }
+
+    #[test]
+    fn a_better_network_that_is_still_being_proven_is_the_reason_given() {
+        let c = Clock::new();
+        let mut m = monitor();
+        m.paths_changed(vec![wifi(1), cell(2)]);
+        let _ = tick(&mut m, c.at(0));
+        lose(&mut m, c.at(0), 1, 3);
+        answer(&mut m, c.at(0), 2, 3);
+
+        let (decision, changes) = run(&mut m, &c, 0, 10);
+
+        assert_eq!(
+            decision,
+            Decision::Stay,
+            "the phone has not been good for 30 s yet"
+        );
+        assert_eq!(
+            changes,
+            [(
+                10,
+                Change::Degraded(Degradation {
+                    path: id(1),
+                    band: QualityBand::Poor,
+                    staying: NoMove::Proving,
+                })
+            )]
+        );
+    }
+
+    #[test]
+    fn when_the_connection_does_move_the_user_is_told_about_the_move_not_a_degradation() {
+        let c = Clock::new();
+        // A slow cadence keeps one set of samples fresh for the whole proof (three intervals), so
+        // the carrying path stays merely `Poor`: more losses would make it `Unusable`, and an
+        // unusable path is left without waiting for proof.
+        let slow = ProbeCadence {
+            carrying_every: Duration::from_secs(60),
+            standby_every: Duration::from_secs(60),
+        };
+        let mut m = monitor().with_cadence(slow);
+        m.paths_changed(vec![wifi(1), cell(2)]);
+        let _ = tick(&mut m, c.at(0));
+        lose(&mut m, c.at(0), 1, 3);
+        answer(&mut m, c.at(0), 2, 3);
+        let mut moved = None;
+        for s in 1..=60 {
+            let (d, _) = tick(&mut m, c.at(s));
+            if let Decision::Move { reason, to, .. } = d {
+                moved = Some((s, reason, to));
+                break;
+            }
+        }
+        let (at, reason, to) = moved.expect("the connection moves once the phone is proven");
+        assert_eq!((reason, to), (MoveReason::Degraded, id(2)));
+        assert!(
+            at >= 30,
+            "not before the phone has been good for 30 s: {at}"
+        );
+        assert_eq!(m.carrying(), Some(id(2)));
+    }
+
+    #[test]
+    fn a_network_that_stays_good_again_is_reported_recovered_once() {
+        let c = Clock::new();
+        let mut m = monitor();
+        m.paths_changed(vec![wifi(1)]);
+        let _ = tick(&mut m, c.at(0));
+        lose(&mut m, c.at(0), 1, 3);
+        let (_, said) = run(&mut m, &c, 0, 10);
+        assert_eq!(said.len(), 1, "degraded, once: {said:?}");
+
+        // It comes back: plenty of answers, and the smoothed loss decays below the poor line.
+        answer(&mut m, c.at(11), 1, 12);
+        let (_, said) = run(&mut m, &c, 11, 20);
+        assert_eq!(
+            said,
+            [],
+            "ten seconds of good is not yet ten seconds *held*"
+        );
+        answer(&mut m, c.at(21), 1, 1);
+        let (_, said) = run(&mut m, &c, 21, 22);
+
+        assert_eq!(said, [(21, Change::Recovered { path: id(1) })]);
+        assert_eq!(m.degradation(), None);
+        assert_eq!(run(&mut m, &c, 23, 40).1, [], "said once");
+    }
+
+    #[test]
+    fn a_network_nobody_has_measured_is_never_called_degraded_or_recovered() {
+        let c = Clock::new();
+        let mut m = monitor();
+        m.paths_changed(vec![wifi(1)]);
+        for s in 0..120 {
+            assert_eq!(tick(&mut m, c.at(s)).1, None, "second {s}");
+        }
+    }
+
+    #[test]
+    fn evidence_gone_stale_neither_adds_a_report_nor_withdraws_one() {
+        let c = Clock::new();
+        let mut m = monitor();
+        m.paths_changed(vec![wifi(1)]);
+        let _ = tick(&mut m, c.at(0));
+        lose(&mut m, c.at(0), 1, 3);
+        assert_eq!(run(&mut m, &c, 0, 10).1.len(), 1);
+
+        // Probes stop arriving. Long after the last one (more than three intervals) the old
+        // measurement says nothing about now: not "recovered", and nothing new.
+        assert_eq!(run(&mut m, &c, 11, 300).1, []);
+        assert!(m.degradation().is_some(), "the last report stands");
+    }
+
+    // ------------------------------------------------------------------ what the interface shows (T144)
+
+    #[test]
+    fn the_snapshot_lists_every_network_with_its_role_and_what_is_known_of_it() {
+        let c = Clock::new();
+        let mut m = monitor();
+        m.paths_changed(vec![wifi(1), cell(2)]);
+        let _ = tick(&mut m, c.at(0));
+        answer(&mut m, c.at(0), 1, 3);
+
+        let snap = m.snapshot(c.at(1));
+
+        assert_eq!(snap.paths.len(), 2);
+        let w = snap.paths.iter().find(|p| p.id == id(1)).unwrap();
+        assert_eq!(w.role, PathRole::Carrying);
+        assert_eq!(w.kind, PathKind::Wifi);
+        assert!(w.measured);
+        assert_eq!(w.band, Some(QualityBand::Good));
+        assert_eq!(w.rtt, Some(Duration::from_millis(40)));
+        assert_eq!(w.trace_ms, [Some(40.0), Some(40.0), Some(40.0)]);
+        let p = snap.paths.iter().find(|p| p.id == id(2)).unwrap();
+        assert_eq!(p.role, PathRole::Standby);
+        assert!(!p.measured, "never probed");
+        assert_eq!(p.band, None, "no band is claimed for what was not measured");
+        assert_eq!(p.rtt, None);
+        assert_eq!(p.loss, None);
+        assert!(p.trace_ms.is_empty());
+    }
+
+    #[test]
+    fn evidence_gone_stale_reads_as_unmeasured_in_the_snapshot_too() {
+        let c = Clock::new();
+        let mut m = monitor();
+        m.paths_changed(vec![wifi(1)]);
+        let _ = tick(&mut m, c.at(0));
+        answer(&mut m, c.at(0), 1, 3);
+        assert!(m.snapshot(c.at(5)).paths[0].measured);
+
+        let later = m.snapshot(c.at(500));
+
+        assert!(!later.paths[0].measured);
+        assert_eq!(later.paths[0].band, None);
+        assert_eq!(
+            later.paths[0].trace_ms.len(),
+            3,
+            "what was seen is still shown as history; it is only no longer called current"
+        );
+    }
+
+    #[test]
+    fn a_network_that_disappears_takes_its_history_with_it() {
+        let c = Clock::new();
+        let mut m = monitor();
+        m.paths_changed(vec![wifi(1), cell(2)]);
+        let _ = tick(&mut m, c.at(0));
+        answer(&mut m, c.at(0), 2, 3);
+        m.paths_changed(vec![wifi(1)]);
+        m.paths_changed(vec![wifi(1), cell(2)]);
+        let snap = m.snapshot(c.at(1));
+        let p = snap.paths.iter().find(|p| p.id == id(2)).unwrap();
+        assert!(p.trace_ms.is_empty(), "it came back as a new network");
+    }
+
+    #[test]
+    fn the_snapshot_carries_the_degradation_that_was_reported() {
+        let c = Clock::new();
+        let mut m = monitor();
+        m.paths_changed(vec![wifi(1)]);
+        let _ = tick(&mut m, c.at(0));
+        lose(&mut m, c.at(0), 1, 3);
+        assert_eq!(m.snapshot(c.at(1)).degradation, None);
+        let _ = run(&mut m, &c, 0, 10);
+        assert_eq!(
+            m.snapshot(c.at(10)).degradation.map(|d| d.staying),
+            Some(NoMove::OnlyPath)
+        );
+    }
+
+    #[test]
+    fn a_lost_probe_is_a_gap_in_the_trace_and_counts_in_the_loss() {
+        let c = Clock::new();
+        let mut m = monitor();
+        m.paths_changed(vec![wifi(1)]);
+        let _ = tick(&mut m, c.at(0));
+        answer(&mut m, c.at(0), 1, 1);
+        lose(&mut m, c.at(0), 1, 2);
+        let snap = m.snapshot(c.at(1));
+        assert_eq!(snap.paths[0].trace_ms, [Some(40.0), None, None]);
+        assert!(snap.paths[0].loss.unwrap() > 0.2);
     }
 }

@@ -22,7 +22,8 @@ use std::time::Duration;
 use dnet_core::ids::ProfileId;
 use dnet_ipc::client::{check_version, ClientError, Connection, Reply, VersionCheck};
 use dnet_ipc::protocol::{
-    decode_request, decode_state_snapshot, encode_request, ConnectionStatus, Request, StateSnapshot,
+    decode_request, decode_state_snapshot, encode_request, ConnectionStatus, FeedImport,
+    NewEndpoint, Request, StateSnapshot,
 };
 use dnet_ipc::version::{self, ServiceVersion};
 use dnet_ipc::wire::decode_event_view;
@@ -30,8 +31,8 @@ use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::Instant;
 
-use crate::cli::{Command, Invocation, USAGE};
-use crate::render;
+use crate::cli::{Command, CredentialsSource, Invocation, USAGE};
+use crate::{input, render};
 
 pub mod exit {
     pub const OK: i32 = 0;
@@ -256,6 +257,44 @@ pub async fn run<C: Connector>(
             }
             Some(request)
         }
+        Command::AddEndpoint {
+            label,
+            host,
+            source,
+        } => match add_endpoint_request(label, host, source) {
+            Ok(request) => Some(request),
+            Err(why) => {
+                sink.err(&format!("dnetctl: {}", render::plain(&why)));
+                return exit::USAGE;
+            }
+        },
+        Command::RemoveEndpoint { endpoint } => match by_id("RemoveEndpoint", endpoint, None) {
+            Ok(request) => Some(request),
+            Err(why) => {
+                sink.err(&format!("dnetctl: {}", render::plain(&why)));
+                return exit::USAGE;
+            }
+        },
+        Command::SetEndpointEnabled { endpoint, enabled } => {
+            match by_id("SetEndpointEnabled", endpoint, Some(*enabled)) {
+                Ok(request) => Some(request),
+                Err(why) => {
+                    sink.err(&format!("dnetctl: {}", render::plain(&why)));
+                    return exit::USAGE;
+                }
+            }
+        }
+        Command::EncryptedDns { block } => Some(Request::SetEncryptedDnsHandling { block: *block }),
+        Command::CheckUpdates => Some(Request::FetchFeed),
+        Command::ImportFeed { keys, feed } => {
+            match import_request(keys.as_deref(), feed.as_deref()) {
+                Ok(request) => Some(request),
+                Err(why) => {
+                    sink.err(&format!("dnetctl: {}", render::plain(&why)));
+                    return exit::USAGE;
+                }
+            }
+        }
         _ => None,
     };
 
@@ -279,6 +318,8 @@ pub async fn run<C: Connector>(
         Command::Endpoints => {
             list(&mut connection, Request::ListEndpoints, &invocation, sink).await
         }
+        Command::Paths => paths(&mut connection, invocation.json, sink).await,
+        Command::Stats => stats(&mut connection, invocation.json, sink).await,
         Command::Connect { wait, .. } => {
             let request = request.expect("built above for a connect");
             connect(&mut connection, request, wait, &invocation, sink).await
@@ -287,6 +328,178 @@ pub async fn run<C: Connector>(
         Command::Events { follow } => {
             events(&mut connection, follow, invocation.json, sink, interrupt).await
         }
+        Command::AddEndpoint { ref source, .. } => {
+            let request = request.expect("built above for an add");
+            let file = matches!(source, CredentialsSource::File(_));
+            change(&mut connection, &request, &invocation, sink, |reply| {
+                let id = reply.get("endpoint").and_then(Value::as_str)?;
+                let mut text = format!(
+                    "Endpoint added ({}). Run 'dnetctl endpoints' to see it.",
+                    render::plain(id)
+                );
+                if file {
+                    text.push_str(
+                        "\nThe file you gave still holds the keys in plain text; delete it now.",
+                    );
+                }
+                Some(text)
+            })
+            .await
+        }
+        Command::RemoveEndpoint { .. } => {
+            let request = request.expect("built above for a removal");
+            change(&mut connection, &request, &invocation, sink, |_| {
+                Some("Endpoint removed, and its credentials forgotten.".to_string())
+            })
+            .await
+        }
+        Command::SetEndpointEnabled { enabled, .. } => {
+            let request = request.expect("built above for an enable or disable");
+            change(&mut connection, &request, &invocation, sink, |_| {
+                Some(if enabled {
+                    "Endpoint enabled.".to_string()
+                } else {
+                    "Endpoint disabled: it is kept but will not be used.".to_string()
+                })
+            })
+            .await
+        }
+        Command::CheckUpdates => {
+            let request = request.expect("built above for a check");
+            change(&mut connection, &request, &invocation, sink, |reply| {
+                if reply.get("started") != Some(&Value::Bool(true)) {
+                    return None;
+                }
+                let how = match reply.get("route")?.as_str()? {
+                    "tunnel" => "through your connection",
+                    "physical" => {
+                        "directly over your network, because you asked while disconnected"
+                    }
+                    _ => return None,
+                };
+                Some(format!(
+                    "Checking for updated connection methods {how}. The result shows in 'dnetctl events'."
+                ))
+            })
+            .await
+        }
+        Command::ImportFeed { .. } => {
+            let request = request.expect("built above for an import");
+            change(&mut connection, &request, &invocation, sink, |reply| {
+                if reply.get("imported") != Some(&Value::Bool(true)) {
+                    return None;
+                }
+                let changes = reply.get("changes")?.as_array()?;
+                if changes.is_empty() {
+                    return Some("Nothing changed: the service already had these.".to_string());
+                }
+                let sentences: Option<Vec<String>> = changes
+                    .iter()
+                    .map(|c| c.as_str().map(change_sentence))
+                    .collect();
+                Some(sentences?.join(
+                    "
+",
+                ))
+            })
+            .await
+        }
+        Command::EncryptedDns { block } => {
+            let request = request.expect("built above for the encrypted-DNS choice");
+            change(&mut connection, &request, &invocation, sink, |reply| {
+                if block {
+                    return Some(
+                        "Encrypted name lookups by programs are blocked while connected, so your \
+                         rules for sites apply to them."
+                            .to_string(),
+                    );
+                }
+                // The service must say what allowing costs, and the person must be shown it. A
+                // reply that does not is not one to act on.
+                let consequence = reply.get("consequence").and_then(Value::as_str)?;
+                Some(format!(
+                    "Encrypted name lookups by programs are no longer blocked.\n{}",
+                    render::plain(consequence)
+                ))
+            })
+            .await
+        }
+    }
+}
+
+/// The request that hands the service signed documents from files. Nothing is interpreted here: the
+/// service checks the signatures, and a file that is not a signed document is refused there.
+fn import_request(keys: Option<&str>, feed: Option<&str>) -> Result<Request, String> {
+    let keys = keys.map(input::read_document).transpose()?;
+    let feed = feed.map(input::read_document).transpose()?;
+    FeedImport::new(keys, feed)
+        .map(Request::ImportFeed)
+        .map_err(|e| e.to_string())
+}
+
+/// The sentence for one change an import made.
+fn change_sentence(name: &str) -> String {
+    match name {
+        "Updated" => "Connection method definitions updated. They apply from the next connection."
+            .to_string(),
+        "Evicted" => "The new keys no longer include the key that signed the earlier update, so the                       built-in definitions are back in use."
+            .to_string(),
+        "OutOfDate" => "The definitions in use are out of date.".to_string(),
+        "Discarded" => "A saved update could not be checked again and was set aside.".to_string(),
+        other => format!("A change this program does not know ({}).", render::plain(other)),
+    }
+}
+
+/// The request for a new endpoint, from what was typed and what the credentials file holds. The
+/// service's own checks, applied here, so a mistake is a usage error that sends nothing.
+fn add_endpoint_request(
+    label: &str,
+    host: &str,
+    source: &CredentialsSource,
+) -> Result<Request, String> {
+    let bytes = input::read_bytes(source)?;
+    let credentials = input::parse(&bytes)?;
+    NewEndpoint::new(label, host, credentials)
+        .map(|new| Request::AddEndpoint(Box::new(new)))
+        .map_err(|e| e.to_string())
+}
+
+/// A request that names one endpoint, checked by the service's own grammar for an id.
+fn by_id(name: &str, endpoint: &str, enabled: Option<bool>) -> Result<Request, String> {
+    let mut wire = serde_json::json!({ "request": name, "endpoint": endpoint });
+    if let Some(enabled) = enabled {
+        wire["enabled"] = Value::Bool(enabled);
+    }
+    decode_request(&wire.to_string()).map_err(|e| e.to_string())
+}
+
+/// Ask for a configuration change and say what came of it. `done` makes the sentence for a reply
+/// that is what was promised; `None` means the reply was not, which is reported as unexpected rather
+/// than as success.
+async fn change<S: AsyncRead + AsyncWrite + Unpin>(
+    connection: &mut Connection<S>,
+    request: &Request,
+    invocation: &Invocation,
+    sink: &mut dyn Sink,
+    done: impl FnOnce(&Value) -> Option<String>,
+) -> i32 {
+    match ask(connection, request).await {
+        Err(e) => problem(sink, &e),
+        Ok(Answer::Refused(r)) => refusal(sink, &r),
+        Ok(Answer::Done(value)) => match done(&value) {
+            None => problem(
+                sink,
+                &ClientError::Malformed("the reply is not what was promised".to_string()),
+            ),
+            Some(text) => {
+                sink.out(&if invocation.json {
+                    pretty(&value)
+                } else {
+                    text
+                });
+                exit::OK
+            }
+        },
     }
 }
 
@@ -309,6 +522,81 @@ async fn status<S: AsyncRead + AsyncWrite + Unpin>(
                     exit::OK
                 }
                 Err(e) => problem(sink, &e),
+            }
+        }
+    }
+}
+
+/// What a refusal of `GetPaths` or `GetStats` means when the service simply does not know the request:
+/// it is older than this program, and cannot say. That is not an empty answer, and is not shown as one.
+fn too_old(refusal: &dnet_ipc::client::Refusal) -> bool {
+    refusal.code == "InvalidRequest" && refusal.detail.contains("unknown request")
+}
+
+async fn paths<S: AsyncRead + AsyncWrite + Unpin>(
+    connection: &mut Connection<S>,
+    json: bool,
+    sink: &mut dyn Sink,
+) -> i32 {
+    match ask(connection, &Request::GetPaths).await {
+        Err(e) => problem(sink, &e),
+        Ok(Answer::Refused(r)) if too_old(&r) => {
+            sink.err("dnetctl: this service is older than dnetctl and cannot report the networks; update the service.");
+            exit::REFUSED
+        }
+        Ok(Answer::Refused(r)) => refusal(sink, &r),
+        Ok(Answer::Done(value)) => {
+            if json {
+                sink.out(&pretty(&value));
+                return exit::OK;
+            }
+            match dnet_ipc::netview::decode_paths(&value.to_string()) {
+                Ok(reply) => {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+                    sink.out(&render::paths(&reply, now));
+                    exit::OK
+                }
+                Err(_) => problem(
+                    sink,
+                    &ClientError::Malformed(
+                        "the networks are not in a form this client understands".to_string(),
+                    ),
+                ),
+            }
+        }
+    }
+}
+
+async fn stats<S: AsyncRead + AsyncWrite + Unpin>(
+    connection: &mut Connection<S>,
+    json: bool,
+    sink: &mut dyn Sink,
+) -> i32 {
+    match ask(connection, &Request::GetStats).await {
+        Err(e) => problem(sink, &e),
+        Ok(Answer::Refused(r)) if too_old(&r) => {
+            sink.err("dnetctl: this service is older than dnetctl and cannot report counts; update the service.");
+            exit::REFUSED
+        }
+        Ok(Answer::Refused(r)) => refusal(sink, &r),
+        Ok(Answer::Done(value)) => {
+            if json {
+                sink.out(&pretty(&value));
+                return exit::OK;
+            }
+            match dnet_ipc::netview::decode_stats(&value.to_string()) {
+                Ok(reply) => {
+                    sink.out(&render::stats(&reply));
+                    exit::OK
+                }
+                Err(_) => problem(
+                    sink,
+                    &ClientError::Malformed(
+                        "the counts are not in a form this client understands".to_string(),
+                    ),
+                ),
             }
         }
     }

@@ -41,6 +41,11 @@ pub enum DomainError {
     #[error("a profile set must contain at least one TCP-carrier profile")]
     NoTcpFallback,
 
+    /// A domain pattern that could not be a DNS name: empty, with a space or control character, an
+    /// empty or over-long label, or outside ASCII (an internationalised name is given as `xn--`).
+    #[error("{0:?} is not a domain name a rule can match")]
+    InvalidDomainPattern(String),
+
     /// Two routing rules shared a precedence value (FR-022).
     #[error("routing rules share precedence {0}; precedence must be unique")]
     PrecedenceCollision(u32),
@@ -59,6 +64,27 @@ pub enum DomainError {
     /// or bypassed.
     #[error("a DnsPort matcher must use the Capture action")]
     DnsPortRequiresCapture,
+
+    /// Port 853 (encrypted DNS) is only ever refused, never tunnelled or bypassed (T070).
+    #[error("an EncryptedDnsPort matcher must use the Reject action")]
+    EncryptedDnsPortRequiresReject,
+
+    /// Only the product's own rules may refuse traffic; a person's rule routes it (T070).
+    #[error("only built-in rules may use the Reject action")]
+    RejectIsBuiltinOnly,
+
+    /// The person opted out of the encrypted-DNS block but some of it is still in the rule set (T070).
+    #[error("encrypted DNS is allowed but the rule set still blocks it")]
+    EncryptedDnsBlockLeftBehind,
+
+    /// A range of the person's lies inside the pool of placeholder addresses handed out for names
+    /// (T069). Nothing real lives there.
+    #[error("{0} is inside the range used for placeholder addresses; a rule there cannot match a real destination")]
+    RangeInsideFakeIpPool(String),
+
+    /// A person's rule would outrank the encrypted-DNS block and quietly undo it (T070).
+    #[error("rule precedence {0} outranks the built-in encrypted-DNS block; use {1} or higher")]
+    OutranksEncryptedDnsBlock(u32, u32),
 
     /// A rule set lost a built-in rule. Built-ins keep local resources, portal login, the
     /// endpoint route, and DNS capture working, so they cannot be deleted (data-model §4).

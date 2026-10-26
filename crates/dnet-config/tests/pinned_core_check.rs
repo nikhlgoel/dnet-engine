@@ -16,7 +16,7 @@ use dnet_config::hysteria2::{
     BbrProfile, Hysteria2ClientParams, Hysteria2Credentials, Hysteria2EndpointParams,
     Hysteria2Obfs, Hysteria2Settings, Hysteria2Transport,
 };
-use dnet_config::primary::{generate_primary_core_config, to_json, PrimaryCoreInput};
+use dnet_config::primary::{generate_primary_core_config, to_json, FakeIpHalf, PrimaryCoreInput};
 use dnet_config::reality::{
     RealityClientParams, RealityCredentials, RealityEndpointParams, RealityPublicKey,
     RealitySettings, RealityTransport, TargetDomain, UtlsFingerprint, VlessFlow,
@@ -24,7 +24,8 @@ use dnet_config::reality::{
 use dnet_config::secret::Secret;
 use dnet_config::tls::ServerTrust;
 use dnet_config::{ActiveEndpointBypass, PrimaryTransport};
-use dnet_core::builtin_rules::builtin_rules;
+use dnet_core::builtin_rules::builtin_rules_for;
+use dnet_core::doh_block::Policy;
 use dnet_core::endpoint::EndpointAddress;
 use dnet_core::ids::ProfileId;
 use dnet_core::profile::{
@@ -49,32 +50,39 @@ fn assert_accepted(
     transport: Option<PrimaryTransport<'_>>,
 ) {
     let addr = EndpointAddress::new(endpoint, port).unwrap();
-    let rules = builtin_rules(Some(&addr));
-    let config = generate_primary_core_config(PrimaryCoreInput {
-        active_profile: profile,
-        endpoint_bypass: &ActiveEndpointBypass::new(&addr),
-        rules: &rules,
-        amneziawg_adapter: Some("dnet-awg0"),
-        primary_transport: transport,
-    })
-    .unwrap();
+    // The full default set: it carries the encrypted-DNS block (`reject` routes and DNS rules, T070),
+    // so the real core's own parser is what vouches for them. Both halves of the FakeIP pools (T131).
+    for policy in [Policy::Block, Policy::Allow] {
+        let rules = builtin_rules_for(Some(&addr), policy);
+        for half in [FakeIpHalf::Low, FakeIpHalf::High] {
+            let config = generate_primary_core_config(PrimaryCoreInput {
+                active_profile: profile,
+                endpoint_bypass: &ActiveEndpointBypass::new(&addr),
+                rules: &rules,
+                amneziawg_adapter: Some("dnet-awg0"),
+                primary_transport: transport,
+                fakeip: half,
+            })
+            .unwrap();
 
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("primary-core.json");
-    std::fs::write(&path, to_json(&config)).unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("primary-core.json");
+            std::fs::write(&path, to_json(&config)).unwrap();
 
-    let out = Command::new(core)
-        .args(["check", "-c"])
-        .arg(&path)
-        .arg("--disable-color")
-        .output()
-        .expect("running the pinned core");
-    assert!(
-        out.status.success(),
-        "pinned core rejected the {label} config (endpoint {endpoint}):\n{}\n{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
+            let out = Command::new(core)
+                .args(["check", "-c"])
+                .arg(&path)
+                .arg("--disable-color")
+                .output()
+                .expect("running the pinned core");
+            assert!(
+                out.status.success(),
+                "pinned core rejected the {label} config (endpoint {endpoint}, {policy:?}, {half:?}):\n{}\n{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
 }
 
 #[test]
