@@ -103,14 +103,19 @@ pub fn capture_client_identity(handle: RawHandle) -> ClientIdentity {
     let pipe = HANDLE(handle);
 
     // SAFETY: `pipe` is a live named-pipe server handle owned by the caller for the
-    // duration of this call. Impersonation is reverted before returning on every path,
-    // and no await runs while it is in effect.
+    // duration of this call. Impersonation is reverted before returning on every path (or
+    // the process ends), and no await runs while it is in effect.
     unsafe {
         if ImpersonateNamedPipeClient(pipe).is_err() {
             return unauthenticated();
         }
         let captured = read_impersonated_identity();
-        let _ = RevertToSelf();
+        // A thread that cannot stop impersonating would run whatever the runtime schedules on it
+        // next as the client. There is no safe way to carry on, so the service stops instead (the
+        // documented response to a failed RevertToSelf).
+        if RevertToSelf().is_err() {
+            std::process::abort();
+        }
         captured.unwrap_or_else(unauthenticated)
     }
 }
@@ -149,7 +154,9 @@ unsafe fn token_user_sid(token: HANDLE) -> Option<String> {
         return None;
     }
 
-    let mut buffer = vec![0u8; needed as usize];
+    // u64 elements, so the buffer is aligned for the pointer inside `TOKEN_USER`; a byte buffer
+    // need not be, and reading the struct through a misaligned reference is undefined behaviour.
+    let mut buffer = vec![0u64; (needed as usize).div_ceil(8)];
     GetTokenInformation(
         token,
         TokenUser,

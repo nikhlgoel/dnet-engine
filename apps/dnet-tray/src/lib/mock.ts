@@ -11,6 +11,7 @@ import type {
   EndpointView,
   FailureCause,
   PathView,
+  ProfileView,
   RuleView,
   RulesView,
   Snapshot,
@@ -155,6 +156,10 @@ export interface MockOptions {
   endpoints?: EndpointView[];
   /** Pretend the person has already been through first run. */
   disclosed?: boolean;
+  /** Start with aggressive speed mode (Brutal) on for the Hysteria 2 method. */
+  brutalOn?: boolean;
+  /** Pretend this build has no list of server downloads, so setting a server up is unavailable. */
+  noServerDownloads?: boolean;
 }
 
 export interface MockController extends Bridge {
@@ -168,10 +173,10 @@ export interface MockController extends Bridge {
 }
 
 const BUILTIN_RULES: RuleView[] = [
-  { precedence: 1, action: 'Bypass', reliability: 'Deterministic', builtin: true },
-  { precedence: 2, action: 'Bypass', reliability: 'Deterministic', builtin: true },
-  { precedence: 3, action: 'Capture', reliability: 'Deterministic', builtin: true },
-  { precedence: 100, action: 'Reject', reliability: 'Deterministic', builtin: true },
+  { id: 'b0', kind: 'dns_port', value: '53', precedence: 0, action: 'Capture', reliability: 'Deterministic', builtin: true },
+  { id: 'b1', kind: 'ip_cidr', value: '10.0.0.0/8', precedence: 1, action: 'Bypass', reliability: 'Deterministic', builtin: true },
+  { id: 'b2', kind: 'ip_cidr', value: '192.168.0.0/16', precedence: 2, action: 'Bypass', reliability: 'Deterministic', builtin: true },
+  { id: 'b3', kind: 'encrypted_dns_port', value: '853', precedence: 100, action: 'Reject', reliability: 'Deterministic', builtin: true },
 ];
 
 export function createMockBridge(options: MockOptions = {}): MockController {
@@ -182,6 +187,12 @@ export function createMockBridge(options: MockOptions = {}): MockController {
     { id: 'e1', label: 'endpoint-1', address: '203.0.113.9:44443', enabled: true, health: 'Healthy' },
   ];
   let dns: EncryptedDnsSetting = { block: true, needsDisclosure: options.disclosed !== true };
+  let ownRules: RuleView[] = [];
+  let profiles: ProfileView[] = [
+    { id: 'awg-default', kind: 'AmneziaWg', tier: 'Tier2', brutal: false },
+    { id: 'hy2-default', kind: 'Hysteria2', tier: 'Tier2', brutal: options.brutalOn === true },
+    { id: 'reality-default', kind: 'VlessReality', tier: 'Tier2', brutal: false },
+  ];
   const snapshotListeners = new Set<(s: Snapshot) => void>();
   const activityListeners = new Set<(a: ActivityItem) => void>();
   let seq = 0;
@@ -266,6 +277,35 @@ export function createMockBridge(options: MockOptions = {}): MockController {
       endpoints = [...endpoints, { id, label: input.label, address: `${input.host}:44443`, enabled: true, health: 'Unknown' }];
       return { ok: true, id };
     },
+    async prepareServer(arch) {
+      if (options.noServerDownloads === true) {
+        return { ok: false, reason: 'setting up a server is not available in this build: it has no list of server downloads' };
+      }
+      return {
+        ok: true,
+        prepared: {
+          arch,
+          script: `#!/bin/sh\n# mock setup script for ${arch}\necho "DNET-BOOTSTRAP-REPORT {}"\n`,
+          ports: [
+            { protocol: 'udp', port: 51820 },
+            { protocol: 'udp', port: 44443 },
+            { protocol: 'tcp', port: 8443 },
+          ],
+          validForMinutes: 360,
+        },
+      };
+    },
+    async finishServer(input) {
+      const blocked = idleOnly();
+      if (blocked) return blocked;
+      if (!input.report.includes('DNET-BOOTSTRAP-REPORT')) {
+        return refuse('the result cannot be used: the server printed no bootstrap report');
+      }
+      if (endpoints.some((e) => e.label === input.label)) return refuse('an endpoint with that label already exists');
+      const id = `e${endpoints.length + 2}`;
+      endpoints = [...endpoints, { id, label: input.label, address: `${input.host}:44443`, enabled: true, health: 'Unknown' }];
+      return { ok: true, id };
+    },
     async removeEndpoint(id) {
       const blocked = idleOnly();
       if (blocked) return blocked;
@@ -281,8 +321,44 @@ export function createMockBridge(options: MockOptions = {}): MockController {
       return { ok: true };
     },
 
+    async profiles() {
+      return profiles.map((p) => ({ ...p }));
+    },
+    async setBrutal(profile, bandwidth) {
+      const blocked = idleOnly();
+      if (blocked) return blocked;
+      const target = profiles.find((p) => p.id === profile);
+      if (!target) return refuse('there is no connection method with that id');
+      if (target.kind !== 'Hysteria2') return refuse('Brutal congestion control applies only to the Hysteria 2 connection method');
+      if (bandwidth !== null && (bandwidth.up < 1 || bandwidth.down < 1)) return refuse('`up_mbps` must be a whole number of Mbit/s from 1 to 1000000');
+      profiles = profiles.map((p) => (p.id === profile ? { ...p, brutal: bandwidth !== null } : p));
+      return { ok: true };
+    },
+
     async rules(): Promise<RulesView> {
-      return { rules: BUILTIN_RULES.map((r) => ({ ...r })), encryptedDns: { ...dns } };
+      return { rules: [...BUILTIN_RULES, ...ownRules].map((r) => ({ ...r })), encryptedDns: { ...dns } };
+    },
+    async addRule(rule) {
+      const blocked = idleOnly();
+      if (blocked) return blocked;
+      if (rule.kind === 'ip_cidr' && !/^[0-9a-fA-F:.]+\/\d{1,3}$/.test(rule.value)) {
+        return refuse('`value` must be an address range such as 198.51.100.0/24');
+      }
+      if (rule.value.trim() === '') return refuse('`value` is not a pattern this kind of rule can match');
+      const precedence = Math.max(199, ...ownRules.map((r) => r.precedence)) + 1;
+      const id = `r${precedence}`;
+      ownRules = [
+        ...ownRules,
+        { id, kind: rule.kind, value: rule.value, precedence, action: rule.action === 'tunnel' ? 'Tunnel' : 'Bypass', reliability: 'Deterministic', builtin: false },
+      ];
+      return { ok: true, id };
+    },
+    async removeRule(id) {
+      const blocked = idleOnly();
+      if (blocked) return blocked;
+      if (!ownRules.some((r) => r.id === id)) return refuse('there is no rule with that id');
+      ownRules = ownRules.filter((r) => r.id !== id);
+      return { ok: true };
     },
     async setEncryptedDns(block) {
       const blocked = idleOnly();

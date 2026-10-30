@@ -81,9 +81,37 @@ pub struct CorePin {
     pub source: String,
 }
 
+/// The processor a server has. The cores are built for one; running the wrong one fails unreadably, so the
+/// script asks first and says so in words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerArch {
+    /// Intel and AMD (`uname -m` says `x86_64`).
+    Amd64,
+    /// Arm (`uname -m` says `aarch64`).
+    Arm64,
+}
+
+impl ServerArch {
+    /// The name release files use.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Amd64 => "amd64",
+            Self::Arm64 => "arm64",
+        }
+    }
+
+    fn machine(self) -> &'static str {
+        match self {
+            Self::Amd64 => "x86_64",
+            Self::Arm64 => "aarch64",
+        }
+    }
+}
+
 /// The two cores a server runs, matching the client's bundled versions (PR-12).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerCores {
+    pub arch: ServerArch,
     /// Serves Hysteria 2 and VLESS+REALITY.
     pub primary_core: CorePin,
     pub amneziawg: CorePin,
@@ -193,6 +221,11 @@ fn dns_name(field: &'static str, value: &str) -> Result<(), BootstrapError> {
 }
 
 impl CorePin {
+    /// Whether every value would be accepted into the script.
+    pub fn validate(&self, which: &'static str) -> Result<(), BootstrapError> {
+        self.check(which)
+    }
+
     fn check(&self, which: &'static str) -> Result<(), BootstrapError> {
         let name = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-';
         safe(which, &self.name, name)?;
@@ -244,6 +277,14 @@ BIN="$BASE/bin"
 STATE=/var/lib/dnet
 mkdir -p "$BIN" "$STATE/awg" "$STATE/primary"
 chmod 700 "$STATE" "$STATE/awg" "$STATE/primary"
+
+# ---- this must be the kind of machine the downloads are built for; say so before changing anything
+MACHINE=$(uname -m)
+if [ "$MACHINE" = "arm64" ]; then MACHINE=aarch64; fi
+if [ "$MACHINE" != "@@MACHINE@@" ]; then
+  echo "This server has a $MACHINE processor, but this script is for @@MACHINE@@ (@@ARCH@@). Go back to DNet Engine and choose the other kind of server." >&2
+  exit 3
+fi
 
 need() { command -v "$1" >/dev/null 2>&1; }
 ensure() {
@@ -342,7 +383,7 @@ REALITY_SHORT=$(clean < "$STATE/primary/short_id")
 if [ ! -s "$STATE/primary/server.json" ]; then
   cat > "$STATE/primary/server.json.new" <<CONFIG_EOF
 {
-  "log": { "level": "info", "timestamp": true },
+  "log": { "level": "warn", "timestamp": true },
   "inbounds": [
     {
       "type": "hysteria2",
@@ -451,6 +492,43 @@ fi
 NET_EOF
 chmod 0755 "$BIN/dnet-net-up"
 
+# ---- housekeeping: a free server has no one watching its disk, so nothing here may grow without bound.
+# Only logs and package downloads are touched, never a key, a certificate or the configuration.
+mkdir -p /etc/systemd/journald.conf.d
+cat > /etc/systemd/journald.conf.d/dnet.conf <<'JOURNAL_EOF'
+[Journal]
+SystemMaxUse=100M
+MaxRetentionSec=14day
+JOURNAL_EOF
+cat > "$BIN/dnet-housekeeping" <<'HOUSEKEEPING_EOF'
+#!/bin/sh
+journalctl --vacuum-size=100M >/dev/null 2>&1 || true
+journalctl --vacuum-time=14d >/dev/null 2>&1 || true
+if command -v apt-get >/dev/null 2>&1; then apt-get clean >/dev/null 2>&1 || true; fi
+if command -v dnf >/dev/null 2>&1; then dnf clean all >/dev/null 2>&1 || true; fi
+exit 0
+HOUSEKEEPING_EOF
+chmod 0755 "$BIN/dnet-housekeeping"
+cat > /etc/systemd/system/dnet-housekeeping.service <<'UNIT_EOF'
+[Unit]
+Description=DNet Engine endpoint: trim logs and package downloads
+[Service]
+Type=oneshot
+Nice=19
+ExecStart=/opt/dnet/bin/dnet-housekeeping
+UNIT_EOF
+cat > /etc/systemd/system/dnet-housekeeping.timer <<'UNIT_EOF'
+[Unit]
+Description=DNet Engine endpoint: weekly housekeeping
+[Timer]
+OnCalendar=weekly
+Persistent=true
+[Install]
+WantedBy=timers.target
+UNIT_EOF
+systemctl restart systemd-journald >/dev/null 2>&1 || true
+"$BIN/dnet-housekeeping"
+
 # ---- services
 cat > /etc/systemd/system/dnet-net.service <<'UNIT_EOF'
 [Unit]
@@ -490,6 +568,9 @@ WantedBy=multi-user.target
 UNIT_EOF
 systemctl daemon-reload
 systemctl enable --now dnet-net.service dnet-primary.service dnet-awg.service >/dev/null
+systemctl enable --now dnet-housekeeping.timer >/dev/null
+
+@@KEEPALIVE@@
 
 # ---- the report: public material, and the shared secrets the client has to hold
 AWG_PUB="$AWG_PUB" HY2_SPKI="$HY2_SPKI" HY2_AUTH="$HY2_AUTH" HY2_OBFS="$HY2_OBFS" CERT_ALG="$CERT_ALG" \
@@ -500,7 +581,8 @@ e = os.environ
 report = {
     "version": 1,
     "amneziawg": {"server_public_key_hex": e["AWG_PUB"], "listen_port": @@AWG_PORT@@,
-                  "client_address": "@@TUN_CLIENT@@", "prefix_len": @@TUN_PREFIX@@},
+                  "client_address": "@@TUN_CLIENT@@", "prefix_len": @@TUN_PREFIX@@,
+                  "client_public_key_hex": "@@CLIENT_PUB@@"},
     "hysteria2": {"server_port": @@HY2_PORT@@, "server_name": "@@HY2_SNI@@",
                   "spki_sha256_hex": e["HY2_SPKI"], "auth_password": e["HY2_AUTH"],
                   "obfs_password": e["HY2_OBFS"], "cert_key_algorithm": e["CERT_ALG"]},
@@ -548,11 +630,17 @@ pub fn script(plan: &BootstrapPlan) -> Result<String, BootstrapError> {
         ("H2", o.h2.to_string()),
         ("H3", o.h3.to_string()),
         ("H4", o.h4.to_string()),
+        ("MACHINE", plan.cores.arch.machine().to_owned()),
+        ("ARCH", plan.cores.arch.as_str().to_owned()),
         ("TUN_SERVER", TUNNEL_SERVER.to_string()),
         ("TUN_CLIENT", TUNNEL_CLIENT.to_string()),
         ("TUN_PREFIX", TUNNEL_PREFIX.to_string()),
     ];
-    let mut text = TEMPLATE.to_owned();
+    // The keepalive is the standalone one, without its interpreter line: it is tested by itself, and the
+    // same text is used here so the two cannot drift apart.
+    let keepalive = crate::keepalive::script(&crate::keepalive::KeepalivePlan::default());
+    let keepalive: String = keepalive.lines().skip(1).collect::<Vec<_>>().join("\n");
+    let mut text = TEMPLATE.replace("@@KEEPALIVE@@", &keepalive);
     for (name, value) in &fills {
         text = text.replace(&format!("@@{name}@@"), value);
     }
@@ -582,6 +670,8 @@ struct AwgWire {
     listen_port: u16,
     client_address: Ipv4Addr,
     prefix_len: u8,
+    /// The client key the server was given: ties this report to the script that made it.
+    client_public_key_hex: String,
 }
 
 // `Debug` is deliberately not derived on the wire types: they hold secrets.
@@ -651,6 +741,7 @@ pub struct BootstrapReport {
     awg_port: u16,
     awg_client_address: Ipv4Addr,
     awg_prefix_len: u8,
+    awg_client_public_hex: String,
     hy2_port: u16,
     hy2_server_name: String,
     hy2_spki: [u8; 32],
@@ -718,6 +809,9 @@ impl BootstrapReport {
         if a.listen_port == 0 || !(16..=30).contains(&a.prefix_len) {
             return Err(ReportError::Invalid("AmneziaWG address or port"));
         }
+        if !is_hex(&a.client_public_key_hex, 64..=64) {
+            return Err(ReportError::Invalid("AmneziaWG client key"));
+        }
 
         let h = wire.hysteria2;
         let algorithm = h.cert_key_algorithm.to_ascii_lowercase();
@@ -773,6 +867,7 @@ impl BootstrapReport {
             awg_port: a.listen_port,
             awg_client_address: a.client_address,
             awg_prefix_len: a.prefix_len,
+            awg_client_public_hex: a.client_public_key_hex,
             hy2_port: h.server_port,
             hy2_server_name: h.server_name,
             hy2_spki: spki,
@@ -807,6 +902,9 @@ impl BootstrapReport {
         }
         if self.awg_client_address != TUNNEL_CLIENT || self.awg_prefix_len != TUNNEL_PREFIX {
             return Err(ReportError::Mismatch("the tunnel address"));
+        }
+        if self.awg_client_public_hex != plan.awg_client_public_hex {
+            return Err(ReportError::Mismatch("the client key"));
         }
         if self.primary_sha256 != plan.cores.primary_core.sha256
             || self.primary_version != plan.cores.primary_core.version

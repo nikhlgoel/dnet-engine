@@ -29,33 +29,33 @@ use std::process::Command;
 use crate::pins::{sha256_hex, wintun_dll};
 
 /// A third-party Go program built from pinned source.
-struct GoSource {
+pub(crate) struct GoSource {
     /// Directory name under `vendor/`.
-    dest: &'static str,
-    repo: &'static str,
+    pub(crate) dest: &'static str,
+    pub(crate) repo: &'static str,
     /// Human-readable version, recorded in the build provenance file.
-    version: &'static str,
+    pub(crate) version: &'static str,
     /// Immutable commit SHA. A tag can be moved; a commit cannot.
-    commit: &'static str,
+    pub(crate) commit: &'static str,
     /// Package path to build, relative to the repository root.
-    package: &'static str,
+    pub(crate) package: &'static str,
     /// Output executable name.
-    binary: &'static str,
+    pub(crate) binary: &'static str,
     /// Go build tags. Empty means the upstream default.
     ///
     /// For the primary core we select only what the three v1 profiles need, which
     /// takes the binary from 78 MB to a fraction of it (ADR-0004, Finding 3).
     /// Notably `with_wireguard` is **absent**: AmneziaWG is served by a separate
     /// supervised process, so the primary core needs no WireGuard support at all.
-    tags: &'static str,
+    pub(crate) tags: &'static str,
     /// Source patches applied to a dependency before building.
-    patch: Option<&'static ModulePatch>,
+    pub(crate) patch: Option<&'static ModulePatch>,
 }
 
 /// A patch to one Go module dependency, applied through a `go mod edit -replace` onto a
 /// patched copy. The copy starts from the module cache, verified against the pinned
 /// source's `go.sum`.
-struct ModulePatch {
+pub(crate) struct ModulePatch {
     module: &'static str,
     /// The exact version the pinned source requires. A core bump that changes it fails
     /// loudly, so the patch is re-reviewed rather than silently applied to new code.
@@ -89,7 +89,7 @@ const TUN_DLL_LOADER_PATCH: ModulePatch = ModulePatch {
     test_package: "github.com/sagernet/sing-tun/internal/wintun",
 };
 
-const GO_SOURCES: &[GoSource] = &[
+pub(crate) const GO_SOURCES: &[GoSource] = &[
     GoSource {
         dest: "primary-core",
         repo: "https://github.com/SagerNet/sing-box",
@@ -552,7 +552,7 @@ fn copy_tree(from: &Path, to: &Path) -> Result<()> {
 }
 
 /// `remove_dir_all` fails on read-only files on Windows, so clear the flag first.
-fn remove_tree(dir: &Path) -> Result<()> {
+pub(crate) fn remove_tree(dir: &Path) -> Result<()> {
     if !dir.exists() {
         return Ok(());
     }
@@ -623,7 +623,7 @@ fn extract_zip(zip: &Path, into: &Path) -> Result<()> {
     }
 }
 
-fn require_tool(bin: &str, args: &[&str]) -> Result<()> {
+pub(crate) fn require_tool(bin: &str, args: &[&str]) -> Result<()> {
     Command::new(bin)
         .args(args)
         .output()
@@ -631,7 +631,7 @@ fn require_tool(bin: &str, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-fn run_cmd(bin: &str, args: &[&str], cwd: Option<&Path>) -> Result<()> {
+pub(crate) fn run_cmd(bin: &str, args: &[&str], cwd: Option<&Path>) -> Result<()> {
     let mut cmd = Command::new(bin);
     cmd.args(args);
     if let Some(dir) = cwd {
@@ -646,7 +646,7 @@ fn run_cmd(bin: &str, args: &[&str], cwd: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-fn capture(bin: &str, args: &[&str], cwd: Option<&Path>) -> Result<String> {
+pub(crate) fn capture(bin: &str, args: &[&str], cwd: Option<&Path>) -> Result<String> {
     let mut cmd = Command::new(bin);
     cmd.args(args);
     if let Some(dir) = cwd {

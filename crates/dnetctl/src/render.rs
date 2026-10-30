@@ -197,6 +197,49 @@ pub fn profiles(reply: &Value) -> Result<String, String> {
     ))
 }
 
+/// The `ListRules` answer as a table, in the order the rules apply.
+pub fn rules(reply: &Value) -> Result<String, String> {
+    let items = list(reply, "rules")?;
+    let mut rows: Vec<(u64, Vec<String>)> = Vec::with_capacity(items.len());
+    for r in items {
+        let precedence = r
+            .get("precedence")
+            .and_then(Value::as_u64)
+            .ok_or("a rule has no precedence")?;
+        let value = cell(r, "value");
+        let what = match r.get("kind").and_then(Value::as_str) {
+            Some("domain") => value,
+            Some("domain_suffix") => format!("*.{value}"),
+            Some("ip_cidr") => value,
+            Some("application") => format!("program {value}"),
+            Some("dns_port") => "port 53".to_owned(),
+            Some("encrypted_dns_port") => format!("port {value}"),
+            _ => "?".to_owned(),
+        };
+        let builtin = r.get("builtin").and_then(Value::as_bool) == Some(true);
+        rows.push((
+            precedence,
+            vec![
+                precedence.to_string(),
+                what,
+                cell(r, "action"),
+                cell(r, "reliability"),
+                if builtin {
+                    "built-in".to_owned()
+                } else {
+                    cell(r, "id")
+                },
+            ],
+        ));
+    }
+    rows.sort_by_key(|(p, _)| *p);
+    let rows: Vec<Vec<String>> = rows.into_iter().map(|(_, row)| row).collect();
+    Ok(table(
+        &["ORDER", "MATCHES", "ACTION", "RELIABILITY", "RULE"],
+        &rows,
+    ))
+}
+
 /// The `ListEndpoints` answer as a table, or a sentence if there are none.
 pub fn endpoints(reply: &Value) -> Result<String, String> {
     let items = list(reply, "endpoints")?;

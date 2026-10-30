@@ -86,6 +86,52 @@ pub fn builtin_rules_for(
     rules
 }
 
+/// The rule set a tunnel to `endpoint` is generated from: `rules` (the set held while disconnected) plus
+/// the built-in bypass of the active endpoint, which mirrors the host route (R4, CC-05, data-model §4).
+///
+/// The endpoint bypass takes precedence 1, right after DNS capture, as [`builtin_rules`] places it; the
+/// other built-in bypasses move down by one to make room, keeping their ids and their order. Nothing at
+/// or beyond `doh_block::FIRST_PRECEDENCE` moves, so the encrypted-DNS block and every person's rule keep
+/// their numbers. The result is checked as every rule set is; a set that already bypasses this endpoint
+/// is returned as it is.
+pub fn with_active_endpoint(
+    rules: &[RoutingRule],
+    endpoint: &EndpointAddress,
+) -> Result<Vec<RoutingRule>, DomainError> {
+    let matcher = endpoint_matcher(endpoint);
+    if rules
+        .iter()
+        .any(|r| r.is_builtin() && r.action() == RuleAction::Bypass && r.matcher() == &matcher)
+    {
+        return Ok(rules.to_vec());
+    }
+    let first_after_bypasses = crate::doh_block::FIRST_PRECEDENCE;
+    let mut out: Vec<RoutingRule> = rules
+        .iter()
+        .map(|r| {
+            let moves = r.is_builtin()
+                && !r.is_dns_capture()
+                && (1..first_after_bypasses).contains(&r.precedence());
+            if moves {
+                r.renumbered(r.precedence() + 1)
+            } else {
+                r.clone()
+            }
+        })
+        .collect();
+    if out.iter().any(|r| {
+        r.is_builtin() && r.action() == RuleAction::Bypass && r.precedence() >= first_after_bypasses
+    }) {
+        // The last bypass was pushed onto the block's first number: the layout no longer fits.
+        return Err(DomainError::PrecedenceCollision(first_after_bypasses));
+    }
+    out.push(RoutingRule::builtin(matcher, RuleAction::Bypass, 1)?);
+    crate::rule::validate_rule_set(&out)?;
+    crate::rule::validate_dns_leak_protection(&out)?;
+    validate_builtin_rules_present(&out, Some(endpoint))?;
+    Ok(out)
+}
+
 /// A human-readable name for a built-in rule, for errors.
 fn describe(rule: &RoutingRule) -> String {
     match rule.matcher() {
@@ -303,5 +349,89 @@ mod tests {
         let disconnected = builtin_rules(None);
         assert_eq!(validate_builtin_rules_present(&disconnected, None), Ok(()));
         assert!(validate_builtin_rules_present(&disconnected, Some(&addr)).is_err());
+    }
+
+    // ---------------------------------------------------------------- the endpoint at connect time
+
+    fn connected_set() -> (Vec<RoutingRule>, EndpointAddress) {
+        let disconnected = builtin_rules_for(None, crate::doh_block::Policy::Block);
+        let endpoint = EndpointAddress::new("203.0.113.10", 44443).unwrap();
+        (
+            with_active_endpoint(&disconnected, &endpoint).unwrap(),
+            endpoint,
+        )
+    }
+
+    /// The rule set a tunnel is generated from must carry the endpoint bypass that mirrors the host
+    /// route (data-model §4, CC-05), right after DNS capture and ahead of everything else.
+    #[test]
+    fn a_connected_set_bypasses_the_endpoint_right_after_dns_capture() {
+        let (rules, endpoint) = connected_set();
+        let mut sorted: Vec<&RoutingRule> = rules.iter().collect();
+        sorted.sort_by_key(|r| r.precedence());
+        assert!(sorted[0].is_dns_capture());
+        assert_eq!(sorted[1].matcher(), &cidr("203.0.113.10/32"));
+        assert_eq!(sorted[1].action(), RuleAction::Bypass);
+        assert!(sorted[1].is_builtin());
+        assert_eq!(
+            validate_builtin_rules_present(&rules, Some(&endpoint)),
+            Ok(())
+        );
+        assert_eq!(validate_rule_set(&rules), Ok(()));
+        assert_eq!(validate_dns_leak_protection(&rules), Ok(()));
+    }
+
+    /// Nothing else is lost, reordered or renamed: the other rules keep their ids and their order.
+    #[test]
+    fn adding_the_endpoint_keeps_every_other_rule_and_its_order() {
+        let disconnected = builtin_rules_for(None, crate::doh_block::Policy::Block);
+        let endpoint = EndpointAddress::new("203.0.113.10", 44443).unwrap();
+        let rules = with_active_endpoint(&disconnected, &endpoint).unwrap();
+        assert_eq!(rules.len(), disconnected.len() + 1);
+        let order = |set: &[RoutingRule]| {
+            let mut v: Vec<&RoutingRule> = set.iter().collect();
+            v.sort_by_key(|r| r.precedence());
+            v.into_iter().map(RoutingRule::id).collect::<Vec<_>>()
+        };
+        let before = order(&disconnected);
+        let after: Vec<_> = order(&rules)
+            .into_iter()
+            .filter(|id| disconnected.iter().any(|r| r.id() == *id))
+            .collect();
+        assert_eq!(before, after);
+        // The encrypted-DNS block stays where it was, ahead of every user rule.
+        let block_before: Vec<u32> = disconnected
+            .iter()
+            .filter(|r| r.action() == RuleAction::Reject)
+            .map(RoutingRule::precedence)
+            .collect();
+        let block_after: Vec<u32> = rules
+            .iter()
+            .filter(|r| r.action() == RuleAction::Reject)
+            .map(RoutingRule::precedence)
+            .collect();
+        assert_eq!(block_before, block_after);
+    }
+
+    #[test]
+    fn adding_the_same_endpoint_twice_changes_nothing() {
+        let (rules, endpoint) = connected_set();
+        assert_eq!(with_active_endpoint(&rules, &endpoint).unwrap(), rules);
+    }
+
+    /// A person's rule is never renumbered: only the built-in bypasses move to make room.
+    #[test]
+    fn a_users_rule_keeps_its_precedence() {
+        let mut disconnected = builtin_rules_for(None, crate::doh_block::Policy::Block);
+        let mine = RoutingRule::user(
+            RuleMatcher::Domain("example.com".into()),
+            RuleAction::Tunnel,
+            crate::doh_block::USER_RULES_START,
+        )
+        .unwrap();
+        disconnected.push(mine.clone());
+        let endpoint = EndpointAddress::new("203.0.113.10", 44443).unwrap();
+        let rules = with_active_endpoint(&disconnected, &endpoint).unwrap();
+        assert!(rules.contains(&mine));
     }
 }

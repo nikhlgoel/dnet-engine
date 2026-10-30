@@ -90,6 +90,14 @@ impl<L: Link> Bridge<L> {
         }
     }
 
+    pub async fn profiles(&self) -> Result<Value, String> {
+        match self.link.call(Request::ListProfiles).await {
+            Err(error) => Err(error.to_string()),
+            Ok(Reply::Refused(refusal)) => Err(refusal_text(&refusal.detail)),
+            Ok(Reply::Done(value)) => lists::profiles(&value),
+        }
+    }
+
     pub async fn rules(&self) -> Result<Value, String> {
         match self.link.call(Request::ListRules).await {
             Err(error) => Err(error.to_string()),
@@ -149,6 +157,117 @@ impl<L: Link> Bridge<L> {
         if let Some(enabled) = enabled {
             wire["enabled"] = Value::Bool(enabled);
         }
+        let request = match decode_request(&wire.to_string()) {
+            Ok(request) => request,
+            Err(why) => return refused(&why.to_string(), "Refused"),
+        };
+        from_reply(self.link.call(request).await, |reply| {
+            if reply.get("applied").and_then(Value::as_bool) == Some(true) {
+                Ok(json!({}))
+            } else {
+                Err("The service did not say that the change was made.".to_owned())
+            }
+        })
+    }
+
+    // ------------------------------------------------------------------ the person's own server (T150)
+
+    /// Begin setting up a server: the script to run on it and the ports to open. `arch` is `amd64` or
+    /// `arm64`. The reply is read as untrusted input; what is not as promised is never shown.
+    pub async fn prepare_server(&self, arch: &str) -> Value {
+        let wire = json!({ "request": "PrepareServer", "arch": arch });
+        let request = match decode_request(&wire.to_string()) {
+            Ok(request) => request,
+            Err(why) => return refused(&why.to_string(), "Refused"),
+        };
+        from_reply(self.link.call(request).await, |reply| {
+            let prepared = dnet_ipc::server_setup::decode_prepared(&reply.to_string())
+                .map_err(|_| "The service's answer was not what was expected.".to_owned())?;
+            Ok(json!({
+                "arch": prepared.arch.as_str(),
+                "script": prepared.script,
+                "ports": prepared.ports.iter()
+                    .map(|p| json!({ "protocol": p.protocol, "port": p.port }))
+                    .collect::<Vec<_>>(),
+                "validForMinutes": prepared.valid_for_s / 60,
+            }))
+        })
+    }
+
+    /// Finish it: `report` is the text the server printed, pasted back. Checked by the service's own
+    /// grammar before anything is sent; the reply names the new server.
+    pub async fn finish_server(&self, label: &str, host: &str, report: &str) -> Value {
+        let wire = json!({
+            "request": "FinishServer", "label": label, "host": host, "report": report,
+        });
+        let request = match decode_request(&wire.to_string()) {
+            Ok(request) => request,
+            Err(why) => return refused(&why.to_string(), "Refused"),
+        };
+        from_reply(self.link.call(request).await, |reply| {
+            let id = reply
+                .get("endpoint")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "The service added the server but did not say which.".to_owned())?;
+            Ok(json!({ "id": crate::text::plain(id, 64) }))
+        })
+    }
+
+    // ------------------------------------------------------------------ rules (T108)
+
+    /// Add a rule: `kind` is `domain`, `domain_suffix`, `ip_cidr` or `application`; `action` is `tunnel` or
+    /// `bypass`. Checked by the service's own grammar before anything is sent; the reply names the new rule.
+    pub async fn add_rule(&self, kind: &str, value: &str, action: &str) -> Value {
+        let wire = json!({ "request": "AddRule", "kind": kind, "value": value, "action": action });
+        let request = match decode_request(&wire.to_string()) {
+            Ok(request) => request,
+            Err(why) => return refused(&why.to_string(), "Refused"),
+        };
+        from_reply(self.link.call(request).await, |reply| {
+            let id = reply
+                .get("rule")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "The service added the rule but did not say which.".to_owned())?;
+            Ok(json!({ "id": crate::text::plain(id, 64) }))
+        })
+    }
+
+    pub async fn remove_rule(&self, id: &str) -> Value {
+        let wire = json!({ "request": "RemoveRule", "rule": id });
+        let request = match decode_request(&wire.to_string()) {
+            Ok(request) => request,
+            Err(why) => return refused(&why.to_string(), "Refused"),
+        };
+        from_reply(self.link.call(request).await, |reply| {
+            if reply.get("applied").and_then(Value::as_bool) == Some(true) {
+                Ok(json!({}))
+            } else {
+                Err("The service did not say that the change was made.".to_owned())
+            }
+        })
+    }
+
+    // ------------------------------------------------------------------ Brutal (T105)
+
+    /// Turn Brutal on for `profile` with `(up, down)` Mbit/s, or off with `None`. `warning_revision` is the
+    /// revision of the warning the window showed and the person accepted; the service records it only if it
+    /// is the one in force. Checked by the service's own grammar before anything is sent.
+    pub async fn set_brutal(
+        &self,
+        profile: &str,
+        bandwidth: Option<(u32, u32)>,
+        warning_revision: u32,
+    ) -> Value {
+        let wire = match bandwidth {
+            Some((up, down)) => json!({
+                "request": "EnableBrutal",
+                "profile": profile,
+                "up_mbps": up,
+                "down_mbps": down,
+                "warning_revision": warning_revision,
+            }),
+            None => json!({ "request": "DisableBrutal", "profile": profile }),
+        };
         let request = match decode_request(&wire.to_string()) {
             Ok(request) => request,
             Err(why) => return refused(&why.to_string(), "Refused"),

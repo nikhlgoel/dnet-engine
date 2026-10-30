@@ -1,0 +1,7 @@
+# T114 — winget version manifest, rendered by .github/workflows/release.yml (${VERSION} is replaced).
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.version.1.9.0.schema.json
+PackageIdentifier: DNetEngine.DNetEngine
+PackageVersion: ${VERSION}
+DefaultLocale: en-US
+ManifestType: version
+ManifestVersion: 1.9.0

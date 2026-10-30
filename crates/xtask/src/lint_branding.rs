@@ -70,7 +70,7 @@ const ALLOWED: &[&str] = &[
 
 const LINTED_EXTENSIONS: &[&str] = &[
     "rs", "ts", "tsx", "js", "svelte", "html", "css", "json", "toml", "yml", "yaml", "md", "wxs",
-    "nsi", "rc", "manifest",
+    "nsi", "nsh", "rc", "manifest",
 ];
 
 pub fn run(repo_root: &Path) -> Result<()> {

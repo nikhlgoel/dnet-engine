@@ -6,15 +6,18 @@
  * Two implementations exist: `tauriBridge` (the real one) and `mockBridge` (development, tests, and the
  * design preview), and the components cannot tell them apart.
  */
-import type { ActivityItem, EncryptedDnsSetting, EndpointView, RulesView, Snapshot } from './model';
+import type { ActivityItem, EncryptedDnsSetting, EndpointView, ProfileView, RulesView, Snapshot } from './model';
 
-export type { EncryptedDnsSetting, RulesView };
+export type { EncryptedDnsSetting, ProfileView, RulesView };
 
 export type Unsubscribe = () => void;
 
 /** What the service has in this build. A feature it lacks is shown as unavailable, never faked. */
 export interface Capabilities {
-  /** Setting up a server in the person's cloud account (T093 and the provider; not built). */
+  /**
+   * Creating a server through the provider's own programming interface (not built; no cloud credential is
+   * ever asked for). The guided setup, where the person works in the provider's pages, does not depend on it.
+   */
   provisioning: boolean;
   /** Checking for updated connection methods (T066b). False when the build has no trust anchor. */
   updates: boolean;
@@ -32,6 +35,32 @@ export interface NewEndpointInput {
   credentials: string;
 }
 
+/** The kind of processor a server has. */
+export type ServerKind = 'amd64' | 'arm64';
+
+/** What the service made for a new setup: the script to run on the server and the ports to open. */
+export interface PreparedServer {
+  arch: ServerKind;
+  script: string;
+  ports: { protocol: string; port: number }[];
+  /** How long the service keeps the keys waiting for the result. */
+  validForMinutes: number;
+}
+
+export interface FinishServerInput {
+  label: string;
+  host: string;
+  /** What the server printed, pasted. It holds keys; it goes straight to the Rust side and is not kept here. */
+  report: string;
+}
+
+/** A rule a person can add: by site, by a site and its subdomains, or by address range. */
+export interface NewRuleInput {
+  kind: 'domain' | 'domain_suffix' | 'ip_cidr';
+  value: string;
+  action: 'tunnel' | 'bypass';
+}
+
 export interface Bridge {
   readonly capabilities: Capabilities;
 
@@ -46,7 +75,22 @@ export interface Bridge {
   removeEndpoint(id: string): Promise<Outcome>;
   setEndpointEnabled(id: string, enabled: boolean): Promise<Outcome>;
 
+  /** Begin setting up the person's own server. The same script comes back until it is used or expires. */
+  prepareServer(arch: ServerKind): Promise<Outcome & { prepared?: PreparedServer }>;
+  /** Finish it with what the server printed. The service checks it belongs to this setup. */
+  finishServer(input: FinishServerInput): Promise<Outcome & { id?: string }>;
+
+  profiles(): Promise<ProfileView[]>;
+  /**
+   * Turn aggressive speed mode (Brutal) on for a Hysteria 2 method with both speeds in Mbit/s, or off with
+   * `null`. Call it to turn it on only after the person accepted `brutalWarning`; its revision is sent with it.
+   */
+  setBrutal(profile: string, bandwidth: { up: number; down: number } | null): Promise<Outcome>;
+
   rules(): Promise<RulesView>;
+  /** Add one of the person's own rules. The service puts it after every built-in rule. */
+  addRule(rule: NewRuleInput): Promise<Outcome & { id?: string }>;
+  removeRule(id: string): Promise<Outcome>;
   /** `block: false` is the one-action opt-out; the reply carries the consequence to show. */
   setEncryptedDns(block: boolean): Promise<Outcome & { consequence?: string }>;
 

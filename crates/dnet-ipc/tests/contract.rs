@@ -104,10 +104,23 @@ fn ipc01_request_classes_match_the_contract_table() {
             endpoint: EndpointId::new(),
             enabled: false,
         },
-        AddRule,
-        RemoveRule,
+        AddRule {
+            matcher: dnet_core::rule::RuleMatcher::Domain("example.com".into()),
+            action: dnet_core::rule::RuleAction::Bypass,
+        },
+        RemoveRule {
+            rule: dnet_core::ids::RuleId::new(),
+        },
         SetProfileParams,
-        EnableBrutal,
+        EnableBrutal {
+            profile: dnet_core::ids::ProfileId::new("hy2-default"),
+            up_mbps: 50,
+            down_mbps: 200,
+            warning_revision: dnet_core::profile::BRUTAL_WARNING_REVISION,
+        },
+        DisableBrutal {
+            profile: dnet_core::ids::ProfileId::new("hy2-default"),
+        },
         SetEncryptedDnsHandling { block: true },
         StartProvisioning,
         CancelProvisioning,

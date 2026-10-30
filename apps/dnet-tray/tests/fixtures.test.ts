@@ -95,10 +95,11 @@ describe('what the Rust side sends', () => {
 
   it('the rules parse, with the encrypted-name setting in the window’s own names', () => {
     const view = parseRulesReply(read('rules'));
-    expect(view.rules.map((r) => [r.precedence, r.reliability, r.builtin])).toEqual([
-      [1, 'Deterministic', true],
-      [200, 'BestEffort', false],
+    expect(view.rules.map((r) => [r.precedence, r.reliability, r.builtin, r.kind, r.value])).toEqual([
+      [1, 'Deterministic', true, 'ip_cidr', '10.0.0.0/8'],
+      [200, 'BestEffort', false, 'application', 'C:\\Apps\\app.exe?'],
     ]);
+    expect(view.rules[1]?.id).toBe('21111111-2222-4333-8444-555555555555');
     expect(view.encryptedDns).toEqual({ block: true, needsDisclosure: false });
   });
 });

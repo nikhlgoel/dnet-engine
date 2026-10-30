@@ -123,6 +123,12 @@ impl StateFile for Flaky {
         }
         self.inner.write(bytes)
     }
+    fn remove(&self) -> Result<(), String> {
+        if self.fail_writes.load(Ordering::SeqCst) {
+            return Err("access denied".into());
+        }
+        self.inner.remove()
+    }
 }
 
 struct Rig {
@@ -482,16 +488,60 @@ fn a_keys_document_that_drops_the_signing_key_evicts_the_feed() {
     );
     assert_eq!(rig.service.versions(), (Some(2), None));
 
-    // And a restart agrees, rather than resurrecting the evicted feed from its file.
+    // The eviction is stored, not left for the next start to rediscover: the feed's file is gone,
+    // so a restart agrees without a "stored feed no longer verifies" note at every start.
+    assert_eq!(rig.feed.inner.bytes(), None);
     let after = rig.restarted();
     assert_eq!(after.in_effect(), ClientDefinitions::default());
-    assert!(matches!(
-        after.notes.as_slice(),
-        [FeedNote::Discarded {
-            document: Document::Feed,
-            ..
-        }]
-    ));
+    assert!(after.notes.is_empty(), "{:?}", after.notes);
+}
+
+/// An evicted feed stays evicted. A later keys document that lists its signer again must not bring
+/// it back at the next start, when the running service did not (rule R decides at rotation).
+#[test]
+fn an_evicted_feed_does_not_come_back_when_a_later_keys_document_lists_its_signer_again() {
+    let mut rig = Rig::new();
+    offer_valid_keys_and_feed(&mut rig, 7);
+    rig.service
+        .offer_keys(&keys_envelope(2, &[&signer(2)]), NOW)
+        .unwrap();
+    rig.service
+        .offer_keys(&keys_envelope(3, &[&signer(1), &signer(2)]), NOW)
+        .unwrap();
+    assert_eq!(rig.in_effect(), ClientDefinitions::default());
+
+    let after = rig.restarted();
+    assert_eq!(after.in_effect(), ClientDefinitions::default());
+    assert_eq!(after.service.versions(), (Some(3), None));
+}
+
+/// Removing the evicted feed's file is tidying, not a condition of the rotation: if it fails, the
+/// new keys still apply and the stored feed is discarded at the next start, as before.
+#[test]
+fn an_eviction_whose_file_cannot_be_removed_still_rotates_the_keys() {
+    let mut rig = Rig::new();
+    offer_valid_keys_and_feed(&mut rig, 7);
+    rig.feed.fail_writes.store(true, Ordering::SeqCst);
+
+    let notes = rig
+        .service
+        .offer_keys(&keys_envelope(2, &[&signer(2)]), NOW)
+        .unwrap();
+
+    assert_eq!(notes.first(), Some(&FeedNote::Evicted));
+    assert!(
+        matches!(
+            notes.get(1),
+            Some(FeedNote::Discarded {
+                document: Document::Feed,
+                ..
+            })
+        ),
+        "{notes:?}"
+    );
+    assert_eq!(rig.service.versions(), (Some(2), None));
+    let after = rig.restarted();
+    assert_eq!(after.in_effect(), ClientDefinitions::default());
 }
 
 #[test]

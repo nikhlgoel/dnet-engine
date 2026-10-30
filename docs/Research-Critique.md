@@ -445,6 +445,12 @@ the host-route rewrite across an interface change was skipped, the path is one v
 run, and Hysteria 2 has not been run. This entry stays **OPEN, waived at risk**, and whether the
 lab PASS substitutes for T098a is an owner decision, not made here.
 
+**Update 2026-10-26.** A review found the generated core configuration carried no `direct` route
+rule for the endpoint (only the host route kept the core's packets off the TUN), contrary to
+data-model §4 and CC-05. Fixed (`tasks.md` T048 note): the rule is now generated, right after DNS
+capture. The 2026-10-20 lab PASS was measured without it, so it is evidence for the host route alone;
+T098a should run on a build that has both. The entry stays **OPEN**.
+
 ### 6.7 Documentation reconciled with delivery status *(2026-10-16)*
 
 A read-through found statements that had fallen behind the code and `tasks.md`. Documentation only;
@@ -493,3 +499,7 @@ defines the `cargo xtask` alias that CI and the docs already assumed. Still **no
   *Blocking Phase 4 profile tuning, not Phase 3.*
   **Partly answered 2026-09-12 (T056).** The pinned core accepts Gecko, and its own `check` accepts
   a generated Gecko config. Still open (T067): ADR-0003 choosing the default layer, and tuning.
+  **CLOSED 2026-10-24/26.** ADR-0003 is Accepted (option C: Salamander by default, Gecko an endpoint
+  option offered, not assumed). On 2026-10-26 the pinned sources were read for both sides of the core
+  and recorded there; T067 is closed. Tuning stays a live-gate measurement, and ADR-0003's questions 2
+  and 3 stay with the owner.

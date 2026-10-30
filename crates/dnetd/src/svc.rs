@@ -73,9 +73,11 @@ fn run() -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("failed to set service status: {e}"))
     };
 
+    // Shutdown too: without it Windows never sends the control, and a machine shutting down would
+    // cut the tunnel off mid-way, leaving the next start's recovery to restore what it left.
     report(
         ServiceState::Running,
-        ServiceControlAccept::STOP,
+        ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
         Duration::default(),
     )?;
     tracing::info!("dnetd running as a Windows service");

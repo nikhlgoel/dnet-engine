@@ -285,6 +285,58 @@ pub async fn run<C: Connector>(
             }
         }
         Command::EncryptedDns { block } => Some(Request::SetEncryptedDnsHandling { block: *block }),
+        Command::AddRule {
+            kind,
+            value,
+            action,
+        } => match checked(serde_json::json!({
+            "request": "AddRule", "kind": kind, "value": value, "action": action,
+        })) {
+            Ok(request) => Some(request),
+            Err(why) => {
+                sink.err(&format!("dnetctl: {}", render::plain(&why)));
+                return exit::USAGE;
+            }
+        },
+        Command::RemoveRule { rule } => {
+            match checked(serde_json::json!({ "request": "RemoveRule", "rule": rule })) {
+                Ok(request) => Some(request),
+                Err(why) => {
+                    sink.err(&format!("dnetctl: {}", render::plain(&why)));
+                    return exit::USAGE;
+                }
+            }
+        }
+        Command::BrutalOn {
+            profile,
+            up,
+            down,
+            accept_warning,
+        } => {
+            if !accept_warning {
+                // Shown before anything is sent or even checked: the person decides on the warning.
+                let w = dnet_core::profile::brutal_warning();
+                sink.err(&format!(
+                    "{}\n\n{}\n{}\n{}\n\nNothing was changed. Run again with --accept-warning to accept it.",
+                    w.title, w.body, w.consequence, w.note
+                ));
+                return exit::REFUSED;
+            }
+            match brutal_request(profile, Some((up, down))) {
+                Ok(request) => Some(request),
+                Err(why) => {
+                    sink.err(&format!("dnetctl: {}", render::plain(&why)));
+                    return exit::USAGE;
+                }
+            }
+        }
+        Command::BrutalOff { profile } => match brutal_request(profile, None) {
+            Ok(request) => Some(request),
+            Err(why) => {
+                sink.err(&format!("dnetctl: {}", render::plain(&why)));
+                return exit::USAGE;
+            }
+        },
         Command::CheckUpdates => Some(Request::FetchFeed),
         Command::ImportFeed { keys, feed } => {
             match import_request(keys.as_deref(), feed.as_deref()) {
@@ -315,6 +367,7 @@ pub async fn run<C: Connector>(
         Command::Version => unreachable!("handled above"),
         Command::Status => status(&mut connection, invocation.json, sink).await,
         Command::Profiles => list(&mut connection, Request::ListProfiles, &invocation, sink).await,
+        Command::Rules => list(&mut connection, Request::ListRules, &invocation, sink).await,
         Command::Endpoints => {
             list(&mut connection, Request::ListEndpoints, &invocation, sink).await
         }
@@ -360,6 +413,39 @@ pub async fn run<C: Connector>(
                     "Endpoint enabled.".to_string()
                 } else {
                     "Endpoint disabled: it is kept but will not be used.".to_string()
+                })
+            })
+            .await
+        }
+        Command::AddRule { .. } => {
+            let request = request.expect("built above for a rule");
+            change(&mut connection, &request, &invocation, sink, |reply| {
+                let id = reply.get("rule")?.as_str()?;
+                Some(format!(
+                    "Rule added ({}). It applies from the next connection.",
+                    render::plain(id)
+                ))
+            })
+            .await
+        }
+        Command::RemoveRule { .. } => {
+            let request = request.expect("built above for a removal");
+            change(&mut connection, &request, &invocation, sink, |_| {
+                Some("Rule removed. It stops applying from the next connection.".to_string())
+            })
+            .await
+        }
+        Command::BrutalOn { .. } | Command::BrutalOff { .. } => {
+            let on = matches!(invocation.command, Command::BrutalOn { .. });
+            let request = request.expect("built above for Brutal");
+            change(&mut connection, &request, &invocation, sink, |_| {
+                Some(if on {
+                    "Aggressive speed mode is on for that profile from the next connection. It makes \
+                     the network worse for everyone around you; turn it off with 'dnetctl brutal-off'."
+                        .to_string()
+                } else {
+                    "Aggressive speed mode is off: the profile backs off when the network is busy."
+                        .to_string()
                 })
             })
             .await
@@ -425,6 +511,34 @@ pub async fn run<C: Connector>(
             .await
         }
     }
+}
+
+/// `EnableBrutal` (with both speeds) or `DisableBrutal`, checked by the service's own grammar, so a value it
+/// would refuse is a usage error here and nothing is sent. The revision sent is the warning just accepted.
+/// A request checked by the service's own grammar, so what it would refuse is a usage error here and
+/// nothing is sent. The error names a field, never the value.
+fn checked(wire: Value) -> Result<Request, String> {
+    decode_request(&wire.to_string()).map_err(|e| e.to_string())
+}
+
+fn brutal_request(profile: &str, speeds: Option<(&String, &String)>) -> Result<Request, String> {
+    let wire = match speeds {
+        Some((up, down)) => {
+            let mbps = |name: &str, text: &str| {
+                text.parse::<u64>()
+                    .map_err(|_| format!("--{name} needs a whole number of Mbit/s"))
+            };
+            serde_json::json!({
+                "request": "EnableBrutal",
+                "profile": profile,
+                "up_mbps": mbps("up", up)?,
+                "down_mbps": mbps("down", down)?,
+                "warning_revision": dnet_core::profile::BRUTAL_WARNING_REVISION,
+            })
+        }
+        None => serde_json::json!({ "request": "DisableBrutal", "profile": profile }),
+    };
+    decode_request(&wire.to_string()).map_err(|e| e.to_string())
 }
 
 /// The request that hands the service signed documents from files. Nothing is interpreted here: the
@@ -616,10 +730,10 @@ async fn list<S: AsyncRead + AsyncWrite + Unpin>(
                 sink.out(&pretty(&value));
                 return exit::OK;
             }
-            let text = if request == Request::ListProfiles {
-                render::profiles(&value)
-            } else {
-                render::endpoints(&value)
+            let text = match request {
+                Request::ListProfiles => render::profiles(&value),
+                Request::ListRules => render::rules(&value),
+                _ => render::endpoints(&value),
             };
             match text {
                 Ok(text) => {

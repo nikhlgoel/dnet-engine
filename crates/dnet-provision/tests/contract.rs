@@ -52,6 +52,7 @@ fn params() -> JobParams {
         cores: ServerCores {
             primary_core: pin("primary-core", 'a'),
             amneziawg: pin("amneziawg-go", 'b'),
+            arch: dnet_provision::bootstrap::ServerArch::Amd64,
         },
         hysteria2_server_name: "edge.example.net".to_owned(),
         reality_target: TargetDomain::parse("www.example.com").unwrap(),
@@ -69,7 +70,8 @@ fn report_for(p: &JobParams, edit: impl FnOnce(&mut serde_json::Value)) -> Strin
             "server_public_key_hex": "d".repeat(64),
             "listen_port": p.ports.amneziawg_udp,
             "client_address": "10.66.0.2",
-            "prefix_len": 24
+            "prefix_len": 24,
+            "client_public_key_hex": "{CLIENT_PUB}"
         },
         "hysteria2": {
             "server_port": p.ports.hysteria2_udp,

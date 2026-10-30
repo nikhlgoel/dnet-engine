@@ -168,7 +168,11 @@ impl Service for Stub {
                 .unwrap()
                 .clone()
                 .map(|()| r#"{"imported":true,"changes":["Updated"]}"#.to_string()),
-            Request::RemoveEndpoint { .. } | Request::SetEndpointEnabled { .. } => self
+            Request::RemoveEndpoint { .. }
+            | Request::SetEndpointEnabled { .. }
+            | Request::EnableBrutal { .. }
+            | Request::DisableBrutal { .. }
+            | Request::RemoveRule { .. } => self
                 .change
                 .lock()
                 .unwrap()
@@ -186,6 +190,13 @@ impl Service for Stub {
             }
             Request::ListProfiles => Ok(r#"{"profiles":[{"id":"hy2-default","kind":"Hysteria2","tier":"Tier2","carrier":"Udp","brutal":false}]}"#.to_string()),
             Request::ListEndpoints => Ok(r#"{"endpoints":[]}"#.to_string()),
+            Request::ListRules => Ok(r#"{"rules":[
+                {"id":"11111111-2222-4333-8444-555555555555","kind":"dns_port","value":"53","precedence":0,"action":"Capture","reliability":"Deterministic","builtin":true},
+                {"id":"21111111-2222-4333-8444-555555555555","kind":"domain_suffix","value":"example.com","precedence":200,"action":"Bypass","reliability":"Deterministic","builtin":false}
+            ],"encrypted_dns":{"block":true,"needs_disclosure":false}}"#.to_string()),
+            Request::AddRule { .. } => self.change.lock().unwrap().clone().map(|()| {
+                r#"{"rule":"31111111-2222-4333-8444-555555555555"}"#.to_string()
+            }),
             Request::GetPaths => self.paths.lock().unwrap().clone(),
             Request::GetStats => self.stats.lock().unwrap().clone(),
             _ => Ok("{}".to_string()),
@@ -1580,4 +1591,178 @@ async fn a_reply_that_does_not_say_how_the_check_goes_is_not_success() {
         assert_eq!(code, exit::UNEXPECTED, "{reply}");
         assert!(shown.out().is_empty());
     }
+}
+
+// ------------------------------------------------------------------ Brutal (T105)
+
+#[tokio::test(start_paused = true)]
+async fn brutal_on_without_accepting_shows_the_warning_and_sends_nothing() {
+    let stub = Stub::new(vec![]);
+    let (code, shown) = go(
+        &["brutal-on", "hy2-default", "--up", "50", "--down", "200"],
+        &stub,
+    )
+    .await;
+    assert_eq!(code, exit::REFUSED, "{}", shown.err());
+    let warning = dnet_core::profile::brutal_warning();
+    for part in [warning.title, warning.body, warning.consequence] {
+        assert!(
+            shown.err().contains(part),
+            "missing {part:?}: {}",
+            shown.err()
+        );
+    }
+    assert!(shown.err().contains("--accept-warning"), "{}", shown.err());
+    assert_eq!(stub.requests_named("EnableBrutal"), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn brutal_on_with_the_warning_accepted_sends_both_speeds_and_the_revision() {
+    let stub = Stub::new(vec![]);
+    let (code, shown) = go(
+        &[
+            "brutal-on",
+            "hy2-default",
+            "--up",
+            "50",
+            "--down",
+            "200",
+            "--accept-warning",
+        ],
+        &stub,
+    )
+    .await;
+    assert_eq!(code, exit::OK, "{}", shown.err());
+    assert!(shown.out().contains("on"), "{}", shown.out());
+    let sent: Vec<String> = stub
+        .log()
+        .into_iter()
+        .filter(|r| r.contains("EnableBrutal"))
+        .collect();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    for part in [
+        r#""up_mbps":50"#,
+        r#""down_mbps":200"#,
+        r#""profile":"hy2-default""#,
+    ] {
+        assert!(sent[0].contains(part), "{}", sent[0]);
+    }
+    assert!(sent[0].contains(&format!(
+        r#""warning_revision":{}"#,
+        dnet_core::profile::BRUTAL_WARNING_REVISION
+    )));
+
+    let (code, shown) = go(&["brutal-off", "hy2-default"], &stub).await;
+    assert_eq!(code, exit::OK, "{}", shown.err());
+    assert_eq!(stub.requests_named("DisableBrutal"), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn brutal_speeds_the_service_would_refuse_are_a_usage_error_and_send_nothing() {
+    let stub = Stub::new(vec![]);
+    for args in [
+        vec![
+            "brutal-on",
+            "hy2-default",
+            "--up",
+            "0",
+            "--down",
+            "200",
+            "--accept-warning",
+        ],
+        vec![
+            "brutal-on",
+            "hy2-default",
+            "--up",
+            "fast",
+            "--down",
+            "200",
+            "--accept-warning",
+        ],
+        vec![
+            "brutal-on",
+            "SENTINEL Bad",
+            "--up",
+            "5",
+            "--down",
+            "5",
+            "--accept-warning",
+        ],
+    ] {
+        let (code, shown) = go(&args, &stub).await;
+        assert_eq!(code, exit::USAGE, "{args:?}: {}", shown.err());
+        assert!(!shown.err().contains("SENTINEL"), "{}", shown.err());
+    }
+    assert!(stub.log().is_empty(), "{:?}", stub.log());
+}
+
+// ------------------------------------------------------------------ rules (T108)
+
+#[tokio::test(start_paused = true)]
+async fn rules_are_listed_with_what_they_match_and_whether_they_are_built_in() {
+    let stub = Stub::new(vec![]);
+    let (code, shown) = go(&["rules"], &stub).await;
+    assert_eq!(code, exit::OK, "{}", shown.err());
+    for part in [
+        "*.example.com",
+        "Bypass",
+        "port 53",
+        "built-in",
+        "21111111-2222-4333-8444-555555555555",
+    ] {
+        assert!(
+            shown.out().contains(part),
+            "missing {part:?}: {}",
+            shown.out()
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_rule_is_added_by_what_it_matches_and_removed_by_id() {
+    let stub = Stub::new(vec![]);
+    let (code, shown) = go(&["add-rule", "--suffix", "example.com", "--bypass"], &stub).await;
+    assert_eq!(code, exit::OK, "{}", shown.err());
+    assert!(
+        shown.out().contains("31111111-2222-4333-8444-555555555555"),
+        "{}",
+        shown.out()
+    );
+    let sent: Vec<String> = stub
+        .log()
+        .into_iter()
+        .filter(|r| r.contains("AddRule"))
+        .collect();
+    assert_eq!(sent.len(), 1);
+    for part in [
+        r#""kind":"domain_suffix""#,
+        r#""value":"example.com""#,
+        r#""action":"bypass""#,
+    ] {
+        assert!(sent[0].contains(part), "{}", sent[0]);
+    }
+
+    let (code, shown) = go(
+        &["remove-rule", "21111111-2222-4333-8444-555555555555"],
+        &stub,
+    )
+    .await;
+    assert_eq!(code, exit::OK, "{}", shown.err());
+    assert_eq!(stub.requests_named("RemoveRule"), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_rule_the_service_would_refuse_is_a_usage_error_and_is_not_repeated() {
+    let stub = Stub::new(vec![]);
+    for args in [
+        vec!["add-rule", "--domain", "SENTINEL bad", "--tunnel"],
+        vec!["add-rule", "--cidr", "SENTINEL/99", "--tunnel"],
+        vec!["add-rule", "--cidr", "198.18.0.0/16", "--bypass"],
+        vec!["remove-rule", "SENTINEL-not-an-id"],
+    ] {
+        let (code, shown) = go(&args, &stub).await;
+        assert_eq!(code, exit::USAGE, "{args:?}");
+        assert!(!shown.err().contains("SENTINEL"), "{}", shown.err());
+    }
+    assert!(stub.log().is_empty(), "{:?}", stub.log());
 }

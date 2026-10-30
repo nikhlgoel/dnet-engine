@@ -57,7 +57,9 @@ unsafe fn token_user_sid(token: HANDLE) -> Option<String> {
         return None;
     }
 
-    let mut buffer = vec![0u8; needed as usize];
+    // u64 elements, so the buffer is aligned for the pointer inside `TOKEN_USER`; a byte buffer
+    // need not be, and reading the struct through a misaligned reference is undefined behaviour.
+    let mut buffer = vec![0u64; (needed as usize).div_ceil(8)];
     GetTokenInformation(
         token,
         TokenUser,

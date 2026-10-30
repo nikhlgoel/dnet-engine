@@ -64,6 +64,29 @@ pub enum Command {
     EncryptedDns {
         block: bool,
     },
+    /// List the routing rules, the built-in ones and the person's.
+    Rules,
+    /// Add a rule: what it matches (`kind`, `value`) and what it does (`action`).
+    AddRule {
+        kind: String,
+        value: String,
+        action: String,
+    },
+    RemoveRule {
+        rule: String,
+    },
+    /// Turn Brutal congestion control on for a Hysteria 2 profile (T105). Nothing is sent unless the
+    /// person accepted the warning, which is shown otherwise.
+    BrutalOn {
+        profile: String,
+        up: String,
+        down: String,
+        accept_warning: bool,
+    },
+    /// Turn Brutal off again.
+    BrutalOff {
+        profile: String,
+    },
     /// Ask the service to check now for updated connection method definitions.
     CheckUpdates,
     /// Hand the service signed profile-feed documents from files (an offline import).
@@ -83,6 +106,9 @@ impl Command {
                 | Command::RemoveEndpoint { .. }
                 | Command::SetEndpointEnabled { .. }
                 | Command::EncryptedDns { .. }
+                | Command::BrutalOn { .. }
+                | Command::BrutalOff { .. }
+                | Command::RemoveRule { .. }
         )
     }
 }
@@ -120,13 +146,21 @@ commands:
   disable-endpoint <id>  keep an endpoint but do not use it
   encrypted-dns <block|allow>
                          block (the default) or allow programs' own encrypted name lookups
+  rules                  list the routing rules, built-in and your own, in the order they apply
+  add-rule               add a rule: one of --domain <name>, --suffix <name> (the name and every
+                         name under it) or --cidr <range>, and --tunnel or --bypass
+  remove-rule <id>       remove one of your rules (built-in rules cannot be removed)
+  brutal-on <profile>    turn on aggressive speed mode (Brutal) for a Hysteria 2 profile:
+                         --up <Mbit/s> --down <Mbit/s>. It shows its warning and does nothing
+                         until run again with --accept-warning.
+  brutal-off <profile>   turn it off again (the default)
   check-updates          check now for updated connection methods (through the tunnel if one is up,
                          directly over your network if you are disconnected: only because you asked)
   import-feed            hand the service signed profile updates from files: --keys-file <path>
                          and/or --feed-file <path>. The service checks signatures; nothing here does.
   help                   show this text
 
-Endpoints and the encrypted-DNS choice can be changed only while disconnected.
+Endpoints, rules, the encrypted-DNS choice and Brutal can be changed only while disconnected.
 
 options:
   --json                 print the service's answers as JSON (for scripts)
@@ -140,6 +174,9 @@ options:
                          add-endpoint: a file holding the connection details. Delete it afterwards:
                          it holds the keys. They are never accepted on the command line.
   --credentials-stdin    add-endpoint: read the connection details from standard input
+  --up <Mbit/s>          brutal-on: your upload speed, a whole number
+  --down <Mbit/s>        brutal-on: your download speed, a whole number
+  --accept-warning       brutal-on: you have read the warning and accept it
   --keys-file <path>     import-feed: a signed keys document (taken first, if both are given)
   --feed-file <path>     import-feed: a signed profile feed
   -f, --follow           events: keep watching until interrupted
@@ -183,6 +220,24 @@ fn command_named(name: &str) -> Option<Command> {
             enabled: false,
         },
         "encrypted-dns" => Command::EncryptedDns { block: true },
+        "rules" => Command::Rules,
+        "add-rule" => Command::AddRule {
+            kind: String::new(),
+            value: String::new(),
+            action: String::new(),
+        },
+        "remove-rule" => Command::RemoveRule {
+            rule: String::new(),
+        },
+        "brutal-on" => Command::BrutalOn {
+            profile: String::new(),
+            up: String::new(),
+            down: String::new(),
+            accept_warning: false,
+        },
+        "brutal-off" => Command::BrutalOff {
+            profile: String::new(),
+        },
         "check-updates" => Command::CheckUpdates,
         "import-feed" => Command::ImportFeed {
             keys: None,
@@ -235,6 +290,8 @@ pub fn parse(args: &[String]) -> Result<Invocation, String> {
     let mut host: Option<String> = None;
     let mut credentials_file: Option<String> = None;
     let mut credentials_stdin = false;
+    let mut matches: Vec<(&str, String)> = Vec::new();
+    let mut actions: Vec<&str> = Vec::new();
 
     let mut rest = args[1..].iter();
     while let Some(option) = rest.next() {
@@ -307,6 +364,35 @@ pub fn parse(args: &[String]) -> Result<Invocation, String> {
                 );
             }
             ("--credentials-stdin", Command::AddEndpoint { .. }) => credentials_stdin = true,
+            ("--domain" | "--suffix" | "--cidr", Command::AddRule { .. }) => {
+                let value = rest
+                    .next()
+                    .ok_or_else(|| format!("{name} needs a value"))?
+                    .clone();
+                let kind = match name {
+                    "--domain" => "domain",
+                    "--suffix" => "domain_suffix",
+                    _ => "ip_cidr",
+                };
+                matches.push((kind, value));
+            }
+            ("--tunnel", Command::AddRule { .. }) => actions.push("tunnel"),
+            ("--bypass", Command::AddRule { .. }) => actions.push("bypass"),
+            ("--up", Command::BrutalOn { up, .. }) => {
+                *up = rest
+                    .next()
+                    .ok_or_else(|| "--up needs a speed in Mbit/s".to_string())?
+                    .clone();
+            }
+            ("--down", Command::BrutalOn { down, .. }) => {
+                *down = rest
+                    .next()
+                    .ok_or_else(|| "--down needs a speed in Mbit/s".to_string())?
+                    .clone();
+            }
+            ("--accept-warning", Command::BrutalOn { accept_warning, .. }) => {
+                *accept_warning = true;
+            }
             ("--keys-file", Command::ImportFeed { keys, .. }) => {
                 *keys = Some(
                     rest.next()
@@ -362,6 +448,43 @@ pub fn parse(args: &[String]) -> Result<Invocation, String> {
                     shown(first)
                 )
             })?;
+        }
+        Command::BrutalOn {
+            profile, up, down, ..
+        } => {
+            *profile = word.ok_or("brutal-on needs a profile id (see 'dnetctl profiles')")?;
+            if up.is_empty() || down.is_empty() {
+                return Err("brutal-on needs both --up <Mbit/s> and --down <Mbit/s>".to_string());
+            }
+        }
+        Command::AddRule {
+            kind,
+            value,
+            action,
+        } => {
+            let (k, v) = match matches.len() {
+                0 => {
+                    return Err(
+                        "add-rule needs --domain <name>, --suffix <name> or --cidr <range>"
+                            .to_string(),
+                    )
+                }
+                1 => matches.remove(0),
+                _ => return Err("add-rule matches one of --domain, --suffix or --cidr".to_string()),
+            };
+            *kind = k.to_owned();
+            *value = v;
+            *action = match actions.as_slice() {
+                [one] => (*one).to_owned(),
+                [] => return Err("add-rule needs --tunnel or --bypass".to_string()),
+                _ => return Err("add-rule takes --tunnel or --bypass, not both".to_string()),
+            };
+        }
+        Command::RemoveRule { rule } => {
+            *rule = word.ok_or("remove-rule needs a rule id (see 'dnetctl rules')")?;
+        }
+        Command::BrutalOff { profile } => {
+            *profile = word.ok_or("brutal-off needs a profile id (see 'dnetctl profiles')")?;
         }
         Command::ImportFeed { keys, feed } => {
             if keys.is_none() && feed.is_none() {
@@ -651,6 +774,109 @@ mod tests {
             assert!(parsed(&[name, "a", "b"])
                 .unwrap_err()
                 .contains("one word too many"));
+        }
+    }
+
+    #[test]
+    fn add_rule_takes_one_thing_to_match_and_one_action() {
+        assert_eq!(
+            command(&["add-rule", "--suffix", "example.com", "--bypass"]),
+            Command::AddRule {
+                kind: "domain_suffix".into(),
+                value: "example.com".into(),
+                action: "bypass".into(),
+            }
+        );
+        assert_eq!(
+            command(&["add-rule", "--cidr", "198.51.100.0/24", "--tunnel"]),
+            Command::AddRule {
+                kind: "ip_cidr".into(),
+                value: "198.51.100.0/24".into(),
+                action: "tunnel".into(),
+            }
+        );
+        for (args, says) in [
+            (vec!["add-rule", "--tunnel"], "--domain"),
+            (
+                vec!["add-rule", "--domain", "a.example"],
+                "--tunnel or --bypass",
+            ),
+            (
+                vec![
+                    "add-rule",
+                    "--domain",
+                    "a.example",
+                    "--suffix",
+                    "b.example",
+                    "--tunnel",
+                ],
+                "one of",
+            ),
+            (
+                vec!["add-rule", "--domain", "a.example", "--tunnel", "--bypass"],
+                "not both",
+            ),
+            (vec!["remove-rule"], "needs a rule id"),
+        ] {
+            let error = parsed(&args).unwrap_err();
+            assert!(error.contains(says), "{args:?}: {error}");
+        }
+        assert_eq!(command(&["rules"]), Command::Rules);
+    }
+
+    #[test]
+    fn brutal_on_takes_a_profile_and_both_speeds_and_brutal_off_a_profile() {
+        assert_eq!(
+            command(&["brutal-on", "hy2-default", "--up", "50", "--down", "200"]),
+            Command::BrutalOn {
+                profile: "hy2-default".into(),
+                up: "50".into(),
+                down: "200".into(),
+                accept_warning: false,
+            }
+        );
+        assert!(matches!(
+            command(&[
+                "brutal-on",
+                "hy2-default",
+                "--up",
+                "1",
+                "--down",
+                "1",
+                "--accept-warning"
+            ]),
+            Command::BrutalOn {
+                accept_warning: true,
+                ..
+            }
+        ));
+        assert_eq!(
+            command(&["brutal-off", "hy2-default"]),
+            Command::BrutalOff {
+                profile: "hy2-default".into()
+            }
+        );
+        for (args, says) in [
+            (
+                vec!["brutal-on", "hy2-default", "--down", "200"],
+                "both --up",
+            ),
+            (
+                vec!["brutal-on", "--up", "1", "--down", "1"],
+                "needs a profile id",
+            ),
+            (vec!["brutal-off"], "needs a profile id"),
+            (
+                vec!["brutal-off", "hy2-default", "--up", "1"],
+                "not an option",
+            ),
+            (
+                vec!["brutal-on", "a", "b", "--up", "1", "--down", "1"],
+                "one word too many",
+            ),
+        ] {
+            let error = parsed(&args).unwrap_err();
+            assert!(error.contains(says), "{args:?}: {error}");
         }
     }
 

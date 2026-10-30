@@ -163,8 +163,10 @@ async fn the_endpoint_and_rule_lists() {
             { "id": "0a1b2c3d-0000-4000-8000-000000000001", "label": "spare", "address": "vpn.example.com:443", "enabled": false, "health": "Unknown" }
         ]})),
         dnet_ipc::protocol::Request::ListRules => done(json!({ "rules": [
-            { "precedence": 1, "action": "Bypass", "reliability": "Deterministic", "builtin": true },
-            { "precedence": 200, "action": "Bypass", "reliability": "BestEffort", "builtin": false }
+            { "id": "11111111-2222-4333-8444-555555555555", "kind": "ip_cidr", "value": "10.0.0.0/8",
+              "precedence": 1, "action": "Bypass", "reliability": "Deterministic", "builtin": true },
+            { "id": "21111111-2222-4333-8444-555555555555", "kind": "application", "value": "C:\\Apps\\app.exe\u{202e}",
+              "precedence": 200, "action": "Bypass", "reliability": "BestEffort", "builtin": false, "extra": "dropped" }
         ], "encrypted_dns": { "block": true, "needs_disclosure": false }})),
         other => panic!("unexpected {other:?}"),
     });

@@ -178,10 +178,23 @@ fn ipc10_every_request_round_trips() {
             endpoint: EndpointId::new(),
             enabled: false,
         },
-        Request::AddRule,
-        Request::RemoveRule,
+        Request::AddRule {
+            matcher: dnet_core::rule::RuleMatcher::Domain("example.com".into()),
+            action: dnet_core::rule::RuleAction::Bypass,
+        },
+        Request::RemoveRule {
+            rule: dnet_core::ids::RuleId::new(),
+        },
         Request::SetProfileParams,
-        Request::EnableBrutal,
+        Request::EnableBrutal {
+            profile: dnet_core::ids::ProfileId::new("hy2-default"),
+            up_mbps: 50,
+            down_mbps: 200,
+            warning_revision: dnet_core::profile::BRUTAL_WARNING_REVISION,
+        },
+        Request::DisableBrutal {
+            profile: dnet_core::ids::ProfileId::new("hy2-default"),
+        },
         Request::SetEncryptedDnsHandling { block: true },
         Request::SetEncryptedDnsHandling { block: false },
         Request::StartProvisioning,

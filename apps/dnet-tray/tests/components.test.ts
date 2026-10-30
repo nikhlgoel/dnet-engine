@@ -105,7 +105,7 @@ describe('Status', () => {
 
 describe('every view', () => {
   const views: Array<[string, RegExp]> = [
-    ['Endpoints', /endpoints/i],
+    ['Servers', /servers/i],
     ['Rules', /rules/i],
     ['Activity', /activity/i],
     ['Settings', /settings/i],
@@ -121,6 +121,19 @@ describe('every view', () => {
       expect(await violations()).toEqual([]);
     });
   }
+
+  /** FR-033, Principle VI: what the obfuscation hides, and what it does not, said where a person looks for it. */
+  it('About says the tunnel is not hidden, nor how much is sent or where it goes', async () => {
+    mount();
+    await screen.findByRole('switch');
+    await fireEvent.click(screen.getByRole('button', { name: 'About DNet Engine' }));
+    await screen.findByRole('heading', { level: 1, name: 'About DNet Engine' });
+    const text = document.body.textContent ?? '';
+    expect(text).toMatch(/content/);
+    expect(text).toMatch(/does not hide that you are using a tunnel/);
+    expect(text).toMatch(/how much you send and receive/);
+    expect(text).toMatch(/where the tunnel’s packets go/);
+  });
 
   it('About lists the components it uses, with their licences', async () => {
     mount();
@@ -138,21 +151,22 @@ describe('every view', () => {
     await screen.findByRole('switch');
   });
 
-  it('Endpoints lists them, and is locked while connected', async () => {
+  it('Servers lists them, and is locked while connected', async () => {
     mount({ initial: { state: 'ok' } });
     await screen.findByRole('heading', { level: 1, name: 'Connected' });
-    await go('Endpoints');
+    await go('Servers');
     await screen.findByText('endpoint-1');
     expect(screen.getByRole('button', { name: 'Add a server you already have' }).hasAttribute('disabled')).toBe(true);
     expect(screen.getByText(/Disconnect before changing/)).toBeTruthy();
   });
 
-  it('Endpoints says plainly that setting a server up is not available in this build', async () => {
+  it('Servers offers to set one up, which opens the guide, and says what a server is', async () => {
     mount();
     await screen.findByRole('switch');
-    await go('Endpoints');
-    expect(await screen.findByText(/not available in this build/)).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Set one up for me' }).hasAttribute('disabled')).toBe(true);
+    await go('Servers');
+    expect(await screen.findByText(/small computer of yours/)).toBeTruthy();
+    await fireEvent.click(screen.getByRole('button', { name: 'Set up a server for me' }));
+    await screen.findByRole('heading', { level: 1, name: 'Set up your server' });
   });
 
   it('Rules says which rules are best effort in the row, not in a tooltip', async () => {
@@ -197,14 +211,130 @@ describe('every view', () => {
   });
 });
 
+describe('Rules: a person adds and removes their own (T108)', () => {
+  it('adds a rule for a site, shows it with what it matches, and removes it', async () => {
+    const mock = mount();
+    await screen.findByRole('switch');
+    await go('Rules');
+    await screen.findByRole('table');
+    await fireEvent.change(screen.getByLabelText(/^match$/i), { target: { value: 'domain_suffix' } });
+    await fireEvent.input(screen.getByLabelText(/site or address/i), { target: { value: 'example.com' } });
+    await fireEvent.change(screen.getByLabelText(/^send it$/i), { target: { value: 'bypass' } });
+    await fireEvent.click(screen.getByRole('button', { name: /add rule/i }));
+    const row = await screen.findByText('example.com and its subdomains');
+    expect(row).toBeTruthy();
+    expect((await mock.rules()).rules.filter((r) => !r.builtin)).toHaveLength(1);
+    expect(await violations()).toEqual([]);
+
+    await fireEvent.click(screen.getByRole('button', { name: /remove the rule for example.com/i }));
+    await waitFor(() => expect(screen.queryByText('example.com and its subdomains')).toBeNull());
+  });
+
+  it('a refused rule shows the service’s reason and adds nothing', async () => {
+    const mock = mount();
+    await screen.findByRole('switch');
+    await go('Rules');
+    await screen.findByRole('table');
+    await fireEvent.change(screen.getByLabelText(/^match$/i), { target: { value: 'ip_cidr' } });
+    await fireEvent.input(screen.getByLabelText(/site or address/i), { target: { value: 'not a range' } });
+    await fireEvent.click(screen.getByRole('button', { name: /add rule/i }));
+    expect((await within(screen.getByRole('main')).findByRole('alert')).textContent).toMatch(/address range/);
+    expect((await mock.rules()).rules.filter((r) => !r.builtin)).toHaveLength(0);
+  });
+
+  it('built-in rules have no remove button', async () => {
+    mount();
+    await screen.findByRole('switch');
+    await go('Rules');
+    await screen.findByRole('table');
+    expect(screen.queryAllByRole('button', { name: /remove the rule/i })).toHaveLength(0);
+  });
+});
+
+describe('Settings: aggressive speed mode (Brutal, T105)', () => {
+  const figures = async (up: string, down: string): Promise<void> => {
+    await fireEvent.input(await screen.findByLabelText(/upload speed/i), { target: { value: up } });
+    await fireEvent.input(screen.getByLabelText(/download speed/i), { target: { value: down } });
+  };
+  const modeSwitch = async (): Promise<HTMLInputElement> => {
+    const s = (await screen.findByRole('switch', { name: /aggressive speed mode/i })) as HTMLInputElement;
+    await waitFor(() => expect(s.disabled).toBe(false));
+    return s;
+  };
+
+  it('turning it on shows the warning first, with equal choices and focus on the safe one, then sends both figures', async () => {
+    const mock = mount();
+    const set = vi.spyOn(mock, 'setBrutal');
+    await screen.findByRole('switch');
+    await go('Settings');
+    const mode = await modeSwitch();
+    expect(mode.checked).toBe(false);
+    await figures('50', '200');
+
+    await fireEvent.click(mode);
+    const dialog = await openDialog();
+    expect(within(dialog).getByText(/worse for everyone around you/)).toBeTruthy();
+    const buttons = within(dialog).getAllByRole('button', { hidden: true });
+    expect(buttons.map((b) => b.textContent)).toEqual(['Keep it off', 'Turn it on']);
+    expect(document.activeElement).toBe(buttons[0]);
+    expect(set).not.toHaveBeenCalled();
+
+    await fireEvent.click(buttons[1] as HTMLElement);
+    await waitFor(() => expect(set).toHaveBeenCalledWith('hy2-default', { up: 50, down: 200 }));
+    await waitFor(() => expect(mode.checked).toBe(true));
+    expect(await violations()).toEqual([]);
+  });
+
+  it('declining leaves it off and sends nothing', async () => {
+    const mock = mount();
+    const set = vi.spyOn(mock, 'setBrutal');
+    await screen.findByRole('switch');
+    await go('Settings');
+    const mode = await modeSwitch();
+    await figures('50', '200');
+    await fireEvent.click(mode);
+    const dialog = await openDialog();
+    await fireEvent.click(within(dialog).getByRole('button', { name: 'Keep it off', hidden: true }));
+    expect(mode.checked).toBe(false);
+    expect(set).not.toHaveBeenCalled();
+  });
+
+  it('without both figures it says what is missing and does not ask', async () => {
+    const mock = mount();
+    const set = vi.spyOn(mock, 'setBrutal');
+    await screen.findByRole('switch');
+    await go('Settings');
+    const mode = await modeSwitch();
+    await figures('50', '');
+    await fireEvent.click(mode);
+    expect(document.querySelector('dialog[open]')).toBeNull();
+    expect((await within(screen.getByRole('main')).findByRole('alert')).textContent).toMatch(/both speeds/i);
+    expect(mode.checked).toBe(false);
+    expect(set).not.toHaveBeenCalled();
+  });
+
+  it('turning it off needs no consent', async () => {
+    const mock = mount({ brutalOn: true });
+    const set = vi.spyOn(mock, 'setBrutal');
+    await screen.findByRole('switch');
+    await go('Settings');
+    const mode = await modeSwitch();
+    expect(mode.checked).toBe(true);
+    await fireEvent.click(mode);
+    expect(document.querySelector('dialog[open]')).toBeNull();
+    await waitFor(() => expect(set).toHaveBeenCalledWith('hy2-default', null));
+    await waitFor(() => expect(mode.checked).toBe(false));
+  });
+});
+
 describe('a read that fails is said, never drawn as an empty list', () => {
-  it('Endpoints shows the reason and not "no endpoints yet"', async () => {
+  it('Servers shows the reason and not "no servers yet"', async () => {
     const mock = mount();
     await screen.findByRole('switch');
     vi.spyOn(mock, 'endpoints').mockRejectedValue('the control pipe could not be opened');
-    await go('Endpoints');
+    await go('Servers');
     expect((await within(screen.getByRole('main')).findByRole('alert')).textContent).toBe('the control pipe could not be opened');
-    expect(screen.queryByText(/No endpoints yet/)).toBeNull();
+    expect(screen.queryByText(/You have no servers yet/)).toBeNull();
     expect(await violations()).toEqual([]);
   });
 

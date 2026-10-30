@@ -33,7 +33,7 @@ The privilege boundary lives here. `dnet-tray` is unprivileged; `dnetd` is Local
 | Class | Requests | Authorization |
 |---|---|---|
 | **Read-only** | `GetVersion`, `GetState`, `GetSession`, `GetPaths`, `GetStats`, `ListEndpoints`, `ListProfiles`, `ListRules`, `GetDiagnostics` | Authenticated caller |
-| **Mutating** | `Connect`, `Disconnect`, `AddEndpoint`, `RemoveEndpoint`, `SetEndpointEnabled`, `AddRule`, `RemoveRule`, `SetProfileParams`, `EnableBrutal`, `SetEncryptedDnsHandling`, `StartProvisioning`, `CancelProvisioning` | Interactive console user |
+| **Mutating** | `Connect`, `Disconnect`, `AddEndpoint`, `RemoveEndpoint`, `SetEndpointEnabled`, `AddRule`, `RemoveRule`, `SetProfileParams`, `EnableBrutal`, `DisableBrutal`, `SetEncryptedDnsHandling`, `StartProvisioning`, `CancelProvisioning` | Interactive console user |
 | **Stream** | `Subscribe` | Authenticated caller |
 
 ---
@@ -149,12 +149,16 @@ Read-only. The window draws exactly these fields, and `dnet-view` copies only th
 
 // ListRules: the rule list, and the encrypted-name choice that rides along with it (no request of its own
 // was warranted for two booleans).
-{ "rules": [ { "precedence": 1, "action": "Bypass", "reliability": "Deterministic | BestEffort", "builtin": true } ],
+{ "rules": [ { "id": "<uuid>", "kind": "domain | domain_suffix | ip_cidr | application | dns_port | encrypted_dns_port",
+               "value": "example.com", "precedence": 1, "action": "Bypass",
+               "reliability": "Deterministic | BestEffort", "builtin": true } ],
   "encrypted_dns": { "block": true,            // false: the person opted out (SetEncryptedDnsHandling)
                      "needs_disclosure": false // true until the first-run disclosure has been shown and answered
                    } }
 ```
 
+- `id`, `kind` and `value` were added with T108 (additive). `value` is the name, range, program path or port
+  the rule matches. Like the endpoint hosts beside it, it is visible to any authenticated caller (Read-only).
 - `reliability` is `BestEffort` for application rules and `Deterministic` for address and domain rules (Principle
   VI); a window shows the difference in the row itself, never in a tooltip.
 - A client treats a list that is not in this form as an error with a reason, never as an empty list: "no
@@ -173,6 +177,32 @@ Both fields `null` means "choose for me" — the single-control path (FR-036).
   responds `Err(TierDowngradeRequiresConsent { profile, tier })`. The tray must re-issue with
   `acknowledge_tier2: true`. Consent is not inferable from the first request (FR-016b).
 - Progress is delivered on the `Subscribe` stream, not as a blocking response.
+- **Remembered (T147).** An accepted `Connect` is remembered with its `profile`; any `Disconnect`
+  forgets it, even one answered `NotConnected`. A service that starts with a connect remembered
+  connects again with the same selection, after start-up recovery and only if it may connect at all.
+  Nothing on the wire changes; a client that wants the product off after a restart sends
+  `Disconnect`.
+- **Kept trying (T148).** While a connect is remembered and nothing is connected or being
+  connected, the service connects again on its own with the same selection (backing off from 15 s to
+  5 min, sooner on a network change). Clients see it as an ordinary connect on the `Subscribe`
+  stream; `Disconnect` ends it.
+
+### Setting up the person's own server (T150, IPC-26)
+
+```jsonc
+{ "request": "PrepareServer", "arch": "amd64" }     // or "arm64"
+   // -> { "arch": "amd64", "script": "<text>", "ports": [{"protocol":"udp","port":51820}, ...], "valid_for_s": 21600 }
+{ "request": "FinishServer", "label": "my server", "host": "203.0.113.10", "report": "<pasted text>" }
+   // -> { "endpoint": "<uuid>" }
+```
+
+Both are Mutating, strict, and bounded; nothing a client sent is repeated in an error. `arch` is `amd64` or `arm64`
+(the kind of processor the server has; the script checks it before installing anything). `label` and `host` follow the
+rules of `AddEndpoint`. `report` is the text the script printed, with up to 32 KiB around it and no control character
+except line breaks and tabs. The service keeps the keys **in memory only**, for 6 hours; a second `PrepareServer` for the
+same kind returns the same script until the setup is used or expires. The result must carry the client key of the script
+that is waiting, or it is refused. `FinishServer` is idle-only. A build without a downloads list answers
+`InternalError` ("not available in this build"). The reply to `PrepareServer` is read by clients as untrusted input.
 
 ### Configuration requests (Phase 9a, IPC-17 to IPC-21)
 
@@ -212,6 +242,50 @@ Both fields `null` means "choose for me" — the single-control path (FR-036).
 - At most 64 endpoints; a label already in use is refused. The credentials arrive over the control
   pipe, which only the interactive console user can use (Mutating class), and are sealed on arrival;
   they are never returned by any request.
+
+### `AddRule` and `RemoveRule` (T108, IPC-25)
+
+```jsonc
+{ "request": "AddRule", "kind": "domain_suffix", "value": "example.com", "action": "bypass" } // -> { "rule": "<uuid>" }
+{ "request": "RemoveRule", "rule": "<uuid>" }                                                // -> { "applied": true }
+```
+
+- `kind` is `domain` (that name), `domain_suffix` (that name and every name under it), `ip_cidr` or
+  `application`; `action` is `tunnel` or `bypass`. Port matchers, `Capture` and `Reject` belong to the
+  built-in set and are refused. The pattern gets the rule model's own checks (a name a connection could
+  carry; a range that is one and is not inside the FakeIP pool). Strict, and nothing is repeated back.
+- **The precedence is the service's.** A person's rule goes after every other rule and never below 200
+  (`USER_RULES_START`), whatever the encrypted-DNS choice, so no request can put one ahead of DNS
+  capture, the endpoint bypass or the encrypted-DNS block. A saved file that does is refused.
+- `application` is accepted by the grammar but **refused by this build's service**: connections are not yet
+  attributed to programs in `dnetd`, so such a rule would do nothing, and calling it "best effort" would not
+  be true (Principle VI). The refusal says to use a rule for the site or the address.
+- At most 128 of a person's rules. Idle only, saved before applied, used from the next connection. A built-in
+  rule cannot be removed; an unknown id is `InvalidRequest`.
+
+### `EnableBrutal` and `DisableBrutal` → `{ applied }` (T105, IPC-24)
+
+```jsonc
+{ "request": "EnableBrutal", "profile": "hy2-default", "up_mbps": 50, "down_mbps": 200,
+  "warning_revision": 1 }                                                    // -> { "applied": true }
+{ "request": "DisableBrutal", "profile": "hy2-default" }                    // -> { "applied": true }
+```
+
+- Brutal ignores loss and so takes capacity from everyone else on the access point (FR-006). It is
+  off unless a person turns it on having been shown the warning, `dnet_core::profile::brutal_warning()`,
+  which every client shows in those words (the window's copy is pinned to it by a test).
+- `warning_revision` is the revision of the warning that was shown. Only `BRUTAL_WARNING_REVISION` is
+  accepted; any other is `InvalidRequest` saying to show the current warning. The service records the
+  acknowledgement under that revision **at its own time**; a client cannot supply one.
+- Both directions are required, each a whole number of Mbit/s from 1 to 1,000,000. Zero would
+  half-enable Brutal (CC-04). Strict like every configuration request: an unknown, missing, `null` or
+  mistyped field is `InvalidRequest`, and no error repeats a value.
+- Only a Hysteria 2 profile has the setting; any other, or an unknown id, is `InvalidRequest`. Idle
+  only, saved before it is applied, used from the next connection; a failure to save changes nothing.
+- `ListProfiles` reports `"brutal": true|false` for each profile; a connected snapshot carries the
+  `BrutalEnabled` warning while it is on.
+- Additive: `EnableBrutal` previously took no fields and was always refused as not available, so no
+  client depended on it. The protocol version is unchanged.
 
 ### `ImportFeed { keys?, feed? } → { imported, changes }` (T066a, IPC-23)
 
@@ -378,5 +452,8 @@ defect.
 | IPC-20 | No error repeats a value from the request (including an unknown field's name), and nothing that prints a request shows a secret. |
 | IPC-21 | The decoder never panics on damaged or hostile text. |
 | IPC-22 | (daemon) A change is saved, applied and followed by a rebuilt orchestrator; a failure at any step leaves the store, the file and the sealed credentials as they were; nothing is changed while a connection is up or being made; an endpoint holding cloud resources is not removed. |
+| IPC-25 | `AddRule` names what it matches (`domain`, `domain_suffix`, `ip_cidr`, `application`), the value and `tunnel` or `bypass`, and `RemoveRule` a rule id; both are Mutating and strict; what only the built-in set may have, and any pattern the rule model refuses, is refused; nothing is repeated; (daemon) the service gives the precedence, never below 200, refuses program rules in this build, holds at most 128, saves them, and never removes a built-in. |
+| IPC-26 | `PrepareServer` names the kind of processor (`amd64`, `arm64`) and `FinishServer` the name, the address and the pasted result; both are Mutating, strict and bounded; nothing is repeated; the reply to `PrepareServer` is refused by a client unless it is exactly the promised shape; (daemon) the keys are in memory only, the same script returns until used or expired, a result from another script is refused, a failed save keeps the keys, and the call is idle-only. |
+| IPC-24 | `EnableBrutal` names a profile, both directions and the warning revision shown, and `DisableBrutal` a profile; both are Mutating, strict, bounded (1 to 1,000,000 Mbit/s), accept only the warning in force, round-trip, and never repeat what was sent; (daemon) only a Hysteria 2 profile, idle only, saved with the service's time, nothing changed on failure. |
 | IPC-23 | `ImportFeed` carries the keys document, the feed, or both, each within the size cap, and nothing else; an unknown field is refused without being repeated. |
 | IPC-15 | `GetVersion` is answered by the dispatch itself for any authenticated caller, never reaches the service, and tells an unauthenticated caller nothing; the reply has exactly the contracted keys; a client refuses a reply that is malformed, out of range, or from a service that predates the request. |

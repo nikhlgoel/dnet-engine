@@ -133,6 +133,26 @@ impl RoutingRule {
         Self::build(RuleId::new(), matcher, action, precedence, false)
     }
 
+    /// A person's rule read back from the saved configuration, with the id it was saved under. It
+    /// passes the checks a new one does, and may only be what a person can make: a domain, suffix,
+    /// address or program rule that tunnels or bypasses. Port matchers and `Capture` belong to the
+    /// built-in set alone.
+    pub fn restored_user(
+        id: RuleId,
+        matcher: RuleMatcher,
+        action: RuleAction,
+        precedence: u32,
+    ) -> Result<Self, DomainError> {
+        let personal = !matches!(
+            matcher,
+            RuleMatcher::DnsPort | RuleMatcher::EncryptedDnsPort
+        ) && matches!(action, RuleAction::Tunnel | RuleAction::Bypass);
+        if !personal {
+            return Err(DomainError::NotAPersonalRule);
+        }
+        Self::build(id, matcher, action, precedence, false)
+    }
+
     /// Create a built-in rule. Crate-private: only `builtin_rules` makes these, so no
     /// caller outside `dnet-core` can mark a rule non-deletable.
     pub(crate) fn builtin(
@@ -221,6 +241,15 @@ impl RoutingRule {
 
     /// Whether this rule is the DNS-capture rule (port-53 traffic forced into the
     /// tunnel). There is exactly one, built-in and non-deletable.
+    /// The same rule at another precedence. Crate-private: only the built-in layout moves rules
+    /// (`builtin_rules::with_active_endpoint`), and never a person's.
+    pub(crate) fn renumbered(&self, precedence: u32) -> Self {
+        Self {
+            precedence,
+            ..self.clone()
+        }
+    }
+
     pub fn is_dns_capture(&self) -> bool {
         matches!(self.matcher, RuleMatcher::DnsPort) && self.action == RuleAction::Capture
     }
@@ -236,6 +265,40 @@ pub fn validate_rule_set(rules: &[RoutingRule]) -> Result<(), DomainError> {
         }
     }
     Ok(())
+}
+
+/// A person's rules come after every built-in rule and after the encrypted-DNS block, whether or
+/// not the block is in force (T108): from [`crate::doh_block::USER_RULES_START`] on. Order is
+/// safety-critical here: a person's "tunnel" rule ahead of the endpoint bypass would send the
+/// tunnel's own packets into the tunnel.
+pub fn validate_user_rules_follow_builtins(rules: &[RoutingRule]) -> Result<(), DomainError> {
+    let start = crate::doh_block::USER_RULES_START;
+    let highest_builtin = rules
+        .iter()
+        .filter(|r| r.is_builtin())
+        .map(RoutingRule::precedence)
+        .max()
+        .unwrap_or(0);
+    match rules
+        .iter()
+        .filter(|r| !r.is_builtin())
+        .map(RoutingRule::precedence)
+        .find(|p| *p < start || *p <= highest_builtin)
+    {
+        Some(low) => Err(DomainError::UserRuleOutranksBuiltins(low, start)),
+        None => Ok(()),
+    }
+}
+
+/// The precedence the next rule a person adds gets: after every rule there is, and never below
+/// [`crate::doh_block::USER_RULES_START`]. `None` when there is no number left.
+pub fn next_user_precedence(rules: &[RoutingRule]) -> Option<u32> {
+    let after = rules
+        .iter()
+        .map(RoutingRule::precedence)
+        .max()
+        .map_or(Some(0), |p| p.checked_add(1))?;
+    Some(after.max(crate::doh_block::USER_RULES_START))
 }
 
 /// Validate that a rule set protects against DNS leaks: it must contain the DNS-capture
@@ -467,5 +530,76 @@ mod tests {
         )
         .unwrap();
         assert_eq!(validate_rule_set(&[a, b]), Ok(()));
+    }
+
+    // ---------------------------------------------------------------- a person's rules (T108)
+
+    fn mine(precedence: u32) -> RoutingRule {
+        RoutingRule::user(
+            RuleMatcher::Domain("example.com".into()),
+            RuleAction::Bypass,
+            precedence,
+        )
+        .unwrap()
+    }
+
+    /// A person's rule never outranks a built-in, whatever the encrypted-DNS choice: the built-ins
+    /// keep DNS captured, the endpoint off the tunnel and local resources reachable.
+    #[test]
+    fn a_users_rule_below_the_user_range_is_refused() {
+        let mut rules = builtin_rules(None);
+        rules.push(mine(crate::doh_block::USER_RULES_START - 1));
+        assert!(matches!(
+            validate_user_rules_follow_builtins(&rules),
+            Err(DomainError::UserRuleOutranksBuiltins(..))
+        ));
+        let mut rules = builtin_rules(None);
+        rules.push(mine(crate::doh_block::USER_RULES_START));
+        assert_eq!(validate_user_rules_follow_builtins(&rules), Ok(()));
+    }
+
+    #[test]
+    fn the_next_users_rule_goes_after_every_other() {
+        let mut rules = builtin_rules(None);
+        assert_eq!(
+            next_user_precedence(&rules),
+            Some(crate::doh_block::USER_RULES_START)
+        );
+        rules.push(mine(crate::doh_block::USER_RULES_START + 7));
+        assert_eq!(
+            next_user_precedence(&rules),
+            Some(crate::doh_block::USER_RULES_START + 8)
+        );
+        rules.push(mine(u32::MAX));
+        assert_eq!(
+            next_user_precedence(&rules),
+            None,
+            "no room is not a wrap-around"
+        );
+    }
+
+    /// A saved rule comes back with the id it was saved under, through the same checks as a new one.
+    #[test]
+    fn a_restored_rule_keeps_its_id_and_is_checked_like_a_new_one() {
+        let id = RuleId::new();
+        let rule = RoutingRule::restored_user(
+            id,
+            RuleMatcher::DomainSuffix("example.com".into()),
+            RuleAction::Tunnel,
+            300,
+        )
+        .unwrap();
+        assert_eq!(rule.id(), id);
+        assert!(!rule.is_builtin());
+        assert!(
+            RoutingRule::restored_user(id, RuleMatcher::DnsPort, RuleAction::Capture, 300).is_err()
+        );
+        assert!(RoutingRule::restored_user(
+            id,
+            RuleMatcher::Domain("example.com".into()),
+            RuleAction::Reject,
+            300
+        )
+        .is_err());
     }
 }

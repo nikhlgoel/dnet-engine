@@ -290,7 +290,14 @@ export function parseEndpoints(value: unknown): EndpointView[] {
   });
 }
 
+export const RULE_KINDS = ['domain', 'domain_suffix', 'ip_cidr', 'application', 'dns_port', 'encrypted_dns_port'] as const;
+export type RuleKind = (typeof RULE_KINDS)[number];
+
 export interface RuleView {
+  id: string;
+  /** What the rule matches, and the name, range, program or port it matches. */
+  kind: RuleKind;
+  value: string;
   /** Position in the precedence order; lower is stronger. */
   precedence: number;
   action: string;
@@ -305,6 +312,27 @@ export interface EncryptedDnsSetting {
   block: boolean;
   /** True until the first-run disclosure has been shown and answered. */
   needsDisclosure: boolean;
+}
+
+/** One connection method: its kind, its tier (measured, never intended) and whether Brutal is on. */
+export interface ProfileView {
+  id: string;
+  kind: 'AmneziaWg' | 'Hysteria2' | 'VlessReality';
+  tier: 'Tier1' | 'Tier2';
+  brutal: boolean;
+}
+
+export function parseProfiles(value: unknown): ProfileView[] {
+  const o = obj(value, 'the connection methods');
+  return list(o.profiles, 'the connection methods', 16).map((item) => {
+    const p = obj(item, 'a connection method');
+    return {
+      id: text(p.id, 'a connection method id', 64),
+      kind: oneOf(p.kind, ['AmneziaWg', 'Hysteria2', 'VlessReality'] as const, 'a connection method kind'),
+      tier: oneOf(p.tier, ['Tier1', 'Tier2'] as const, 'a tier'),
+      brutal: p.brutal === true,
+    };
+  });
 }
 
 export interface RulesView {
@@ -330,6 +358,9 @@ export function parseRules(value: unknown): RuleView[] {
   return list(o.rules, 'the rules', 512).map((item) => {
     const r = obj(item, 'a rule');
     return {
+      id: text(r.id, 'a rule id', 64),
+      kind: oneOf(r.kind, RULE_KINDS, 'what a rule matches'),
+      value: text(r.value, 'what a rule matches', 260),
       precedence: num(r.precedence, 'a precedence'),
       action: text(r.action, 'an action', 32),
       reliability: oneOf(r.reliability, ['Deterministic', 'BestEffort'] as const, 'a reliability'),

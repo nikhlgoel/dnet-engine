@@ -20,6 +20,7 @@ fn plan() -> BootstrapPlan {
         cores: ServerCores {
             primary_core: pin("primary-core", 'a'),
             amneziawg: pin("amneziawg-go", 'b'),
+            arch: ServerArch::Amd64,
         },
         ports: Ports::default(),
         awg_client_public_hex: "c".repeat(64),
@@ -369,7 +370,8 @@ fn report_json() -> serde_json::Value {
             "server_public_key_hex": "d".repeat(64),
             "listen_port": 51820,
             "client_address": "10.66.0.2",
-            "prefix_len": 24
+            "prefix_len": 24,
+            "client_public_key_hex": "c".repeat(64)
         },
         "hysteria2": {
             "server_port": 44443,
@@ -663,4 +665,230 @@ fn nothing_that_is_printed_shows_a_secret() {
         );
         assert!(!shown.contains("0123456789abcdef"), "{shown}");
     }
+}
+
+// ------------------------------------------------------------------ the machine's processor
+
+/// A script for the wrong processor would download a program that cannot run and fail in a way nobody
+/// can read. It says so first, in words, before anything is installed.
+#[test]
+fn the_script_stops_at_once_on_a_machine_of_the_other_kind() {
+    for (arch, own, other) in [
+        (ServerArch::Amd64, "x86_64", "aarch64"),
+        (ServerArch::Arm64, "aarch64", "x86_64"),
+    ] {
+        let mut p = plan();
+        p.cores.arch = arch;
+        let text = script(&p).unwrap();
+        let check = text
+            .lines()
+            .position(|l| l.contains("uname -m"))
+            .expect("the script never asks what kind of machine it is on");
+        let first_install = text
+            .lines()
+            .position(|l| l.contains("ensure curl"))
+            .unwrap();
+        assert!(
+            check < first_install,
+            "the check must come before any install"
+        );
+        assert!(
+            text.contains(&format!("\"$MACHINE\" != \"{own}\"")),
+            "{arch:?}"
+        );
+        assert!(text.contains(own), "{arch:?} script does not know {own}");
+        assert!(
+            text.contains("exit 3"),
+            "{arch:?}: a wrong machine has its own exit code"
+        );
+        assert!(!text.contains(&format!("!= \"{other}\"")), "{arch:?}");
+    }
+}
+
+#[test]
+fn the_processor_names_are_the_ones_the_release_files_use() {
+    assert_eq!(ServerArch::Amd64.as_str(), "amd64");
+    assert_eq!(ServerArch::Arm64.as_str(), "arm64");
+}
+
+// ------------------------------------------------------------------ keeping a small free server small
+
+/// A free server has about 47 GB of disk and no one watching it. Nothing it does may grow without bound.
+#[test]
+fn the_script_keeps_the_servers_logs_and_disk_bounded() {
+    let text = script(&plan()).unwrap();
+    // The core logs warnings and worse, not every connection.
+    assert!(text.contains("\"level\": \"warn\""));
+    assert!(!text.contains("\"level\": \"info\""));
+    assert!(!text.contains("\"level\": \"debug\"") && !text.contains("\"level\": \"trace\""));
+    // The system journal is capped, by size and by age.
+    assert!(text.contains("journald.conf.d/dnet.conf"));
+    assert!(text.contains("SystemMaxUse=100M"));
+    assert!(text.contains("MaxRetentionSec=14day"));
+    // Package downloads are not kept.
+    assert!(text.contains("apt-get clean") && text.contains("dnf clean all"));
+    // A weekly job trims what is left, and runs without anyone logging in.
+    assert!(text.contains("dnet-housekeeping.timer"));
+    assert!(text.contains("OnCalendar=weekly"));
+    assert!(text.contains("Persistent=true"));
+    assert!(text.contains("journalctl --vacuum-size=100M"));
+    assert!(text.contains("systemctl enable --now dnet-housekeeping.timer"));
+}
+
+/// The housekeeping never touches keys, certificates or the configuration.
+#[test]
+fn housekeeping_cannot_remove_anything_the_server_needs() {
+    let text = script(&plan()).unwrap();
+    let job = text
+        .split("# ---- housekeeping")
+        .nth(1)
+        .and_then(|rest| rest.split("# ---- services").next())
+        .expect("the script has no housekeeping section");
+    for forbidden in ["rm ", "/var/lib/dnet", "find ", "dd ", "truncate"] {
+        assert!(
+            !job.contains(forbidden),
+            "housekeeping contains {forbidden}"
+        );
+    }
+    // The only path of ours it names is its own script.
+    assert_eq!(job.matches("/opt/dnet").count(), 1, "{job}");
+    assert!(job.contains("ExecStart=/opt/dnet/bin/dnet-housekeeping"));
+}
+
+/// The guard is run, not just read: with `uname` answering as each kind of machine, a script for the other
+/// kind exits 3 with a sentence, and one for the same kind gets past it.
+#[test]
+fn the_guard_behaves_when_run_with_each_kind_of_machine() {
+    let Some(shell) = ["sh", "bash"].into_iter().find(|s| {
+        std::process::Command::new(s)
+            .arg("-c")
+            .arg("exit 0")
+            .output()
+            .is_ok_and(|o| o.status.success())
+    }) else {
+        eprintln!("SKIPPED: no shell on this machine");
+        return;
+    };
+    for (script_arch, reported, expect_ok) in [
+        (ServerArch::Amd64, "x86_64", true),
+        (ServerArch::Amd64, "aarch64", false),
+        (ServerArch::Arm64, "aarch64", true),
+        (ServerArch::Arm64, "arm64", true),
+        (ServerArch::Arm64, "x86_64", false),
+        (ServerArch::Amd64, "riscv64", false),
+    ] {
+        let mut p = plan();
+        p.cores.arch = script_arch;
+        let text = script(&p).unwrap();
+        let start = text.find("MACHINE=$(uname -m)").unwrap();
+        let end = text[start..].find("\nneed() ").unwrap() + start;
+        let guard = format!(
+            "uname() {{ echo {reported}; }}\n{}\necho PAST",
+            &text[start..end]
+        );
+        let out = std::process::Command::new(shell)
+            .arg("-c")
+            .arg(&guard)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if expect_ok {
+            assert!(
+                out.status.success() && stdout.contains("PAST"),
+                "{script_arch:?}/{reported}: {stderr}"
+            );
+        } else {
+            assert_eq!(out.status.code(), Some(3), "{script_arch:?}/{reported}");
+            assert!(!stdout.contains("PAST"));
+            assert!(
+                stderr.contains("choose the other kind of server"),
+                "{stderr}"
+            );
+        }
+    }
+}
+
+/// A report is for one script. One printed by a server set up from an earlier script carries another
+/// client key, and used with this script's keys it would give a server that silently does not work.
+#[test]
+fn a_report_from_another_scripts_server_is_refused() {
+    let ours = BootstrapReport::parse(&format!("{REPORT_PREFIX}{}", report_json())).unwrap();
+    assert_eq!(ours.check_against(&plan()), Ok(()));
+
+    let mut other = report_json();
+    other["amneziawg"]["client_public_key_hex"] = serde_json::json!("9".repeat(64));
+    let other = BootstrapReport::parse(&format!("{REPORT_PREFIX}{other}")).unwrap();
+    assert_eq!(
+        other.check_against(&plan()),
+        Err(ReportError::Mismatch("the client key"))
+    );
+}
+
+#[test]
+fn the_script_reports_the_client_key_it_was_given() {
+    let text = script(&plan()).unwrap();
+    assert!(text.contains(&format!(
+        "\"client_public_key_hex\": \"{}\"",
+        "c".repeat(64)
+    )));
+}
+
+#[test]
+fn a_report_without_the_client_key_or_with_a_malformed_one_is_refused() {
+    let mut missing = report_json();
+    missing["amneziawg"]
+        .as_object_mut()
+        .unwrap()
+        .remove("client_public_key_hex");
+    assert!(BootstrapReport::parse(&format!("{REPORT_PREFIX}{missing}")).is_err());
+    for bad in ["", "abc", &"C".repeat(64), &"g".repeat(64), &"c".repeat(65)] {
+        let mut j = report_json();
+        j["amneziawg"]["client_public_key_hex"] = serde_json::json!(bad);
+        assert!(
+            BootstrapReport::parse(&format!("{REPORT_PREFIX}{j}")).is_err(),
+            "{bad:?}"
+        );
+    }
+}
+
+// ------------------------------------------------------------------ not being reclaimed for being idle
+
+/// A free server that does nothing is taken back, with its address. The setup installs the keepalive
+/// itself, and fails if it is not running, because an endpoint that disappears in a week is worse than one
+/// that was never made. It comes before the report, so a report is only ever printed for a server that
+/// will stay.
+#[test]
+fn the_script_installs_the_keepalive_and_checks_it_before_it_reports() {
+    let text = script(&plan()).unwrap();
+    let report = text.find("DNET-BOOTSTRAP-REPORT").unwrap();
+    for needed in [
+        "/opt/dnet/bin/dnet-keepalive",
+        "dnet-keepalive.timer",
+        "systemctl enable --now dnet-keepalive.timer",
+        crate::keepalive::CHECK_COMMAND,
+    ] {
+        let at = text
+            .find(needed)
+            .unwrap_or_else(|| panic!("the script lacks {needed}"));
+        assert!(at < report, "{needed} must come before the report");
+    }
+    assert!(text.starts_with("#!/bin/sh\n# DNet Engine endpoint bootstrap."));
+    assert_eq!(
+        text.matches("# DNet Engine endpoint keepalive.").count(),
+        1,
+        "the keepalive's header appears once, as part of this script"
+    );
+    assert!(!text.contains("@@"));
+}
+
+#[test]
+fn the_keepalive_in_the_script_is_the_standalone_one() {
+    let text = script(&plan()).unwrap();
+    let standalone = crate::keepalive::script(&crate::keepalive::KeepalivePlan::default());
+    let body: String = standalone.lines().skip(1).collect::<Vec<_>>().join("\n");
+    assert!(
+        text.contains(&body),
+        "the keepalive section differs from the one that is tested by itself"
+    );
 }

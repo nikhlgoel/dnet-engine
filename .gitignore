@@ -148,6 +148,8 @@ CLAUDE.local.md
 graphify-out/
 
 # ---------- Local tool caches and lab artefacts ----------
+# Output of the commands in LOCAL-COMMANDS.md, kept for the assistant on that machine to read.
+.local-logs/
 .ruff_cache/
 .pytest_cache/
 .mypy_cache/

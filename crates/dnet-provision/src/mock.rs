@@ -318,7 +318,13 @@ impl Provider for MockProvider {
     fn bootstrap(&self, _instance: &InstanceInfo, script: &str) -> Result<String, ProviderError> {
         let mut state = self.enter("bootstrap")?;
         state.last_bootstrap_script = Some(script.to_owned());
-        Ok(state.bootstrap_output.clone())
+        // A real server prints the client key it was given. `{CLIENT_PUB}` in the scripted output stands
+        // for it, read from the script as the server would.
+        let client_pub = script
+            .lines()
+            .find_map(|l| l.strip_prefix("public_key="))
+            .unwrap_or_default();
+        Ok(state.bootstrap_output.replace("{CLIENT_PUB}", client_pub))
     }
 
     fn install_keepalive(

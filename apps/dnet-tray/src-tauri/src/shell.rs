@@ -319,6 +319,73 @@ async fn set_endpoint_enabled(
 }
 
 #[tauri::command]
+async fn list_profiles(shell: Shared<'_>) -> Result<Value, String> {
+    shell.bridge.profiles().await
+}
+
+/// Brutal on (`up` and `down` in Mbit/s) or off (neither). `warning_revision` is the revision of the
+/// warning the window showed; the service records the acceptance only if it is the one in force.
+#[tauri::command]
+async fn set_brutal(
+    shell: Shared<'_>,
+    profile: String,
+    up: Option<u32>,
+    down: Option<u32>,
+    warning_revision: u32,
+) -> Result<Value, String> {
+    let bandwidth = match (up, down) {
+        (Some(up), Some(down)) => Some((up, down)),
+        (None, None) => None,
+        // One direction alone would half-enable it (CC-04): not a request this window makes.
+        _ => return Err("both directions are needed, or neither".to_owned()),
+    };
+    let outcome = shell
+        .bridge
+        .set_brutal(&profile, bandwidth, warning_revision)
+        .await;
+    shell.wake.notify_one();
+    Ok(outcome)
+}
+
+/// The script to run on the person's own server, and the ports to open (T150).
+#[tauri::command]
+async fn prepare_server(shell: Shared<'_>, arch: String) -> Result<Value, String> {
+    Ok(shell.bridge.prepare_server(&arch).await)
+}
+
+/// What the server printed, pasted back: checked, and the server added (T150).
+#[tauri::command]
+async fn finish_server(
+    shell: Shared<'_>,
+    label: String,
+    host: String,
+    report: String,
+) -> Result<Value, String> {
+    let outcome = shell.bridge.finish_server(&label, &host, &report).await;
+    shell.wake.notify_one();
+    Ok(outcome)
+}
+
+#[tauri::command]
+async fn add_rule(
+    shell: Shared<'_>,
+    kind: String,
+    value: String,
+    action: String,
+) -> Result<Value, String> {
+    let outcome = shell.bridge.add_rule(&kind, &value, &action).await;
+    shell.wake.notify_one();
+    Ok(outcome)
+}
+
+#[tauri::command]
+async fn remove_rule(shell: Shared<'_>, id: String) -> Result<Value, String> {
+    let outcome = shell.bridge.remove_rule(&id).await;
+    shell.wake.notify_one();
+    Ok(outcome)
+}
+
+#[tauri::command]
 async fn list_rules(shell: Shared<'_>) -> Result<Value, String> {
     shell.bridge.rules().await
 }
@@ -359,8 +426,14 @@ pub fn run() {
             list_endpoints,
             add_endpoint,
             remove_endpoint,
+            prepare_server,
+            finish_server,
             set_endpoint_enabled,
+            list_profiles,
+            set_brutal,
             list_rules,
+            add_rule,
+            remove_rule,
             set_encrypted_dns,
             check_updates,
             open_login_page,

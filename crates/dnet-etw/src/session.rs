@@ -24,10 +24,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
+use ferrisetw::native::{EvntraceNativeError, TraceHandle};
 use ferrisetw::parser::Parser;
 use ferrisetw::provider::Provider;
 use ferrisetw::schema_locator::SchemaLocator;
-use ferrisetw::trace::{TraceTrait, UserTrace};
+use ferrisetw::trace::{stop_trace_by_name, TraceError, TraceTrait, UserTrace};
 use ferrisetw::EventRecord;
 
 use crate::attribution::{decode, is_connect, RawConnect, PROVIDER_GUID};
@@ -115,20 +116,24 @@ pub struct EtwSession {
 
 impl EtwSession {
     /// Start listening, filling `cache`.
+    ///
+    /// A real-time session outlives the process that started it, so after a crash the name is still
+    /// taken and a start would fail until the machine restarts. That session is ours, left behind,
+    /// and nobody consumes it: it is stopped by name and the start is tried once more.
     pub fn start(cache: SharedCache) -> Result<Self, SessionError> {
         let counters = Arc::new(Counters::default());
-        let callback_counters = Arc::clone(&counters);
-        let provider = Provider::by_guid(PROVIDER_GUID)
-            .add_callback(move |record: &EventRecord, locator: &SchemaLocator| {
-                on_event(record, locator, &cache, &callback_counters);
-            })
-            .build();
+        let (trace, handle) = match Self::open(cache.clone(), Arc::clone(&counters)) {
+            Err(TraceError::EtwNativeError(EvntraceNativeError::AlreadyExist)) => {
+                tracing::info!("stopping an attribution session left behind by an earlier run");
+                if let Err(e) = stop_trace_by_name(SESSION_NAME) {
+                    tracing::warn!(error = ?e, "the earlier attribution session did not stop");
+                }
+                Self::open(cache, Arc::clone(&counters))
+            }
+            other => other,
+        }
         // `TraceError` is `Debug` but not `Display`.
-        let (trace, handle) = UserTrace::new()
-            .named(String::from(SESSION_NAME))
-            .enable(provider)
-            .start()
-            .map_err(|e| SessionError::Start(format!("{e:?}")))?;
+        .map_err(|e| SessionError::Start(format!("{e:?}")))?;
         let worker = std::thread::spawn(move || {
             let _ = UserTrace::process_from_handle(handle);
         });
@@ -137,6 +142,21 @@ impl EtwSession {
             worker: Some(worker),
             counters,
         })
+    }
+
+    fn open(
+        cache: SharedCache,
+        counters: Arc<Counters>,
+    ) -> Result<(UserTrace, TraceHandle), TraceError> {
+        let provider = Provider::by_guid(PROVIDER_GUID)
+            .add_callback(move |record: &EventRecord, locator: &SchemaLocator| {
+                on_event(record, locator, &cache, &counters);
+            })
+            .build();
+        UserTrace::new()
+            .named(String::from(SESSION_NAME))
+            .enable(provider)
+            .start()
     }
 
     /// What the session has seen so far.

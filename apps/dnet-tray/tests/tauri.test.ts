@@ -10,6 +10,7 @@ import type { Bridge } from '../src/lib/bridge';
 import { createTauriBridge } from '../src/lib/tauri';
 import type { ActivityItem, Snapshot } from '../src/lib/model';
 import { rawSnapshot } from '../src/lib/mock';
+import { brutalWarning } from '../src/lib/messages';
 
 type Handler = (command: string, args: Record<string, unknown>) => unknown;
 
@@ -265,3 +266,42 @@ describe('subscribe', () => {
     expect(seen).toHaveLength(1);
   });
 });
+
+describe('aggressive speed mode (Brutal, T105)', () => {
+  it('reads the methods, and turns the mode on with both figures and the revision of the warning shown', async () => {
+    const { b, calls } = await bridge((c) =>
+      c === 'list_profiles'
+        ? { profiles: [{ id: 'hy2-default', kind: 'Hysteria2', tier: 'Tier2', brutal: false }] }
+        : c === 'set_brutal'
+          ? { ok: true }
+          : answers[c],
+    );
+    expect(await b.profiles()).toEqual([{ id: 'hy2-default', kind: 'Hysteria2', tier: 'Tier2', brutal: false }]);
+    expect(await b.setBrutal('hy2-default', { up: 50, down: 200 })).toEqual({ ok: true });
+    expect(await b.setBrutal('hy2-default', null)).toEqual({ ok: true });
+    expect(calls.list.filter(([c]) => c === 'set_brutal').map(([, a]) => a)).toEqual([
+      { profile: 'hy2-default', up: 50, down: 200, warningRevision: brutalWarning.revision },
+      { profile: 'hy2-default', up: null, down: null, warningRevision: brutalWarning.revision },
+    ]);
+  });
+
+  it('a method list it cannot read is an error, not an empty list', async () => {
+    const { b } = await bridge((c) => (c === 'list_profiles' ? { profiles: [{ id: 'x', kind: 'Telepathy', tier: 'Tier2' }] } : answers[c]));
+    await expect(b.profiles()).rejects.toBeTruthy();
+  });
+});
+
+describe('rules (T108)', () => {
+  it('adds a rule by what it matches and removes one by id', async () => {
+    const { b, calls } = await bridge((c) =>
+      c === 'add_rule' ? { ok: true, id: 'r1' } : c === 'remove_rule' ? { ok: true } : answers[c],
+    );
+    expect(await b.addRule({ kind: 'domain_suffix', value: 'example.com', action: 'bypass' })).toEqual({ ok: true, id: 'r1' });
+    expect(await b.removeRule('r1')).toEqual({ ok: true });
+    expect(calls.list.filter(([c]) => c.endsWith('_rule')).map(([c, a]) => [c, a])).toEqual([
+      ['add_rule', { kind: 'domain_suffix', value: 'example.com', action: 'bypass' }],
+      ['remove_rule', { id: 'r1' }],
+    ]);
+  });
+});
+

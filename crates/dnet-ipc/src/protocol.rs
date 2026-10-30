@@ -8,10 +8,13 @@
 //! that `dnet-core`'s domain types carry no wire-format concern and the exact contract
 //! shape — including which strings are *rejected* — is explicit and testable.
 
+use crate::server_setup::ServerKind;
 use dnet_config::credentials::EndpointCredentials;
+use dnet_config::persist::MAX_BRUTAL_MBPS;
 use dnet_core::failure::explain;
-use dnet_core::ids::{EndpointId, ProfileId};
-use dnet_core::profile::CoreBinding;
+use dnet_core::ids::{EndpointId, ProfileId, RuleId};
+use dnet_core::profile::{CoreBinding, BRUTAL_WARNING_REVISION};
+use dnet_core::rule::{IpCidr, RoutingRule, RuleAction, RuleMatcher};
 use dnet_core::session::FailureCause;
 use dnet_core::tier::FailoverTier;
 use serde_json::{json, Map, Value};
@@ -73,10 +76,30 @@ pub enum Request {
         endpoint: EndpointId,
         enabled: bool,
     },
-    AddRule,
-    RemoveRule,
+    /// Add a person's rule (T108). The precedence is the service's to give: after every built-in rule,
+    /// so no request can put one ahead of DNS capture or the endpoint bypass.
+    AddRule {
+        matcher: RuleMatcher,
+        action: RuleAction,
+    },
+    RemoveRule {
+        rule: RuleId,
+    },
     SetProfileParams,
-    EnableBrutal,
+    /// Turn Brutal congestion control on for a Hysteria 2 profile (FR-006, T105). Brutal ignores loss
+    /// and so takes capacity from everyone else on the access point; it is off unless a person turns it
+    /// on having been shown why that matters. `warning_revision` is the revision of the warning they
+    /// were shown, and only the warning in force counts. The time of acceptance is the service's.
+    EnableBrutal {
+        profile: ProfileId,
+        up_mbps: u32,
+        down_mbps: u32,
+        warning_revision: u32,
+    },
+    /// Turn Brutal off again (back to BBR, the default).
+    DisableBrutal {
+        profile: ProfileId,
+    },
     /// The person's choice about encrypted DNS (FR-025, FR-025a): `block: true` makes programs fall back
     /// to the system resolver (the default); `block: false` is the single-action opt-out, and its reply
     /// states the consequence.
@@ -93,6 +116,19 @@ pub enum Request {
     /// is only ever the result of this explicit request. Takes no field: what to fetch and from where
     /// are compiled in. The reply says the check began; its result arrives as an event.
     FetchFeed,
+    /// Begin setting up the person's own server (T150): the service makes the keys that stay on this
+    /// computer and answers with the script to run on the server and the ports to open. `arch` is the
+    /// kind of processor the server has.
+    PrepareServer {
+        arch: ServerKind,
+    },
+    /// Finish it: `report` is what the script printed on the server, pasted back. The service checks it
+    /// against what it asked for and, if it matches, adds the server under `label` at `host`.
+    FinishServer {
+        label: String,
+        host: String,
+        report: String,
+    },
     StartProvisioning,
     CancelProvisioning,
     Subscribe,
@@ -152,6 +188,51 @@ pub const MAX_LABEL_CHARS: usize = dnet_core::endpoint::MAX_LABEL_LEN;
 /// The longest host accepted (a DNS name is at most 253 characters).
 pub const MAX_HOST_CHARS: usize = 253;
 
+/// The rules for a server's name. Every message names the field and never repeats its value.
+pub fn check_label(label: &str) -> Result<&str, IpcError> {
+    let label = label.trim();
+    if label.is_empty()
+        || label.chars().count() > MAX_LABEL_CHARS
+        || !label.bytes().all(|b| (0x20..0x7F).contains(&b))
+    {
+        return Err(invalid(format!(
+            "`label` must be 1 to {MAX_LABEL_CHARS} printable ASCII characters"
+        )));
+    }
+    Ok(label)
+}
+
+/// The rules for a server's address.
+pub fn check_host(host: &str) -> Result<&str, IpcError> {
+    let host = host.trim();
+    if host.len() > MAX_HOST_CHARS || !dnet_config::persist::host_is_acceptable(host) {
+        return Err(invalid(
+            "`host` must be an IP address or a host name, with no scheme, port or path",
+        ));
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if ip.is_unspecified() || ip.is_multicast() {
+            return Err(invalid("`host` is not an address a server can have"));
+        }
+    }
+    Ok(host)
+}
+
+/// The rules for the text a person pastes back from their server.
+fn check_report(report: &str) -> Result<(), IpcError> {
+    let bad = |c: char| crate::netview::is_hostile(c) && !matches!(c, '\n' | '\r' | '\t');
+    if report.trim().is_empty()
+        || report.chars().count() > crate::server_setup::MAX_REPORT_CHARS
+        || report.chars().any(bad)
+    {
+        return Err(invalid(format!(
+            "`report` must be the text the server printed, up to {} characters, with no control characters",
+            crate::server_setup::MAX_REPORT_CHARS
+        )));
+    }
+    Ok(())
+}
+
 impl NewEndpoint {
     /// Check and make a new endpoint. Every message names the field and never repeats its value.
     pub fn new(
@@ -159,26 +240,8 @@ impl NewEndpoint {
         host: &str,
         credentials: EndpointCredentials,
     ) -> Result<Self, IpcError> {
-        let label = label.trim();
-        if label.is_empty()
-            || label.chars().count() > MAX_LABEL_CHARS
-            || !label.bytes().all(|b| (0x20..0x7F).contains(&b))
-        {
-            return Err(invalid(format!(
-                "`label` must be 1 to {MAX_LABEL_CHARS} printable ASCII characters"
-            )));
-        }
-        let host = host.trim();
-        if host.len() > MAX_HOST_CHARS || !dnet_config::persist::host_is_acceptable(host) {
-            return Err(invalid(
-                "`host` must be an IP address or a host name, with no scheme, port or path",
-            ));
-        }
-        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-            if ip.is_unspecified() || ip.is_multicast() {
-                return Err(invalid("`host` is not an address a server can have"));
-            }
-        }
+        let label = check_label(label)?;
+        let host = check_host(host)?;
         if credentials.is_empty() {
             return Err(invalid("`credentials` holds no connection method"));
         }
@@ -224,13 +287,16 @@ impl Request {
             | AddEndpoint(_)
             | RemoveEndpoint { .. }
             | SetEndpointEnabled { .. }
-            | AddRule
-            | RemoveRule
+            | AddRule { .. }
+            | RemoveRule { .. }
             | SetProfileParams
-            | EnableBrutal
+            | EnableBrutal { .. }
+            | DisableBrutal { .. }
             | SetEncryptedDnsHandling { .. }
             | ImportFeed(_)
             | FetchFeed
+            | PrepareServer { .. }
+            | FinishServer { .. }
             | StartProvisioning
             | CancelProvisioning => RequestClass::Mutating,
         }
@@ -736,6 +802,80 @@ fn parse_profile_id(raw: &str) -> Result<ProfileId, IpcError> {
 
 /// An endpoint id from a client: a UUID in its canonical hyphenated form, nothing else (no
 /// braces, no `urn:` prefix, no bare hex).
+/// The longest program path a rule may name (the Windows `MAX_PATH`).
+const MAX_PROGRAM_PATH: usize = 260;
+
+/// A rule a person can make: what it matches, from the kinds a person may use, and `tunnel` or
+/// `bypass`. Checked by the rule model itself (`RoutingRule::user`), so a pattern it would refuse is
+/// refused here. Errors name the field, never the value.
+fn personal_rule(
+    kind: &str,
+    value: &str,
+    action: &str,
+) -> Result<(RuleMatcher, RuleAction), IpcError> {
+    let matcher = match kind {
+        "domain" => RuleMatcher::Domain(value.to_owned()),
+        "domain_suffix" => RuleMatcher::DomainSuffix(value.to_owned()),
+        "ip_cidr" => RuleMatcher::IpCidr(
+            IpCidr::parse(value)
+                .map_err(|_| invalid("`value` must be an address range such as 198.51.100.0/24"))?,
+        ),
+        "application" => {
+            let printable = value.chars().all(|c| {
+                !c.is_control() && !matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+            });
+            if value.trim().is_empty() || value.chars().count() > MAX_PROGRAM_PATH || !printable {
+                return Err(invalid(format!(
+                    "`value` must be a program path of 1 to {MAX_PROGRAM_PATH} printable characters"
+                )));
+            }
+            RuleMatcher::Application(value.to_owned())
+        }
+        _ => {
+            return Err(invalid(
+                "`kind` must be domain, domain_suffix, ip_cidr or application",
+            ))
+        }
+    };
+    let action = match action {
+        "tunnel" => RuleAction::Tunnel,
+        "bypass" => RuleAction::Bypass,
+        _ => return Err(invalid("`action` must be tunnel or bypass")),
+    };
+    // The precedence here is a stand-in; the service gives the real one. The checks do not depend on it.
+    RoutingRule::user(
+        matcher.clone(),
+        action,
+        dnet_core::doh_block::USER_RULES_START,
+    )
+    .map_err(|_| invalid("`value` is not a pattern this kind of rule can match"))?;
+    Ok((matcher, action))
+}
+
+/// A rule's matcher as the `kind` and `value` of the wire.
+pub fn rule_wire(matcher: &RuleMatcher) -> (&'static str, String) {
+    match matcher {
+        RuleMatcher::Domain(d) => ("domain", d.clone()),
+        RuleMatcher::DomainSuffix(d) => ("domain_suffix", d.clone()),
+        RuleMatcher::IpCidr(c) => ("ip_cidr", c.to_string()),
+        RuleMatcher::Application(p) => ("application", p.clone()),
+        RuleMatcher::DnsPort => ("dns_port", "53".to_owned()),
+        RuleMatcher::EncryptedDnsPort => (
+            "encrypted_dns_port",
+            dnet_core::doh_block::ENCRYPTED_DNS_PORT.to_string(),
+        ),
+    }
+}
+
+fn parse_rule_id(raw: &str) -> Result<RuleId, IpcError> {
+    if raw.len() == 36 {
+        if let Ok(uuid) = Uuid::parse_str(raw) {
+            return Ok(RuleId::from_uuid(uuid));
+        }
+    }
+    Err(invalid("`rule` must be a UUID in its hyphenated form"))
+}
+
 fn parse_endpoint_id(raw: &str) -> Result<EndpointId, IpcError> {
     if raw.len() == 36 {
         if let Ok(uuid) = Uuid::parse_str(raw) {
@@ -776,6 +916,20 @@ fn field_str<'v>(value: &'v Value, key: &str) -> Result<&'v str, IpcError> {
     field(value, key)?
         .as_str()
         .ok_or_else(|| invalid(format!("`{key}` must be a string")))
+}
+
+/// A Brutal bandwidth, in Mbit/s: a whole number from 1 to the bound the saved configuration holds.
+/// Zero on either side would half-enable Brutal (CC-04).
+fn field_mbps(value: &Value, key: &str) -> Result<u32, IpcError> {
+    field(value, key)?
+        .as_u64()
+        .filter(|n| (1..=u64::from(MAX_BRUTAL_MBPS)).contains(n))
+        .and_then(|n| u32::try_from(n).ok())
+        .ok_or_else(|| {
+            invalid(format!(
+                "`{key}` must be a whole number of Mbit/s from 1 to {MAX_BRUTAL_MBPS}"
+            ))
+        })
 }
 
 fn field_bool(value: &Value, key: &str) -> Result<bool, IpcError> {
@@ -870,10 +1024,59 @@ pub fn decode_request(wire: &str) -> Result<Request, IpcError> {
                 enabled: field_bool(&value, "enabled")?,
             }
         }
-        "AddRule" => Request::AddRule,
-        "RemoveRule" => Request::RemoveRule,
+        "AddRule" => {
+            only_fields(&value, &["request", "kind", "value", "action"])?;
+            let (matcher, action) = personal_rule(
+                field_str(&value, "kind")?,
+                field_str(&value, "value")?,
+                field_str(&value, "action")?,
+            )?;
+            Request::AddRule { matcher, action }
+        }
+        "RemoveRule" => {
+            only_fields(&value, &["request", "rule"])?;
+            Request::RemoveRule {
+                rule: parse_rule_id(field_str(&value, "rule")?)?,
+            }
+        }
         "SetProfileParams" => Request::SetProfileParams,
-        "EnableBrutal" => Request::EnableBrutal,
+        "EnableBrutal" => {
+            only_fields(
+                &value,
+                &[
+                    "request",
+                    "profile",
+                    "up_mbps",
+                    "down_mbps",
+                    "warning_revision",
+                ],
+            )?;
+            let profile = parse_profile_id(field_str(&value, "profile")?)?;
+            let up_mbps = field_mbps(&value, "up_mbps")?;
+            let down_mbps = field_mbps(&value, "down_mbps")?;
+            let warning_revision = field(&value, "warning_revision")?
+                .as_u64()
+                .and_then(|r| u32::try_from(r).ok())
+                .filter(|r| *r == BRUTAL_WARNING_REVISION)
+                .ok_or_else(|| {
+                    invalid(
+                        "`warning_revision` is not the warning in force; show the current \
+                         warning and send the revision that was shown",
+                    )
+                })?;
+            Request::EnableBrutal {
+                profile,
+                up_mbps,
+                down_mbps,
+                warning_revision,
+            }
+        }
+        "DisableBrutal" => {
+            only_fields(&value, &["request", "profile"])?;
+            Request::DisableBrutal {
+                profile: parse_profile_id(field_str(&value, "profile")?)?,
+            }
+        }
         "SetEncryptedDnsHandling" => {
             only_fields(&value, &["request", "block"])?;
             Request::SetEncryptedDnsHandling {
@@ -890,6 +1093,26 @@ pub fn decode_request(wire: &str) -> Result<Request, IpcError> {
         "FetchFeed" => {
             only_fields(&value, &["request"])?;
             Request::FetchFeed
+        }
+        "PrepareServer" => {
+            only_fields(&value, &["request", "arch"])?;
+            let arch = field_str(&value, "arch")?;
+            Request::PrepareServer {
+                arch: ServerKind::parse(arch)
+                    .ok_or_else(|| invalid("`arch` must be `amd64` or `arm64`"))?,
+            }
+        }
+        "FinishServer" => {
+            only_fields(&value, &["request", "label", "host", "report"])?;
+            let label = check_label(field_str(&value, "label")?)?.to_owned();
+            let host = check_host(field_str(&value, "host")?)?.to_owned();
+            let report = field_str(&value, "report")?;
+            check_report(report)?;
+            Request::FinishServer {
+                label,
+                host,
+                report: report.to_owned(),
+            }
         }
         "StartProvisioning" => Request::StartProvisioning,
         "CancelProvisioning" => Request::CancelProvisioning,
@@ -917,13 +1140,16 @@ pub fn encode_request(request: &Request) -> String {
         Request::AddEndpoint(_) => "AddEndpoint",
         Request::RemoveEndpoint { .. } => "RemoveEndpoint",
         Request::SetEndpointEnabled { .. } => "SetEndpointEnabled",
-        Request::AddRule => "AddRule",
-        Request::RemoveRule => "RemoveRule",
+        Request::AddRule { .. } => "AddRule",
+        Request::RemoveRule { .. } => "RemoveRule",
         Request::SetProfileParams => "SetProfileParams",
-        Request::EnableBrutal => "EnableBrutal",
+        Request::EnableBrutal { .. } => "EnableBrutal",
+        Request::DisableBrutal { .. } => "DisableBrutal",
         Request::SetEncryptedDnsHandling { .. } => "SetEncryptedDnsHandling",
         Request::ImportFeed(_) => "ImportFeed",
         Request::FetchFeed => "FetchFeed",
+        Request::PrepareServer { .. } => "PrepareServer",
+        Request::FinishServer { .. } => "FinishServer",
         Request::StartProvisioning => "StartProvisioning",
         Request::CancelProvisioning => "CancelProvisioning",
         Request::Subscribe => "Subscribe",
@@ -973,6 +1199,54 @@ pub fn encode_request(request: &Request) -> String {
         }
         Request::SetEncryptedDnsHandling { block } => {
             object.insert("block".into(), Value::Bool(*block));
+        }
+        Request::PrepareServer { arch } => {
+            object.insert("arch".into(), Value::String(arch.as_str().to_owned()));
+        }
+        Request::FinishServer {
+            label,
+            host,
+            report,
+        } => {
+            object.insert("label".into(), Value::String(label.clone()));
+            object.insert("host".into(), Value::String(host.clone()));
+            object.insert("report".into(), Value::String(report.clone()));
+        }
+        Request::EnableBrutal {
+            profile,
+            up_mbps,
+            down_mbps,
+            warning_revision,
+        } => {
+            object.insert("profile".into(), Value::String(profile.as_str().to_owned()));
+            object.insert("up_mbps".into(), Value::from(*up_mbps));
+            object.insert("down_mbps".into(), Value::from(*down_mbps));
+            object.insert("warning_revision".into(), Value::from(*warning_revision));
+        }
+        Request::AddRule { matcher, action } => {
+            let (kind, value) = rule_wire(matcher);
+            object.insert("kind".into(), Value::String(kind.to_owned()));
+            object.insert("value".into(), Value::String(value));
+            object.insert(
+                "action".into(),
+                Value::String(
+                    match action {
+                        RuleAction::Tunnel => "tunnel",
+                        // `personal_rule` makes nothing else; a request built in code that holds
+                        // another action is refused when it is decoded at the other end.
+                        RuleAction::Bypass => "bypass",
+                        RuleAction::Capture => "capture",
+                        RuleAction::Reject => "reject",
+                    }
+                    .to_owned(),
+                ),
+            );
+        }
+        Request::RemoveRule { rule } => {
+            object.insert("rule".into(), Value::String(rule.to_string()));
+        }
+        Request::DisableBrutal { profile } => {
+            object.insert("profile".into(), Value::String(profile.as_str().to_owned()));
         }
         Request::ImportFeed(import) => {
             if let Some(keys) = import.keys() {

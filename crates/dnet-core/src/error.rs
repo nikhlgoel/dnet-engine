@@ -86,6 +86,15 @@ pub enum DomainError {
     #[error("rule precedence {0} outranks the built-in encrypted-DNS block; use {1} or higher")]
     OutranksEncryptedDnsBlock(u32, u32),
 
+    /// A person's rule would come before a built-in rule (T108). Built-ins keep DNS captured, the
+    /// endpoint off the tunnel and local resources reachable, so they always win.
+    #[error("rule precedence {0} would outrank the built-in rules; a rule you add starts at {1}")]
+    UserRuleOutranksBuiltins(u32, u32),
+
+    /// A rule of a kind only the built-in set has: a port matcher, or capture or reject.
+    #[error("a rule you add matches a domain, a domain and its subdomains, an address range or a program, and tunnels or bypasses")]
+    NotAPersonalRule,
+
     /// A rule set lost a built-in rule. Built-ins keep local resources, portal login, the
     /// endpoint route, and DNS capture working, so they cannot be deleted (data-model §4).
     #[error("built-in rule {0} cannot be removed")]

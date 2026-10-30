@@ -32,6 +32,7 @@ use dnet_config::primary::{
 use dnet_config::reality::{RealityClientParams, RealitySettings, RealityTransport};
 use dnet_config::secret_store::{SecretKey, SecretStore};
 use dnet_config::ActiveEndpointBypass;
+use dnet_core::builtin_rules::with_active_endpoint;
 use dnet_core::endpoint::{Endpoint, EndpointAddress};
 use dnet_core::feed::ClientDefinitions;
 use dnet_core::profile::{Carrier, ConnectionProfile, CoreBinding, ProfileKind};
@@ -432,11 +433,19 @@ pub fn plan_tunnel(
 ) -> Result<TunnelPlan, PlanError> {
     let (endpoint_ip, bypass) = dialled(endpoint, profile, credentials)?;
     let transport = primary_transport(profile.kind(), credentials, client);
+    // The rules held while disconnected have no endpoint to bypass. The tunnel's must: the core's
+    // `direct` rule for the endpoint mirrors the host route, and the two must agree or the loop
+    // returns (R4, CC-05). A set that cannot take it is not generated.
+    let rules = with_active_endpoint(rules, endpoint.address()).map_err(|e| {
+        PlanError::new(format!(
+            "the routing rules could not be completed for this endpoint: {e}"
+        ))
+    })?;
 
     let config = generate_primary_core_config(PrimaryCoreInput {
         active_profile: profile,
         endpoint_bypass: &bypass,
-        rules,
+        rules: &rules,
         amneziawg_adapter: (profile.kind() == ProfileKind::AmneziaWg).then_some(AMNEZIAWG_ADAPTER),
         primary_transport: transport.as_ref().map(OwnedTransport::borrowed),
         fakeip,
@@ -573,6 +582,52 @@ mod tests {
         )
     }
 
+    /// T105: a profile with Brutal on (as `EnableBrutal` leaves it) reaches the core with both directions;
+    /// without it the core gets no bandwidth at all, which is BBR (CC-03, CC-04).
+    #[test]
+    fn brutal_reaches_the_core_only_when_it_is_on() {
+        let off = to_json_text(&plan(ProfileKind::Hysteria2, "203.0.113.10").unwrap());
+        assert!(
+            !off.contains("up_mbps") && !off.contains("down_mbps"),
+            "{off}"
+        );
+
+        let mut hy2 = profile(ProfileKind::Hysteria2);
+        hy2.enable_brutal(
+            dnet_core::profile::BandwidthPair {
+                up_mbps: 50,
+                down_mbps: 200,
+            },
+            dnet_core::profile::BrutalAcknowledgement {
+                warning_revision: dnet_core::profile::BRUTAL_WARNING_REVISION,
+                acknowledged_at_unix: 1_790_000_000,
+            },
+        )
+        .unwrap();
+        let on = plan_tunnel(
+            &hy2,
+            &endpoint("203.0.113.10"),
+            &credentials(),
+            &ClientDefinitions::default(),
+            &builtin_rules(None),
+            FakeIpHalf::Low,
+        )
+        .unwrap();
+        let outbound = json(&on)["outbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["type"] == "hysteria2")
+            .cloned()
+            .expect("a Hysteria 2 outbound");
+        assert_eq!(outbound["up_mbps"], 50);
+        assert_eq!(outbound["down_mbps"], 200);
+    }
+
+    fn to_json_text(plan: &TunnelPlan) -> String {
+        plan.config_json.clone()
+    }
+
     #[test]
     fn the_planned_tunnel_hands_out_the_half_of_the_fakeip_pools_it_was_given() {
         for half in [FakeIpHalf::Low, FakeIpHalf::High] {
@@ -668,6 +723,36 @@ mod tests {
         let text = plan.config_json();
         assert!(text.contains("203.0.113.10"), "{text}");
         assert_eq!(json(&plan)["route"]["auto_detect_interface"], true);
+    }
+
+    /// The route table and the core's rules must agree (data-model §4, CC-05): the endpoint's own
+    /// address is a `direct` route rule, ahead of every rule that could send it into the tunnel. Its
+    /// appearing somewhere in the text (as the outbound's server) is not that.
+    #[test]
+    fn the_endpoint_bypass_is_a_direct_route_rule_ahead_of_the_rest() {
+        for kind in [
+            ProfileKind::AmneziaWg,
+            ProfileKind::Hysteria2,
+            ProfileKind::VlessReality,
+        ] {
+            let plan = plan(kind, "203.0.113.10").unwrap();
+            let rules = json(&plan)["route"]["rules"].as_array().unwrap().clone();
+            let at = rules
+                .iter()
+                .position(|r| {
+                    r["ip_cidr"]
+                        .as_array()
+                        .is_some_and(|c| c.iter().any(|x| x == "203.0.113.10/32"))
+                })
+                .unwrap_or_else(|| panic!("{kind:?}: no route rule for the endpoint: {rules:#?}"));
+            assert_eq!(rules[at]["outbound"], "direct", "{kind:?}");
+            // Only the DNS capture (which matches port 53 alone) may come before it.
+            assert!(
+                rules[..at].iter().all(|r| r["action"] == "hijack-dns"),
+                "{kind:?}: {:#?}",
+                &rules[..at]
+            );
+        }
     }
 
     #[test]

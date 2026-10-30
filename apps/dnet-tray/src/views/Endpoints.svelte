@@ -86,6 +86,8 @@
 <section class="view" aria-labelledby="endpoints-title">
   <h1 id="endpoints-title">{t.title}</h1>
 
+  <p class="lede">{t.lede}</p>
+
   {#if locked}
     <p class="notice">{en.errors.disconnectFirst}</p>
   {/if}
@@ -143,13 +145,8 @@
   {:else}
     <div class="actions">
       <button type="button" class="btn primary" disabled={locked} onclick={() => (adding = true)}>{t.add}</button>
-      <button type="button" class="btn" disabled={!app.bridge.capabilities.provisioning} onclick={() => app.go('wizard')}>
-        {t.setup}
-      </button>
+      <button type="button" class="btn" disabled={locked} onclick={() => app.go('wizard')}>{t.setup}</button>
     </div>
-    {#if !app.bridge.capabilities.provisioning}
-      <p class="help-line">{en.wizard.unavailable}</p>
-    {/if}
   {/if}
 </section>
 
@@ -178,8 +175,7 @@
   }
 
   .state,
-  .health,
-  .help-line {
+  .health {
     color: var(--c-text-2);
     font-size: var(--fs-sm);
   }

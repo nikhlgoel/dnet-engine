@@ -484,7 +484,7 @@ fn adapter_library_name() -> String {
 /// Every program the service launches or loads as SYSTEM that exists: the two cores, the adapter
 /// driver library beside them, and the service itself. One that is missing is reported where it is
 /// needed; here it only has nothing to protect.
-fn programs_of(layout: &Layout) -> Vec<PathBuf> {
+pub(crate) fn programs_of(layout: &Layout) -> Vec<PathBuf> {
     let mut programs = vec![layout.primary_core.clone(), layout.amneziawg_core.clone()];
     if let Some(folder) = layout.primary_core.parent() {
         programs.push(folder.join(adapter_library_name()));

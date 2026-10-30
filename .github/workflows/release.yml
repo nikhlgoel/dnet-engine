@@ -1,0 +1,162 @@
+# T114 — build the Windows installer from a version tag and leave it as a DRAFT release for the owner to
+# test and publish. Nothing here publishes anything, signs anything or submits to winget: the rendered
+# winget manifests are attached for the owner to submit once the installer has passed the T114 checks
+# (docs/owner-gates.md).
+#
+# Every artifact is attested (build provenance, Sigstore): with no code-signing certificate in v1, the
+# attestation and the published SHA-256 are how a person can check that an installer came from this
+# repository at this commit (`gh attestation verify <file> --repo nikhlgoel/dnet-engine`).
+
+name: Release (draft)
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # The Linux programs a person's own server downloads while it is being set up, built from the same
+  # pinned commits as the client's cores, with the checksums the setup script demands. They are release
+  # assets (static files); the installer ships server-pins.json, which names them.
+  server-cores:
+    name: Server cores (Linux, amd64 and arm64)
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: The version
+        id: version
+        run: |
+          v=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$v" ]; then
+            echo "tag $GITHUB_REF_NAME does not match version $v" >&2; exit 1
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - name: Build
+        run: cargo xtask build-server-cores --base-url "https://github.com/${{ github.repository }}/releases/download/v${{ steps.version.outputs.version }}/"
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: target/server-cores/*-linux-*
+        # (needs id-token and attestations permissions, set below)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: server-cores
+          path: target/server-cores/
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+
+  installer:
+    name: Windows installer
+    needs: server-cores
+    runs-on: windows-latest
+    permissions:
+      contents: write # the draft release
+      id-token: write # the attestation
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The cores are built from their pinned commits; the Go toolchain they declare is fetched as needed.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.4.2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/dnet-tray/pnpm-lock.yaml
+
+      - name: The version is the same everywhere
+        id: version
+        shell: pwsh
+        run: |
+          $cargo = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"$').Matches[0].Groups[1].Value
+          $tauri = (Get-Content apps/dnet-tray/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          if ($cargo -ne $tauri) { throw "Cargo.toml says $cargo, tauri.conf.json says $tauri" }
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$cargo") {
+            throw "tag $env:GITHUB_REF_NAME does not match version $cargo"
+          }
+          "version=$cargo" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: server-cores
+          path: target/server-cores
+      - name: Fetch and build the pinned cores
+        run: cargo xtask fetch-vendor
+      - name: Licence obligations
+        run: |
+          cargo xtask verify-vendor
+          cargo xtask lint-branding
+      - name: Tests
+        run: cargo test --workspace
+      - name: Stage the payload
+        run: cargo xtask stage-installer
+
+      - run: pnpm install --frozen-lockfile
+        working-directory: apps/dnet-tray
+      - name: Build the installer
+        run: pnpm installer
+        working-directory: apps/dnet-tray
+
+      - name: Size, checksum and winget manifests
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $built = Get-ChildItem apps/dnet-tray/src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          if (-not $built) { throw 'no installer was built' }
+          # SC-012
+          if ($built.Length -gt 60MB) { throw ("installer is {0:N1} MB; the limit is 60 MB" -f ($built.Length / 1MB)) }
+          New-Item -ItemType Directory -Force dist-release/winget | Out-Null
+          $name = "DNetEngine-$env:VERSION-x64-setup.exe"
+          Copy-Item $built.FullName "dist-release/$name"
+          $sha = (Get-FileHash "dist-release/$name" -Algorithm SHA256).Hash
+          [IO.File]::WriteAllText("$PWD/dist-release/SHA256SUMS.txt", "$sha  $name`n")
+          $url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/v$env:VERSION/$name"
+          foreach ($template in Get-ChildItem installer/winget/*.yaml) {
+            $text = (Get-Content $template.FullName -Raw).Replace('${VERSION}', $env:VERSION).Replace('${INSTALLER_URL}', $url).Replace('${INSTALLER_SHA256}', $sha)
+            if ($text.Contains('${')) { throw "$($template.Name) still has a placeholder" }
+            [IO.File]::WriteAllText("$PWD/dist-release/winget/$($template.Name)", $text)
+          }
+          ("{0}: {1:N1} MB, SHA-256 {2}" -f $name, ($built.Length / 1MB), $sha) | Write-Output
+
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist-release/*.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-${{ steps.version.outputs.version }}
+          path: dist-release/
+
+      - name: Draft release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          Compress-Archive -Path dist-release/winget/* -DestinationPath dist-release/winget-manifests.zip
+          gh release create "v$env:VERSION" --draft --title "DNet Engine $env:VERSION" --generate-notes `
+            "dist-release/DNetEngine-$env:VERSION-x64-setup.exe" dist-release/SHA256SUMS.txt dist-release/winget-manifests.zip `
+            (Get-ChildItem target/server-cores/*-linux-*).FullName target/server-cores/server-pins.json target/server-cores/SHA256SUMS.txt

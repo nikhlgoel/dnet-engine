@@ -11,6 +11,7 @@ pub mod frame;
 pub mod netview;
 pub mod protocol;
 pub mod server;
+pub mod server_setup;
 pub mod service;
 pub mod version;
 pub mod wire;

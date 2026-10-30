@@ -20,6 +20,7 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+proptest = { workspace = true }
 # For the SPIKE-R4 runner (examples/spike_r4.rs) only.
 dnet-supervisor = { workspace = true }
 anyhow = { workspace = true }

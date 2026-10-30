@@ -10,6 +10,8 @@
 //! - **`--allow-untrusted-install`** (development, only with `--console`): do not require the
 //!   programs run as SYSTEM to be out of reach of ordinary users. Without it, a service installed
 //!   where a user could replace a program refuses to connect.
+//! - **`install`**, **`uninstall [--remove-settings]`**, **`stop`**: register, remove or stop the
+//!   service, from an elevated prompt or an installer (T114, see `install`).
 //! - **`--no-path-watch`** (development): do not watch the network or probe any path. A test run
 //!   uses it so that it never sends a probe to the network it happens to run on.
 //!
@@ -25,6 +27,15 @@ mod configure;
 mod diagnostics;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod domain;
+// `dnetd install`, `uninstall` and `stop` (T114); the words are read on every platform.
+mod install;
+mod intent;
+// Setting up the person's own server from the window (T150).
+#[cfg_attr(not(windows), allow(dead_code))]
+mod server_setup;
+// Tries again while the person has left it on (T148); started by the Windows service.
+#[cfg_attr(not(windows), allow(dead_code))]
+mod keep_trying;
 // Runs the connection engine (T126). The production service attaches it on Windows; off Windows the
 // entry point only reports that the service is Windows-only, so the module is exercised by its tests.
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -81,6 +92,10 @@ fn main() -> anyhow::Result<()> {
 
     #[cfg(windows)]
     {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        if let Some(command) = install::admin_command(&args) {
+            return install::run(command.map_err(|why| anyhow::anyhow!(why))?);
+        }
         if std::env::args().any(|a| a == "--console") {
             run_console()
         } else {
@@ -151,7 +166,26 @@ pub(crate) async fn shutdown_orchestrator(handle: Option<orchestrator::Handle>) 
 pub(crate) fn build_service() -> std::sync::Arc<service_impl::DnetService> {
     let recovery = recovery::recover_installation();
     let service = service_impl::DnetService::production(recovery).with_production_orchestrator();
-    std::sync::Arc::new(service)
+    // Left on before this start (a reboot, an update, a crash): connect again (T147). Only after
+    // recovery, and only through an orchestrator that recovery allowed to exist.
+    service.resume_if_left_on();
+    let service = std::sync::Arc::new(service);
+    // And keep trying while it is left on and down (T148): on a timer, and sooner when the network
+    // changes. The change registration lives as long as the retries do.
+    match dnet_netstate::notify::ChangeSource::start() {
+        Ok((source, changes)) => {
+            let retries = service.keep_trying(Some(changes));
+            tokio::spawn(async move {
+                let _ = retries.await;
+                drop(source);
+            });
+        }
+        Err(error) => {
+            tracing::warn!(%error, "network changes cannot be watched; a failed connection is retried on a timer only");
+            service.keep_trying(None);
+        }
+    }
+    service
 }
 
 /// The service as the control listener takes it.
