@@ -830,3 +830,41 @@ fn cfg_07_no_artifact_names_the_primary_core_vendor() {
         );
     }
 }
+
+/// A tunnel that leaves any door open is not a tunnel. For every profile the generated configuration must
+/// take the whole machine's traffic (auto route), refuse what would go around it (strict route: this is what
+/// stops IPv6, which the tunnel does not carry, and other adapters' name lookups, from leaving beside it),
+/// and answer name lookups itself (hijack). Each is pinned here by name because nothing else would notice
+/// one being switched off: the tunnel would still come up and still carry traffic.
+#[test]
+fn leak_01_every_profile_takes_all_traffic_and_lets_nothing_go_around() {
+    for kind in [
+        ProfileKind::AmneziaWg,
+        ProfileKind::Hysteria2,
+        ProfileKind::VlessReality,
+    ] {
+        let value: serde_json::Value = serde_json::from_str(&json_for(kind)).unwrap();
+        let inbounds = value["inbounds"].as_array().expect("inbounds");
+        let tuns: Vec<_> = inbounds.iter().filter(|i| i["type"] == "tun").collect();
+        assert_eq!(tuns.len(), 1, "{kind:?}: exactly one tunnel inbound");
+        let tun = tuns[0];
+        assert_eq!(tun["auto_route"], true, "{kind:?}: auto_route");
+        assert_eq!(tun["strict_route"], true, "{kind:?}: strict_route");
+        assert_eq!(tun["dns_mode"], "hijack", "{kind:?}: dns_mode");
+        // Only the tunnel's own address family is configured: no IPv6 address that would invite IPv6
+        // traffic into a tunnel that cannot carry it; strict_route is what blocks it instead.
+        let addresses = tun["address"].as_array().expect("address");
+        assert!(
+            addresses
+                .iter()
+                .all(|a| a.as_str().is_some_and(|a| !a.contains(':'))),
+            "{kind:?}: {addresses:?}"
+        );
+        // The final route sends everything not matched to the tunnel's outbound, never to `direct`.
+        let final_outbound = value["route"]["final"].as_str().expect("route.final");
+        assert_ne!(
+            final_outbound, "direct",
+            "{kind:?}: the fallback must not be the open network"
+        );
+    }
+}

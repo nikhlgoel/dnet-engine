@@ -280,6 +280,8 @@ pub struct RealEffects {
     configuration_error: Option<String>,
     /// The origin the tunnel in use is measured against. Set while a tunnel is up.
     carrying: Mutex<Option<Origin>>,
+    /// The checks of the tunnel in use: a sliver each time, a full measurement on a slow clock.
+    live: checks::LiveChecker,
     /// What the network watch needs to know about the tunnel in use. Set while a tunnel is up.
     watching: Mutex<Option<WatchSetup>>,
     /// Whether the network is watched at all. Off only for a development run with
@@ -415,6 +417,7 @@ impl RealEffects {
             privileged: is_elevated(),
             configuration_error,
             carrying: Mutex::new(None),
+            live: checks::LiveChecker::new(checks::DEEP_EVERY),
             watching: Mutex::new(None),
             watch_paths: !std::env::args().any(|a| a == "--no-path-watch"),
             check_install,
@@ -522,8 +525,8 @@ fn prober(layout: &Layout, origin: Origin) -> Prober {
         origin,
         measure: MeasureConfig {
             connect_timeout: Duration::from_secs(8),
-            transfer_timeout: Duration::from_secs(12),
-            bytes: 512 * 1024,
+            transfer_timeout: checks::RACE_TRANSFER_TIMEOUT,
+            bytes: checks::RACE_BYTES,
         },
         ready_timeout: READY_TIMEOUT,
     }
@@ -712,10 +715,13 @@ impl Effects for RealEffects {
         self.tunnels.start(&plan).await?;
         self.set_carrying(origin);
         self.set_watching(Some(setup));
+        // The race that chose this method just moved a full transfer through it.
+        self.live.proved(std::time::Instant::now());
         Ok(())
     }
 
     async fn stop_tunnel(&self) {
+        self.live.forget();
         self.set_carrying(None);
         self.set_watching(None);
         self.tunnels.stop().await;
@@ -723,7 +729,7 @@ impl Effects for RealEffects {
 
     async fn live_check(&self, _profile: &ProfileId) -> LiveCheck {
         let result = match self.carrying_origin() {
-            Some(origin) => checks::live_check(&origin).await,
+            Some(origin) => self.live.check(&origin, std::time::Instant::now()).await,
             None => LiveCheck::Failed,
         };
         if result != LiveCheck::Passed {

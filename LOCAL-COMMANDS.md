@@ -241,3 +241,20 @@ run 8.5 "cargo run -p dnet-provision --example dump_script -- target\server-core
 
 8.6 Then follow `docs/owner-gates.md` section "T149-T151": the window's guide, on a real Oracle account.
 
+## 9. New: network cost and the server's measurement origin (T153, T154)
+
+9.1 The new tests (the origin test runs python; the checks tests open local sockets)
+```powershell
+run 9.1 "cargo test -p dnet-provision origin; cargo test -p dnetd checks::; cargo test -p dnetd a_server_made_by_the_guide; cargo test -p dnet-config --test contract leak_01"
+```
+
+9.2 On the real server (ssh in), after the guide: the origin must listen on the tunnel address only, and answer
+```powershell
+run 9.2 "ssh -i <key> <user>@<server> 'ss -ltnp | grep 8080; curl -s -o /dev/null -w %{http_code}:%{size_download} http://10.66.0.1:8080/bytes/1000; systemctl is-active dnet-origin'"
+```
+
+9.3 With a tunnel up on the Windows machine: the origin through the tunnel, and what the checks cost over ten minutes (admin; counts bytes on the tunnel adapter)
+```powershell
+run 9.3 "`$a = Get-NetAdapter | Where-Object InterfaceDescription -match 'tun|dnet' | Select-Object -First 1; `$b0 = (Get-NetAdapterStatistics -Name `$a.Name).SentBytes + (Get-NetAdapterStatistics -Name `$a.Name).ReceivedBytes; Invoke-WebRequest http://10.66.0.1:8080/bytes/1000 -UseBasicParsing | Select-Object StatusCode; Start-Sleep 600; `$b1 = (Get-NetAdapterStatistics -Name `$a.Name).SentBytes + (Get-NetAdapterStatistics -Name `$a.Name).ReceivedBytes; 'bytes in 10 minutes, idle: ' + (`$b1 - `$b0); netsh advfirewall firewall show rule name=all | Select-String -Pattern 'dnet|tun' "
+```
+

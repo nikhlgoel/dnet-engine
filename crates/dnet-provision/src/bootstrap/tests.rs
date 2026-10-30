@@ -742,7 +742,7 @@ fn housekeeping_cannot_remove_anything_the_server_needs() {
     let job = text
         .split("# ---- housekeeping")
         .nth(1)
-        .and_then(|rest| rest.split("# ---- services").next())
+        .and_then(|rest| rest.split("# ---- the measurement origin").next())
         .expect("the script has no housekeeping section");
     for forbidden in ["rm ", "/var/lib/dnet", "find ", "dd ", "truncate"] {
         assert!(
@@ -891,4 +891,148 @@ fn the_keepalive_in_the_script_is_the_standalone_one() {
         text.contains(&body),
         "the keepalive section differs from the one that is tested by itself"
     );
+}
+
+// ------------------------------------------------------------------ the measurement origin
+
+/// A connection is judged by fetching bytes through the tunnel from a known origin. A person's own server
+/// has to carry one, or every endpoint made by the guide would be refused as "no measurement origin".
+/// It must be reachable only through the tunnel (its address is private), or a fetch to it would prove
+/// nothing about the tunnel, and it must give out a bounded amount.
+#[test]
+fn the_server_carries_the_origin_the_client_measures_against() {
+    let text = script(&plan()).unwrap();
+    assert_eq!(measurement_origin().host(), "10.66.0.1");
+    assert_eq!(measurement_origin().port(), ORIGIN_PORT);
+    assert!(text.contains("/opt/dnet/bin/dnet-origin"));
+    assert!(text.contains("dnet-origin.service"));
+    assert!(text.contains("systemctl enable --now dnet-net.service dnet-primary.service dnet-awg.service dnet-origin.service"));
+    // Bound to the tunnel's own address and to nothing else.
+    assert!(text.contains(&format!("(\"10.66.0.1\", {ORIGIN_PORT})")));
+    for wildcard in ["\"0.0.0.0\"", "\"::\"", "('', ", "(\"\", "] {
+        let section = text
+            .split("# ---- the measurement origin")
+            .nth(1)
+            .unwrap()
+            .split("# ---- services")
+            .next()
+            .unwrap();
+        assert!(
+            !section.contains(wildcard),
+            "the origin must not listen on {wildcard}"
+        );
+    }
+    // It starts after the tunnel's address exists.
+    let unit = text
+        .split("dnet-origin.service <<'UNIT_EOF'")
+        .nth(1)
+        .unwrap()
+        .split("UNIT_EOF")
+        .next()
+        .unwrap();
+    assert!(unit.contains("After=network-online.target dnet-awg.service"));
+    assert!(unit.contains("Requires=dnet-awg.service"));
+    assert!(unit.contains("Restart=always"));
+    // And it is opened by no firewall rule: the machine's own firewall still allows exactly three ports.
+    assert_eq!(text.matches("\n  allow ").count(), 3);
+}
+
+/// The origin is run, not just read: on a loopback address, it answers `/bytes/n` with exactly n bytes up to
+/// its cap, refuses more, and refuses everything else, as the harness origin the client was proven against.
+#[test]
+fn the_origin_serves_exactly_the_bytes_asked_for_up_to_its_cap() {
+    use std::io::{Read, Write};
+    let Some(python) = ["python3", "python"].into_iter().find(|p| {
+        std::process::Command::new(p)
+            .arg("-c")
+            .arg("pass")
+            .output()
+            .is_ok_and(|o| o.status.success())
+    }) else {
+        eprintln!("SKIPPED: no python on this machine");
+        return;
+    };
+    let text = script(&plan()).unwrap();
+    let source = text
+        .split("cat > \"$BIN/dnet-origin\" <<'ORIGIN_EOF'\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\nORIGIN_EOF").next())
+        .expect("the script has no origin program");
+    let port = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let program = source
+        .replace("\"10.66.0.1\"", "\"127.0.0.1\"")
+        .replace(&ORIGIN_PORT.to_string(), &port.to_string());
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("origin.py");
+    std::fs::write(&path, program).unwrap();
+    struct Kill(std::process::Child);
+    impl Drop for Kill {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let _guard = Kill(
+        std::process::Command::new(python)
+            .arg(&path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let get = |target: &str| -> (String, Vec<u8>) {
+        for _ in 0..50 {
+            if let Ok(mut s) = std::net::TcpStream::connect(("127.0.0.1", port)) {
+                s.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                write!(s, "GET {target} HTTP/1.0\r\nHost: x\r\n\r\n").unwrap();
+                let mut raw = Vec::new();
+                let _ = s.read_to_end(&mut raw);
+                let split = raw
+                    .windows(4)
+                    .position(|w| w == b"\r\n\r\n")
+                    .map_or(raw.len(), |i| i + 4);
+                return (
+                    String::from_utf8_lossy(&raw[..split]).into_owned(),
+                    raw[split..].to_vec(),
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        panic!("the origin never came up");
+    };
+    for n in [1usize, 1024, 65_536, 200_000] {
+        let (head, body) = get(&format!("/bytes/{n}"));
+        assert!(
+            head.starts_with("HTTP/1.") && head.contains(" 200 "),
+            "{n}: {head}"
+        );
+        assert_eq!(body.len(), n, "exactly {n} bytes");
+    }
+    // The cap: asking for more than the most it gives out is refused, not served.
+    let (head, body) = get(&format!("/bytes/{}", ORIGIN_MAX_BYTES + 1));
+    assert!(head.contains(" 400 "), "{head}");
+    assert!(body.len() < 1024);
+    let (head, body) = get(&format!("/bytes/{ORIGIN_MAX_BYTES}"));
+    assert!(head.contains(" 200 "));
+    assert_eq!(body.len(), ORIGIN_MAX_BYTES);
+    for bad in [
+        "/bytes/0",
+        "/bytes/-5",
+        "/bytes/abc",
+        "/bytes/",
+        "/bytes/1/2",
+        "/etc/passwd",
+        "/..",
+        "/bytes/99999999999999999999",
+    ] {
+        let (head, _) = get(bad);
+        assert!(
+            head.contains(" 400 ") || head.contains(" 404 "),
+            "{bad}: {head}"
+        );
+    }
 }

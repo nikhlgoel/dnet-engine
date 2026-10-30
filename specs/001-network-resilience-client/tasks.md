@@ -1599,6 +1599,28 @@ own, made by DNet Engine's wizard on Oracle Cloud Always Free (or any Linux serv
   > - Also from the first pass: tests for the script (processor guard run under `sh`, keepalive ordering, housekeeping bounds, report bound to its
   >   script), wire tests with 2,000-case proptests, 28 web tests.
 
+- [x] T153 A server made by the guide must be usable: it carries the measurement origin (found and fixed 2026-10-30, test-first)
+  > **Defect in my own T150, found by auditing what the connection code requires.** `assess_endpoints` refuses any endpoint without a measurement
+  > origin ("a connection cannot be tested, and this project provides none"), and the guided flow built credentials with none: **every server made by
+  > the guide would have been refused at the first connect.** Red test first (`a_server_made_by_the_guide_is_usable_by_the_connection_code`: seal the
+  > guided credentials, run the real assessment, expect no problem and all three methods served). Fix: the script installs a tiny origin
+  > (`dnet-origin`) bound to the server's tunnel address `10.66.0.1:8080` and nothing else (private, so a fetch to it is proof of the tunnel), serving
+  > exactly `/bytes/n` up to 1 MiB, refusing everything else, starting after the tunnel's address exists and restarting if it stops; it opens no
+  > firewall port. The service puts that origin into the credentials. Tests: script content, **the origin run for real under python** (exact byte
+  > counts, the cap, eight hostile paths), and the end-to-end assessment above.
+  > - **Not verified:** that a fetch to `10.66.0.1` from the client reaches the origin through the Hysteria 2 and REALITY tunnels (it should: the
+  >   primary core's direct exit connects to the server's own address). Owner gate: `LOCAL-COMMANDS.md` 9.2.
+- [x] T154 Network cost: cheap live checks, smaller race, leak settings pinned (`docs/network-budget.md`)
+  > **Done 2026-10-30 (not committed).** Audit of everything the client sends found the largest waste: a connected, idle tunnel fetched 128 KiB every 5 s
+  > (about 92 MB an hour, 2.2 GB a day, through the person's connection and their server's allowance). Now `LiveChecker`: a 1 KiB sliver every time, a full
+  > check every 10 minutes and at once when a sliver comes up short; a new connection starts from the race that just proved it. About 1 MB an hour idle.
+  > The race asks 192 KiB per method, not 512 KiB, with a compile-time check that a link at the slowest usable speed finishes inside the race's allowance
+  > (the old size could not: 512 KiB at 256 kbit/s takes 16 s against a 12 s allowance). 10 new tests (a real local origin counts the bytes), mutation run on
+  > `checks.rs`: 18 mutants, 3 missed on the first run (exact sizes, `forget`), all viable ones caught after two tests. Cost of the trade: a tunnel that still
+  > moves a kilobyte but too slowly to be usable is found at the next full check, up to ten minutes, not within five seconds.
+  > - **Leaks:** `leak_01_…` pins `auto_route`, `strict_route`, DNS hijack, no IPv6 address and a non-open fallback for all three methods (seeded defect caught).
+  > - **Not done:** treating metered connections differently; measuring any of this on a real wire.
+
 ---
 
 ## Dependencies

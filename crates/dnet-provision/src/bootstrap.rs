@@ -65,6 +65,18 @@ pub const TUNNEL_SERVER: Ipv4Addr = Ipv4Addr::new(10, 66, 0, 1);
 pub const TUNNEL_CLIENT: Ipv4Addr = Ipv4Addr::new(10, 66, 0, 2);
 pub const TUNNEL_PREFIX: u8 = 24;
 
+/// The port of the measurement origin on the server's tunnel address.
+pub const ORIGIN_PORT: u16 = 8080;
+/// The most the origin gives out in one answer. A race asks for a few hundred kilobytes; nothing needs more.
+pub const ORIGIN_MAX_BYTES: usize = 1_048_576;
+
+/// Where the client measures a connection: the server's own tunnel address, which is private and so
+/// reachable only through the tunnel. A fetch from it that completes proves the tunnel carries traffic;
+/// a public address would be reached outside the tunnel and prove nothing.
+pub fn measurement_origin() -> Origin {
+    Origin::parse(&format!("http://{TUNNEL_SERVER}:{ORIGIN_PORT}")).expect("a fixed, valid origin")
+}
+
 /// One server-side core, pinned.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CorePin {
@@ -529,6 +541,56 @@ UNIT_EOF
 systemctl restart systemd-journald >/dev/null 2>&1 || true
 "$BIN/dnet-housekeeping"
 
+# ---- the measurement origin: what the client fetches through the tunnel to judge it. Bound to the tunnel's
+# own private address and nothing else, so it is reachable only through the tunnel and never from outside.
+cat > "$BIN/dnet-origin" <<'ORIGIN_EOF'
+import os
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+MAX_BYTES = @@ORIGIN_MAX@@
+BLOCK = os.urandom(65536)
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.0"
+
+    def do_GET(self):
+        parts = self.path.split("/")
+        if len(parts) != 3 or parts[0] != "" or parts[1] != "bytes" or not parts[2].isdigit() or len(parts[2]) > 9:
+            self.send_error(404)
+            return
+        n = int(parts[2])
+        if n < 1 or n > MAX_BYTES:
+            self.send_error(400, "bad byte count")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(n))
+        self.end_headers()
+        sent = 0
+        while sent < n:
+            chunk = BLOCK[: min(len(BLOCK), n - sent)]
+            self.wfile.write(chunk)
+            sent += len(chunk)
+
+    def log_message(self, fmt, *args):
+        pass
+
+ThreadingHTTPServer(("@@TUN_SERVER@@", @@ORIGIN_PORT@@), Handler).serve_forever()
+ORIGIN_EOF
+chmod 0755 "$BIN/dnet-origin"
+cat > /etc/systemd/system/dnet-origin.service <<'UNIT_EOF'
+[Unit]
+Description=DNet Engine endpoint: measurement origin (tunnel address only)
+After=network-online.target dnet-awg.service
+Requires=dnet-awg.service
+[Service]
+ExecStart=/usr/bin/python3 /opt/dnet/bin/dnet-origin
+Restart=always
+RestartSec=2
+[Install]
+WantedBy=multi-user.target
+UNIT_EOF
+
 # ---- services
 cat > /etc/systemd/system/dnet-net.service <<'UNIT_EOF'
 [Unit]
@@ -567,7 +629,7 @@ Restart=on-failure
 WantedBy=multi-user.target
 UNIT_EOF
 systemctl daemon-reload
-systemctl enable --now dnet-net.service dnet-primary.service dnet-awg.service >/dev/null
+systemctl enable --now dnet-net.service dnet-primary.service dnet-awg.service dnet-origin.service >/dev/null
 systemctl enable --now dnet-housekeeping.timer >/dev/null
 
 @@KEEPALIVE@@
@@ -632,6 +694,8 @@ pub fn script(plan: &BootstrapPlan) -> Result<String, BootstrapError> {
         ("H4", o.h4.to_string()),
         ("MACHINE", plan.cores.arch.machine().to_owned()),
         ("ARCH", plan.cores.arch.as_str().to_owned()),
+        ("ORIGIN_PORT", ORIGIN_PORT.to_string()),
+        ("ORIGIN_MAX", ORIGIN_MAX_BYTES.to_string()),
         ("TUN_SERVER", TUNNEL_SERVER.to_string()),
         ("TUN_CLIENT", TUNNEL_CLIENT.to_string()),
         ("TUN_PREFIX", TUNNEL_PREFIX.to_string()),

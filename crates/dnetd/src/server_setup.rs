@@ -194,7 +194,12 @@ impl ServerSetup {
             ),
             other => SetupError::Report(other.to_string()),
         })?;
-        Ok(report.credentials(&pending.keys, pending.plan.obfuscation, None))
+        // The origin the script put on the server: without it no connection could be tested or checked.
+        Ok(report.credentials(
+            &pending.keys,
+            pending.plan.obfuscation,
+            Some(bootstrap::measurement_origin()),
+        ))
     }
 
     /// The server is saved: drop the keys that were waiting for it.
@@ -390,6 +395,45 @@ mod tests {
 
     /// A first-time account can take hours (identity checks); the wait is six hours, not what a slip in the
     /// arithmetic would make it. The setup is still good at five.
+    /// The whole point: a server made by the guide is one the connection code will use. Before the origin was
+    /// carried, every such server was refused with "no measurement origin" at the first connect.
+    #[test]
+    fn a_server_made_by_the_guide_is_usable_by_the_connection_code() {
+        use dnet_config::secret_store::{MemorySecretStore, SecretKey, SecretStore};
+        use dnet_core::endpoint::{Endpoint, EndpointAddress, EndpointOrigin};
+        use dnet_core::ids::EndpointId;
+
+        let setup = setup();
+        let prepared = setup.prepare(ServerKind::Arm64, 0).unwrap();
+        let credentials = setup.finish(&printed_by(&prepared, |_| {}), 1).unwrap();
+        assert_eq!(
+            credentials.measure_origin,
+            Some(bootstrap::measurement_origin())
+        );
+
+        let id = EndpointId::new();
+        let key = SecretKey::for_endpoint(id);
+        let secrets = MemorySecretStore::new();
+        secrets.put(&key, &credentials).unwrap();
+        let endpoint = Endpoint::new(
+            id,
+            "my server",
+            EndpointAddress::new("203.0.113.10", 44443).unwrap(),
+            EndpointOrigin::Manual,
+            key.credential_ref(),
+        )
+        .unwrap();
+        let assessed = crate::plan::assess_endpoints(std::slice::from_ref(&endpoint), &secrets);
+        assert!(assessed.problems.is_empty(), "{:?}", assessed.problems);
+        assert_eq!(assessed.usable, [endpoint]);
+        assert_eq!(
+            assessed.served.len(),
+            3,
+            "all three connection methods: {:?}",
+            assessed.served
+        );
+    }
+
     #[test]
     fn the_wait_is_six_hours() {
         assert_eq!(WAIT_S, 21_600);
