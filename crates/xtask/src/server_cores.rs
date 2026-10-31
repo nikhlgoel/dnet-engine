@@ -21,11 +21,12 @@ use crate::pins::sha256_hex;
 pub const OUT_DIR: &str = "target/server-cores";
 const ARCHES: [&str; 2] = ["amd64", "arm64"];
 
-/// What a core is built with on a server: the Hysteria 2 and REALITY inbounds, and nothing the client's
-/// tunnel needs (no gVisor stack, no control API, no packet-diversion driver).
+/// What a core is built with on a server: the Hysteria 2 and REALITY inbounds, and the session endpoint they
+/// forward to (ADR-0008). The endpoint runs in user space, which is the gVisor tag; nothing else of the
+/// client's tunnel (no control API, no packet-diversion driver).
 fn server_tags(dest: &str) -> &'static str {
     match dest {
-        "primary-core" => "with_quic,with_utls",
+        "primary-core" => "with_quic,with_utls,with_wireguard,with_gvisor",
         _ => "",
     }
 }
@@ -229,11 +230,16 @@ mod tests {
     }
 
     #[test]
-    fn the_primary_core_gets_the_server_inbounds_and_nothing_of_the_clients() {
-        let tags = server_tags("primary-core");
-        assert!(tags.contains("with_quic") && tags.contains("with_utls"));
-        for client_only in ["gvisor", "clash_api", "windivert"] {
-            assert!(!tags.contains(client_only), "{client_only}");
+    fn the_primary_core_gets_the_server_inbounds_and_the_session_endpoint_and_nothing_of_the_clients(
+    ) {
+        let tags: Vec<&str> = server_tags("primary-core").split(',').collect();
+        // The carriers (Hysteria 2, REALITY) and the session endpoint with its user-space network stack
+        // (`system: false` is behind the gVisor tag), ADR-0008 §11.
+        for needed in ["with_quic", "with_utls", "with_wireguard", "with_gvisor"] {
+            assert!(tags.contains(&needed), "{needed}");
+        }
+        for client_only in ["with_clash_api", "with_external_windivert"] {
+            assert!(!tags.contains(&client_only), "{client_only}");
         }
         assert_eq!(server_tags("amneziawg-go"), "");
     }

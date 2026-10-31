@@ -45,8 +45,9 @@ pub(crate) struct GoSource {
     ///
     /// For the primary core we select only what the three v1 profiles need, which
     /// takes the binary from 78 MB to a fraction of it (ADR-0004, Finding 3).
-    /// Notably `with_wireguard` is **absent**: AmneziaWG is served by a separate
-    /// supervised process, so the primary core needs no WireGuard support at all.
+    /// `with_wireguard` is **present** since ADR-0008 (it was excluded in ADR-0004): the session
+    /// is a WireGuard endpoint inside the primary core, carried over a replaceable carrier. The
+    /// AmneziaWG profile is still a separate supervised process on its own adapter.
     pub(crate) tags: &'static str,
     /// Source patches applied to a dependency before building.
     pub(crate) patch: Option<&'static ModulePatch>,
@@ -101,10 +102,13 @@ pub(crate) const GO_SOURCES: &[GoSource] = &[
         // with_utls               -> REALITY fingerprinting (Profile C)
         // with_clash_api          -> the runtime control API dnetd drives the core through
         // with_gvisor             -> TUN network stack
+        // with_wireguard         -> the session endpoint carried over a replaceable carrier
+        //                           (ADR-0008). The pin before this refused the endpoint.
         // with_external_windivert -> do NOT embed the packet-diversion kernel driver. No
         //                            profile uses it, and we never ship the driver file,
         //                            so the features needing it fail closed (Finding 4).
-        tags: "with_quic,with_utls,with_clash_api,with_gvisor,with_external_windivert",
+        tags:
+            "with_quic,with_utls,with_clash_api,with_gvisor,with_wireguard,with_external_windivert",
         patch: Some(&TUN_DLL_LOADER_PATCH),
     },
     GoSource {
@@ -689,21 +693,6 @@ mod tests {
         }
     }
 
-    /// The primary core must not carry WireGuard support: AmneziaWG is served by a
-    /// separate supervised process, and including it would inflate the binary against
-    /// the installer budget for no benefit.
-    #[test]
-    fn primary_core_excludes_wireguard() {
-        let core = GO_SOURCES
-            .iter()
-            .find(|s| s.dest == "primary-core")
-            .unwrap();
-        assert!(!core.tags.contains("with_wireguard"));
-        assert!(core.tags.contains("with_quic"));
-        assert!(core.tags.contains("with_utls"));
-        assert!(core.tags.contains("with_clash_api"));
-    }
-
     /// The harness endpoint builds its AmneziaWG server from source. Both ends must run
     /// the identical protocol revision, so the endpoint's pin must equal the client's.
     #[test]
@@ -804,6 +793,24 @@ mod tests {
                 "{rel} embeds a file"
             );
         }
+    }
+
+    /// ADR-0008: the session is a WireGuard endpoint inside the primary core. Without its tag the core refuses
+    /// the endpoint ("WireGuard is not included in this build"), which was found by running the previous pin.
+    #[test]
+    fn the_primary_core_is_built_with_the_session_endpoint() {
+        let tags: Vec<&str> = primary_core().tags.split(',').collect();
+        for needed in [
+            "with_quic",
+            "with_utls",
+            "with_clash_api",
+            "with_gvisor",
+            "with_wireguard",
+        ] {
+            assert!(tags.contains(&needed), "{needed}");
+        }
+        // The packet-diversion driver stays out (Finding 4).
+        assert!(tags.contains(&"with_external_windivert"));
     }
 
     /// A binary built before a tag or patch change must be rebuilt, not skipped.

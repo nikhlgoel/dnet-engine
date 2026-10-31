@@ -148,6 +148,17 @@ by a separate supervised process (finding C14), so the core needs no WireGuard s
 A unit test asserts this, because silently regaining the tag would inflate the binary for
 no benefit.
 
+> **Amended 2026-10-31 ([ADR-0008](0008-session-carrier-framework.md), decision F12, approved by the
+> owner).** The primary core is now built **with** `with_wireguard`. The session is a WireGuard
+> endpoint inside the core, carried over a replaceable carrier, so the core does need the library;
+> the previous pin refused the endpoint ("WireGuard is not included in this build"), shown by
+> running it. The first reason above still holds: AmneziaWG remains a separate supervised process
+> on its own adapter. The second reason (size) is now measured, not assumed: the size is recorded
+> in `vendor/primary-core/BUILD-PROVENANCE.md` after each build and checked against SC-012's 60 MB
+> at T115. The server core is built with `with_wireguard` and `with_gvisor` (the endpoint's
+> user-space stack) in addition to `with_quic,with_utls`. The unit test that asserted the
+> exclusion was replaced by one that asserts the endpoint is present.
+
 **Provenance.** Sources are pinned by **commit SHA rather than tag** — a tag can be moved,
 a commit cannot — and `fetch-vendor` verifies `git rev-parse HEAD` against the pin after
 fetching, failing loudly if the tree is anything other than the pinned commit. Each build
