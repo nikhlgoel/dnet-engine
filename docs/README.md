@@ -18,6 +18,7 @@ When documents disagree, this is the order of precedence:
 | [`security/`](security/) | [Security design](security/security-design.md) · [Threat model](security/threat-model.md) · [Credential handling](security/credential-handling.md) |
 | [`bugs/`](bugs/) | One file per significant bug — see the [index](bugs/README.md) |
 | [`adr/`](adr/) | Architecture decision records |
+| [`research/`](research/) | Dated research records: evidence behind a proposal, with sources and confidence. Start with [the framework research and status audit](research/2026-10-31-framework-research.md), then [the deep audit of our own code and the upgrades it leads to](research/2026-10-31-framework-deep-audit.md), then [the solutions, with the evidence that they work](research/2026-10-31-solutions.md) |
 | [`feed-publishing.md`](feed-publishing.md) | Runbook for the key ceremony and for signing the profile feed (ADR-0002) |
 
 ## Source records
