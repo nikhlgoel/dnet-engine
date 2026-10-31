@@ -29,10 +29,11 @@ use crate::hysteria2::hysteria2_outbound;
 use crate::primary::{Log, Outbound, PrimaryTransport};
 use crate::reality::reality_outbound;
 use crate::secret::Secret;
+use crate::session::SessionEndpoint;
 
 const PROXY_TAG: &str = "proxy";
-const INBOUND_TAG: &str = "probe-in";
-const LOCAL_DNS: &str = "local";
+pub(crate) const INBOUND_TAG: &str = "probe-in";
+pub(crate) const LOCAL_DNS: &str = "local";
 /// The only address a probe listens on.
 pub const PROBE_LISTEN: &str = "127.0.0.1";
 
@@ -68,6 +69,10 @@ pub struct ProbeConfig {
     pub dns: ProbeDns,
     pub inbounds: Vec<SocksInbound>,
     pub outbounds: Vec<Outbound>,
+    /// The session endpoint (ADR-0008), for a probe of a carrier whose server only forwards to the session.
+    /// Empty, and so absent from the output, for every other probe.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub endpoints: Vec<SessionEndpoint>,
     pub route: ProbeRoute,
 }
 
@@ -161,6 +166,7 @@ pub fn generate_probe_config(input: ProbeInput<'_>) -> Result<ProbeConfig, Confi
             }],
         }],
         outbounds: vec![proxy],
+        endpoints: Vec::new(),
         route: ProbeRoute {
             final_outbound: PROXY_TAG,
             auto_detect_interface: true,

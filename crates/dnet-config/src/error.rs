@@ -63,6 +63,11 @@ pub enum ConfigError {
     #[error("credential is missing or malformed: {0}")]
     InvalidCredential(&'static str),
 
+    /// A session configuration (ADR-0008) was refused, for the reason given. The reason names the
+    /// setting, **never its value**.
+    #[error("the session configuration was refused: {0}")]
+    InvalidSession(&'static str),
+
     /// A probe was asked to listen on port 0, which would let the OS choose one the caller
     /// cannot know.
     #[error("the probe's SOCKS port must be non-zero")]

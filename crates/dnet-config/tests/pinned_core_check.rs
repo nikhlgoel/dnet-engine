@@ -228,6 +228,202 @@ fn reality_configs_are_accepted_by_the_pinned_core() {
     }
 }
 
+/// ADR-0008: the session (an endpoint dialled through a selector over the carriers, plus the control API)
+/// must be accepted by the pinned core. Before the endpoint's build tag was added the core refused it as
+/// "not included in this build", so this test is what keeps the tag in the pin.
+#[test]
+fn session_configs_are_accepted_by_the_pinned_core() {
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine as _;
+    use dnet_config::session::{
+        generate_session_config, Carrier, CarrierKind, ControlApi, SessionInput,
+    };
+
+    let Some(core) = pinned_core() else {
+        eprintln!("SKIPPED: vendor/primary-core not fetched (cargo run -p xtask -- fetch-vendor)");
+        return;
+    };
+    let hy2_transport = hysteria2(
+        Hysteria2Obfs::Salamander,
+        ServerTrust::PinnedPublicKey {
+            server_name: "edge.example.net".into(),
+            spki_sha256: [7; 32],
+        },
+    );
+    let reality_transport = RealityTransport {
+        settings: RealitySettings {
+            client: RealityClientParams {
+                utls_fingerprint: UtlsFingerprint::Chrome,
+            },
+            endpoint: RealityEndpointParams {
+                target_domain: TargetDomain::parse("www.example.com").unwrap(),
+                public_key: RealityPublicKey::parse("jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0")
+                    .unwrap(),
+                flow: VlessFlow::Vision,
+            },
+        },
+        credentials: RealityCredentials {
+            uuid: Secret::new("bf000d23-0752-40b4-affe-68f7707a9661"),
+            short_id: Secret::new("0123456789abcdef"),
+        },
+    };
+    let hy2_at = EndpointAddress::new("203.0.113.9", 8443).unwrap();
+    let reality_at = EndpointAddress::new("203.0.113.9", 443).unwrap();
+    let hy2_bypass = ActiveEndpointBypass::new(&hy2_at);
+    let reality_bypass = ActiveEndpointBypass::new(&reality_at);
+    let device_key = Secret::new(STANDARD.encode([1u8; 32]));
+    let server_key = STANDARD.encode([2u8; 32]);
+    let control_secret = Secret::new("c".repeat(64));
+
+    for policy in [Policy::Block, Policy::Allow] {
+        let rules = builtin_rules_for(Some(&hy2_at), policy);
+        for half in [FakeIpHalf::Low, FakeIpHalf::High] {
+            for (label, kinds) in [
+                (
+                    "both carriers",
+                    vec![CarrierKind::Hysteria2, CarrierKind::Reality],
+                ),
+                ("Hysteria 2 only", vec![CarrierKind::Hysteria2]),
+                ("REALITY only", vec![CarrierKind::Reality]),
+            ] {
+                let carriers: Vec<Carrier<'_>> = kinds
+                    .iter()
+                    .map(|kind| match kind {
+                        CarrierKind::Hysteria2 => Carrier {
+                            transport: PrimaryTransport::Hysteria2(&hy2_transport),
+                            endpoint: &hy2_bypass,
+                            brutal: None,
+                        },
+                        CarrierKind::Reality => Carrier {
+                            transport: PrimaryTransport::VlessReality(&reality_transport),
+                            endpoint: &reality_bypass,
+                            brutal: None,
+                        },
+                    })
+                    .collect();
+                let config = generate_session_config(SessionInput {
+                    carriers: &carriers,
+                    active: kinds[0],
+                    rules: &rules,
+                    fakeip: half,
+                    device_private_key: &device_key,
+                    server_public_key: &server_key,
+                    device_address: "10.9.0.2/32",
+                    session_port: 25182,
+                    control: ControlApi {
+                        port: 29090,
+                        secret: &control_secret,
+                    },
+                })
+                .unwrap();
+
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("primary-core.json");
+                std::fs::write(&path, to_json(&config)).unwrap();
+                let out = Command::new(&core)
+                    .args(["check", "-c"])
+                    .arg(&path)
+                    .arg("--disable-color")
+                    .output()
+                    .expect("running the pinned core");
+                assert!(
+                    out.status.success(),
+                    "pinned core rejected the session config ({label}, {policy:?}, {half:?}):\n{}\n{}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+        }
+    }
+}
+
+/// A probe of one carrier through the session (ADR-0008): a loopback proxy, the carrier, and the session over
+/// it. A server that serves the session refuses a probe that uses its carrier directly, so this is the probe
+/// such a server gets, and the pinned core has to accept it.
+#[test]
+fn session_probe_configs_are_accepted_by_the_pinned_core() {
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine as _;
+    use dnet_config::probe::{to_json as probe_json, SocksAuth};
+    use dnet_config::session::{generate_session_probe_config, Carrier, SessionProbeInput};
+
+    let Some(core) = pinned_core() else {
+        eprintln!("SKIPPED: vendor/primary-core not fetched (cargo run -p xtask -- fetch-vendor)");
+        return;
+    };
+    let hy2_transport = hysteria2(
+        Hysteria2Obfs::Salamander,
+        ServerTrust::PinnedPublicKey {
+            server_name: "edge.example.net".into(),
+            spki_sha256: [7; 32],
+        },
+    );
+    let reality_transport = RealityTransport {
+        settings: RealitySettings {
+            client: RealityClientParams {
+                utls_fingerprint: UtlsFingerprint::Chrome,
+            },
+            endpoint: RealityEndpointParams {
+                target_domain: TargetDomain::parse("www.example.com").unwrap(),
+                public_key: RealityPublicKey::parse("jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0")
+                    .unwrap(),
+                flow: VlessFlow::Vision,
+            },
+        },
+        credentials: RealityCredentials {
+            uuid: Secret::new("bf000d23-0752-40b4-affe-68f7707a9661"),
+            short_id: Secret::new("0123456789abcdef"),
+        },
+    };
+    let device_key = Secret::new(STANDARD.encode([1u8; 32]));
+    let server_key = STANDARD.encode([2u8; 32]);
+    let auth = SocksAuth {
+        username: "probe-user".into(),
+        password: Secret::new("probe-pass-0123456789"),
+    };
+    for (label, transport) in [
+        ("Hysteria 2", PrimaryTransport::Hysteria2(&hy2_transport)),
+        (
+            "VLESS+REALITY",
+            PrimaryTransport::VlessReality(&reality_transport),
+        ),
+    ] {
+        for endpoint in ["203.0.113.9", "edge.example.net"] {
+            let addr = EndpointAddress::new(endpoint, 8443).unwrap();
+            let bypass = ActiveEndpointBypass::new(&addr);
+            let config = generate_session_probe_config(SessionProbeInput {
+                socks_auth: &auth,
+                carrier: Carrier {
+                    transport,
+                    endpoint: &bypass,
+                    brutal: None,
+                },
+                device_private_key: &device_key,
+                server_public_key: &server_key,
+                device_address: "10.9.0.2/32",
+                session_port: 25182,
+                socks_port: 51234,
+            })
+            .unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("probe.json");
+            std::fs::write(&path, probe_json(&config)).unwrap();
+            let out = Command::new(&core)
+                .args(["check", "-c"])
+                .arg(&path)
+                .arg("--disable-color")
+                .output()
+                .expect("running the pinned core");
+            assert!(
+                out.status.success(),
+                "pinned core rejected the {label} session probe (endpoint {endpoint}):\n{}\n{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+}
+
 /// A probe configuration (loopback SOCKS in, one profile out, no TUN) must also be accepted by
 /// the pinned core, for an IP and for a hostname endpoint.
 #[test]

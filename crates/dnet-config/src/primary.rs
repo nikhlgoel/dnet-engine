@@ -22,6 +22,7 @@ use crate::endpoint_bypass::ActiveEndpointBypass;
 use crate::error::ConfigError;
 use crate::hysteria2::{hysteria2_outbound, Hysteria2Outbound, Hysteria2Transport};
 use crate::reality::{reality_outbound, RealityTransport, VlessOutbound};
+use crate::session::{Experimental, SelectorOutbound, SessionEndpoint};
 
 /// FakeIP pools (CC-02, research.md R3). Documented defaults. A tunnel hands out addresses from only
 /// one half of each (see [`FakeIpHalf`]); these are the whole pools, which nothing else may use.
@@ -96,11 +97,11 @@ pub const TUN_INTERFACE: &str = "dnet-tun0";
 /// TUN's own address.
 const TUN_ADDRESS: &str = "172.19.0.1/30";
 
-const PROXY_TAG: &str = "proxy";
-const DIRECT_TAG: &str = "direct";
+pub(crate) const PROXY_TAG: &str = "proxy";
+pub(crate) const DIRECT_TAG: &str = "direct";
 
-const FAKEIP_DNS: &str = "fakeip";
-const LOCAL_DNS: &str = "local";
+pub(crate) const FAKEIP_DNS: &str = "fakeip";
+pub(crate) const LOCAL_DNS: &str = "local";
 const TUNNEL_DNS: &str = "tunnel-dns";
 /// The resolver Profile A queries through the tunnel unless the profile overrides it
 /// with a `dns` parameter.
@@ -140,7 +141,14 @@ pub struct PrimaryCoreConfig {
     pub dns: Dns,
     pub inbounds: Vec<TunInbound>,
     pub outbounds: Vec<Outbound>,
+    /// The session endpoint (ADR-0008). Empty, and so absent from the output, for the three
+    /// profiles that carry traffic on their own.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub endpoints: Vec<SessionEndpoint>,
     pub route: Route,
+    /// The control API (ADR-0008), only when a session needs its carrier switched.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub experimental: Option<Experimental>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -221,6 +229,8 @@ pub enum Outbound {
     Vless(VlessOutbound),
     /// The unbound `direct` outbound used by bypass rules.
     Direct(DirectOutbound),
+    /// The switch over the carriers of a session (ADR-0008).
+    Selector(SelectorOutbound),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -331,28 +341,37 @@ pub fn generate_primary_core_config(
             // chain decides every non-bypassed query before this is consulted.
             final_server: LOCAL_DNS.to_string(),
         },
-        inbounds: vec![TunInbound {
-            kind: "tun",
-            tag: TUN_TAG.to_string(),
-            interface_name: TUN_INTERFACE.to_string(),
-            address: vec![TUN_ADDRESS.to_string()],
-            auto_route: true,
-            strict_route: true,
-            dns_mode: "hijack",
-        }],
-        outbounds: vec![
-            proxy,
-            Outbound::Direct(DirectOutbound {
-                kind: "direct",
-                tag: DIRECT_TAG.to_string(),
-            }),
-        ],
+        inbounds: vec![tun_inbound()],
+        outbounds: vec![proxy, direct_outbound()],
+        endpoints: Vec::new(),
         route: Route {
             rules: route_rules(input.rules),
             final_outbound: PROXY_TAG.to_string(),
             auto_detect_interface: true,
             default_domain_resolver: LOCAL_DNS.to_string(),
         },
+        experimental: None,
+    })
+}
+
+/// The tunnel inbound every generated configuration has.
+pub(crate) fn tun_inbound() -> TunInbound {
+    TunInbound {
+        kind: "tun",
+        tag: TUN_TAG.to_string(),
+        interface_name: TUN_INTERFACE.to_string(),
+        address: vec![TUN_ADDRESS.to_string()],
+        auto_route: true,
+        strict_route: true,
+        dns_mode: "hijack",
+    }
+}
+
+/// The unbound `direct` outbound that bypass rules use.
+pub(crate) fn direct_outbound() -> Outbound {
+    Outbound::Direct(DirectOutbound {
+        kind: "direct",
+        tag: DIRECT_TAG.to_string(),
     })
 }
 
@@ -415,7 +434,7 @@ pub fn route_rules(rules: &[RoutingRule]) -> Vec<RouteRule> {
 /// 3. every other query type goes through the tunnel resolver (Profile A) or is refused
 ///    (Profiles B/C, until their remote resolver lands in Phase 5) — never to the local
 ///    network, which would leak it.
-fn dns_rules(rules: &[RoutingRule], tunnel_resolver: Option<&str>) -> Vec<DnsRule> {
+pub(crate) fn dns_rules(rules: &[RoutingRule], tunnel_resolver: Option<&str>) -> Vec<DnsRule> {
     let mut chain: Vec<DnsRule> = by_precedence(rules)
         .into_iter()
         .filter(|r| matches!(r.action(), RuleAction::Bypass | RuleAction::Reject))

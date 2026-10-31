@@ -4,8 +4,10 @@
 //! 1. **DNS capture** (port 53), precedence `0` — the anti-leak rule outranks everything.
 //! 2. `Bypass` for the **active endpoint address**, mirroring the R4 host route so rule
 //!    evaluation and the route table agree (data-model §Cross-cutting 2).
-//! 3. `Bypass` for **local ranges**: RFC1918, link-local, multicast.
-//! 4. `Bypass` for the **captive-portal probe hosts**, so portal detection and login work
+//! 3. `Tunnel` for the **measurement origins' own addresses** (a `/32` each). They sit inside the
+//!    private range below and must be reached through the tunnel to prove anything about it.
+//! 4. `Bypass` for **local ranges**: RFC1918, link-local, multicast.
+//! 5. `Bypass` for the **captive-portal probe hosts**, so portal detection and login work
 //!    before the tunnel can.
 //!
 //! **Non-deletable** is enforced by [`validate_builtin_rules_present`], which every rule-set
@@ -51,22 +53,31 @@ pub fn builtin_rules(active_endpoint: Option<&EndpointAddress>) -> Vec<RoutingRu
             .expect("the built-in DNS-capture rule is valid"),
     ];
 
-    let mut bypasses: Vec<RuleMatcher> = Vec::new();
-    bypasses.extend(active_endpoint.map(endpoint_matcher));
-    bypasses.extend(LOCAL_BYPASS_CIDRS.iter().map(|c| {
-        RuleMatcher::IpCidr(IpCidr::parse(c).expect("built-in CIDR constants are valid"))
+    let mut ordered: Vec<(RuleMatcher, RuleAction)> = Vec::new();
+    ordered.extend(active_endpoint.map(|e| (endpoint_matcher(e), RuleAction::Bypass)));
+    // Inside the private range below, so they must come first: a private address matches the first rule
+    // that holds it. Only the origins' own single addresses, so the rest of a person's LAN stays local.
+    ordered.extend(crate::origin::TUNNEL_ORIGIN_HOSTS.iter().map(|host| {
+        let cidr = IpCidr::parse(&format!("{host}/32")).expect("built-in origin hosts are valid");
+        (RuleMatcher::IpCidr(cidr), RuleAction::Tunnel)
     }));
-    bypasses.extend(
-        CAPTIVE_PORTAL_PROBE_SUFFIXES
-            .iter()
-            .map(|s| RuleMatcher::DomainSuffix((*s).to_string())),
-    );
+    ordered.extend(LOCAL_BYPASS_CIDRS.iter().map(|c| {
+        (
+            RuleMatcher::IpCidr(IpCidr::parse(c).expect("built-in CIDR constants are valid")),
+            RuleAction::Bypass,
+        )
+    }));
+    ordered.extend(CAPTIVE_PORTAL_PROBE_SUFFIXES.iter().map(|s| {
+        (
+            RuleMatcher::DomainSuffix((*s).to_string()),
+            RuleAction::Bypass,
+        )
+    }));
 
-    // Precedence 0 is DNS capture's; the bypasses follow in order from 1.
-    for (matcher, precedence) in bypasses.into_iter().zip(1u32..) {
+    // Precedence 0 is DNS capture's; the rest follow in order from 1.
+    for ((matcher, action), precedence) in ordered.into_iter().zip(1u32..) {
         rules.push(
-            RoutingRule::builtin(matcher, RuleAction::Bypass, precedence)
-                .expect("built-in bypass rules are valid"),
+            RoutingRule::builtin(matcher, action, precedence).expect("built-in rules are valid"),
         );
     }
     rules
@@ -200,9 +211,16 @@ mod tests {
         let bypass = bypass_matchers(&rules);
 
         assert!(rules.iter().all(RoutingRule::is_builtin));
-        assert!(rules
-            .iter()
-            .all(|r| r.action() == RuleAction::Bypass || r.is_dns_capture()));
+        // Bypasses and DNS capture, and one kind of exception: a single-address tunnel rule for each
+        // measurement origin (see the test below).
+        assert!(rules.iter().all(|r| {
+            r.action() == RuleAction::Bypass
+                || r.is_dns_capture()
+                || (r.action() == RuleAction::Tunnel
+                    && crate::origin::TUNNEL_ORIGIN_HOSTS
+                        .iter()
+                        .any(|h| r.matcher() == &cidr(&format!("{h}/32"))))
+        }));
         // RFC1918, link-local, and multicast in both families.
         for range in [
             "10.0.0.0/8",
@@ -227,6 +245,56 @@ mod tests {
         // Internally valid.
         assert_eq!(validate_rule_set(&rules), Ok(()));
         assert_eq!(validate_dns_leak_protection(&rules), Ok(()));
+    }
+
+    /// The measurement origin lives at a private address on the server, reached through the tunnel and
+    /// nowhere else. A private address is in the range that stays direct, so without a rule of its own
+    /// ahead of that range a fetch from the origin would go to the physical network and prove nothing (or
+    /// fail), and a tunnel that works would look broken. Found 2026-11-01 while building the session.
+    #[test]
+    fn the_measurement_origins_are_reached_through_the_tunnel_and_not_around_it() {
+        use crate::doh_block::Policy;
+        use crate::origin::TUNNEL_ORIGIN_HOSTS;
+        use crate::rule_eval::{evaluate, Flow, Transport};
+        let endpoint = EndpointAddress::new("203.0.113.9", 8443).unwrap();
+        let flow =
+            |host: &str| Flow::to_address(host.parse().unwrap()).on_port(8080, Transport::Tcp);
+        for rules in [
+            builtin_rules(Some(&endpoint)),
+            builtin_rules_for(Some(&endpoint), Policy::Block),
+            builtin_rules_for(Some(&endpoint), Policy::Allow),
+            builtin_rules(None),
+        ] {
+            for host in TUNNEL_ORIGIN_HOSTS {
+                assert_eq!(
+                    evaluate(&rules, &flow(host)).action,
+                    RuleAction::Tunnel,
+                    "{host} must go through the tunnel"
+                );
+            }
+            // Nothing else changed: the rest of the private ranges, including the neighbours of the
+            // origins, still stay on the local network.
+            for host in [
+                "10.0.0.1",
+                "10.66.0.2",
+                "10.9.0.2",
+                "10.66.0.0",
+                "192.168.1.1",
+                "172.16.0.1",
+            ] {
+                assert_eq!(
+                    evaluate(&rules, &flow(host)).action,
+                    RuleAction::Bypass,
+                    "{host} must stay local"
+                );
+            }
+        }
+        // Only the origins' own addresses are carved out (a /32 each), so a person's LAN keeps working.
+        let carved: Vec<_> = builtin_rules(None)
+            .into_iter()
+            .filter(|r| r.action() == RuleAction::Tunnel)
+            .collect();
+        assert_eq!(carved.len(), TUNNEL_ORIGIN_HOSTS.len());
     }
 
     #[test]

@@ -32,6 +32,7 @@ pub mod probe;
 pub mod reality;
 pub mod secret;
 pub mod secret_store;
+pub mod session;
 pub mod tls;
 pub mod trusted_file;
 pub mod uapi;
