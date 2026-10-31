@@ -164,6 +164,7 @@ pub fn credentials_text() -> String {
             },
         }),
         measure_origin: None,
+        session: None,
     }
     .to_plaintext_json()
     .unwrap();

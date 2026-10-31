@@ -62,6 +62,7 @@ pub(crate) fn credentials() -> EndpointCredentials {
             },
         }),
         measure_origin: None,
+        session: None,
     }
 }
 
@@ -89,6 +90,7 @@ fn amneziawg_only() -> EndpointCredentials {
         hysteria2: None,
         reality: None,
         measure_origin: None,
+        session: None,
     }
 }
 

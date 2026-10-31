@@ -529,6 +529,7 @@ mod tests {
             }),
             reality: None,
             measure_origin: None,
+            session: None,
         }
     }
 
