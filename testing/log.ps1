@@ -40,8 +40,14 @@ $header = @(
 $global:LASTEXITCODE = $null
 Push-Location $root
 try {
-    Invoke-Expression $CommandLine 2>&1 | ForEach-Object {
-        $line = "$_"
+    # A script block, not Invoke-Expression: Windows PowerShell applies `2>&1` on Invoke-Expression to
+    # the cmdlet alone, so a native command's stderr (cargo's errors, warnings, panics) went to the
+    # console and never into the log.
+    & ([scriptblock]::Create($CommandLine)) 2>&1 | ForEach-Object {
+        # Each stderr line arrives wrapped in an ErrorRecord, and an empty one prints as
+        # "System.Management.Automation.RemoteException"; the line itself is the record's target.
+        $line = if ($_ -is [Management.Automation.ErrorRecord] -and
+            $_.FullyQualifiedErrorId -like 'NativeCommandError*') { "$($_.TargetObject)" } else { "$_" }
         Write-Host $line
         [IO.File]::AppendAllText($log, $line + "`n", $utf8)
     }
