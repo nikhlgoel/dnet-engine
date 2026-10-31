@@ -217,6 +217,26 @@ fn exactly_the_three_ports_are_opened_on_the_machine() {
     assert_eq!(text.matches("\n  allow ").count(), 3);
 }
 
+/// Runs `shell` with `args`, the script given on stdin. Not as a path or a `-c` argument: on Windows the
+/// first `bash` can be WSL's launcher, which reads `C:\...` as escapes and drops `$(...)` from arguments.
+fn run_on_stdin(shell: &str, args: &[&str], script: &str) -> std::process::Output {
+    use std::io::Write;
+    let mut child = std::process::Command::new(shell)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(script.as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
 #[test]
 fn the_script_parses_as_posix_shell() {
     // `sh -n` reads the script and runs none of it. Skipped, loudly, where there is no shell.
@@ -230,14 +250,7 @@ fn the_script_parses_as_posix_shell() {
         eprintln!("SKIPPED: no shell on this machine to check the script's syntax");
         return;
     };
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("bootstrap.sh");
-    std::fs::write(&path, script(&plan()).unwrap()).unwrap();
-    let output = std::process::Command::new(shell)
-        .arg("-n")
-        .arg(&path)
-        .output()
-        .unwrap();
+    let output = run_on_stdin(shell, &["-n"], &script(&plan()).unwrap());
     assert!(
         output.status.success(),
         "{shell} -n rejected the script:\n{}",
@@ -786,11 +799,7 @@ fn the_guard_behaves_when_run_with_each_kind_of_machine() {
             "uname() {{ echo {reported}; }}\n{}\necho PAST",
             &text[start..end]
         );
-        let out = std::process::Command::new(shell)
-            .arg("-c")
-            .arg(&guard)
-            .output()
-            .unwrap();
+        let out = run_on_stdin(shell, &["-s"], &guard);
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);
         if expect_ok {
