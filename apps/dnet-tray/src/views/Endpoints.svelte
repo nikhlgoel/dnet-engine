@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import type { AppState } from '../lib/app.svelte';
   import Consent from '../components/Consent.svelte';
+  import PendingChanges from '../components/PendingChanges.svelte';
   import { en } from '../lib/messages';
   import type { EndpointView } from '../lib/model';
 
@@ -87,6 +88,8 @@
   <h1 id="endpoints-title">{t.title}</h1>
 
   <p class="lede">{t.lede}</p>
+
+  <PendingChanges {app} />
 
   {#if locked}
     <p class="notice">{en.errors.disconnectFirst}</p>

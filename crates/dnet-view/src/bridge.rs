@@ -106,6 +106,32 @@ impl<L: Link> Bridge<L> {
         }
     }
 
+    /// The changes waiting for an elevated approval (T160).
+    pub async fn pending(&self) -> Result<Value, String> {
+        match self.link.call(Request::ListPending).await {
+            Err(error) => Err(error.to_string()),
+            Ok(Reply::Refused(refusal)) => Err(refusal_text(&refusal.detail)),
+            Ok(Reply::Done(value)) => lists::pending(&value),
+        }
+    }
+
+    /// Drop a waiting change without applying it. Approving is not here: only an elevated client may, and
+    /// the window is not one, so it opens `dnetctl approve` (the shell does), which asks Windows.
+    pub async fn reject_change(&self, id: &str) -> Value {
+        let wire = json!({ "request": "RejectChange", "id": id });
+        let request = match decode_request(&wire.to_string()) {
+            Ok(request) => request,
+            Err(why) => return refused(&why.to_string(), "Refused"),
+        };
+        from_reply(self.link.call(request).await, |reply| {
+            if reply.get("applied").and_then(Value::as_bool) == Some(true) {
+                Ok(json!({}))
+            } else {
+                Err("The service did not say that the change was dropped.".to_owned())
+            }
+        })
+    }
+
     // ------------------------------------------------------------------ the one control
 
     /// Turn the connection on or off. Turning it on without `acknowledge_tier2` may come back as a request

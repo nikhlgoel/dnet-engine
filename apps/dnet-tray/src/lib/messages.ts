@@ -168,6 +168,18 @@ export const en = {
         cancel: 'Cancel',
       },
     },
+    pending: {
+      title: 'Waiting for your approval',
+      explainer: 'These changes would send your traffic somewhere new. They wait until you approve them: Windows asks you first, and you confirm in a second window. A change that nobody approves is dropped after ten minutes.',
+      approve: 'Approve…',
+      approveLabel: 'Approve: {what}',
+      drop: 'Drop',
+      dropLabel: 'Drop: {what}',
+      left: 'Dropped in about {minutes} min',
+      waiting: 'Waiting for you in the approval window…',
+      approved: 'Approved and applied.',
+      dropped: 'Dropped. The change was not applied.',
+    },
     rules: {
       title: 'Rules',
       empty: 'No rules of your own yet. Built-in rules keep your local network and sign-in pages working.',

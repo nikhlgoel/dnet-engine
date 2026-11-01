@@ -176,6 +176,21 @@ async fn the_endpoint_and_rule_lists() {
 }
 
 #[tokio::test]
+async fn the_list_of_changes_waiting_for_approval() {
+    let link = FakeLink::new(|request| match request {
+        dnet_ipc::protocol::Request::ListPending => done(json!({ "pending": [
+            { "id": "a1b2c3d4", "what": "Adding the server \"home\" at 203.0.113.9",
+              "proposed_unix_ms": 1000, "expires_unix_ms": 601000, "extra": "dropped" },
+            { "id": "0f9e8d7c", "what": "Sending example.com\u{202e} around the tunnel",
+              "proposed_unix_ms": 2000, "expires_unix_ms": 602000 }
+        ]})),
+        other => panic!("unexpected {other:?}"),
+    });
+    let bridge = dnet_view::Bridge::new(link);
+    golden("pending", &bridge.pending().await.unwrap());
+}
+
+#[tokio::test]
 async fn poor_and_unusable_are_told_apart() {
     for quality in ["Poor", "Unusable"] {
         let mut paths = paths_two_networks(true);

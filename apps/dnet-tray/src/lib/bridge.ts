@@ -6,9 +6,17 @@
  * Two implementations exist: `tauriBridge` (the real one) and `mockBridge` (development, tests, and the
  * design preview), and the components cannot tell them apart.
  */
-import type { ActivityItem, EncryptedDnsSetting, EndpointView, ProfileView, RulesView, Snapshot } from './model';
+import type {
+  ActivityItem,
+  EncryptedDnsSetting,
+  EndpointView,
+  PendingView,
+  ProfileView,
+  RulesView,
+  Snapshot,
+} from './model';
 
-export type { EncryptedDnsSetting, ProfileView, RulesView };
+export type { EncryptedDnsSetting, PendingView, ProfileView, RulesView };
 
 export type Unsubscribe = () => void;
 
@@ -93,6 +101,16 @@ export interface Bridge {
   removeRule(id: string): Promise<Outcome>;
   /** `block: false` is the one-action opt-out; the reply carries the consequence to show. */
   setEncryptedDns(block: boolean): Promise<Outcome & { consequence?: string }>;
+
+  /** The changes that redirect traffic and wait for approval (T160). Empty when none do, or the service predates them. */
+  pending(): Promise<PendingView[]>;
+  /**
+   * Approve one. The window is not an elevated client, so this opens the approver, which asks Windows and applies the
+   * change only when the person types yes in its own window; it comes back when that window is closed.
+   */
+  approveChange(id: string): Promise<Outcome>;
+  /** Drop a waiting change without applying it. */
+  rejectChange(id: string): Promise<Outcome>;
 
   /** Ask the service to check for updated connection methods now. */
   checkUpdates(): Promise<Outcome & { route?: 'tunnel' | 'physical' }>;

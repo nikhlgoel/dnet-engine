@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import type { AppState } from '../lib/app.svelte';
+  import PendingChanges from '../components/PendingChanges.svelte';
   import { en } from '../lib/messages';
   import type { RuleView } from '../lib/model';
   import type { NewRuleInput } from '../lib/bridge';
@@ -58,6 +59,8 @@
 <section class="view" aria-labelledby="rules-title">
   <h1 id="rules-title">{t.title}</h1>
   <p class="lede">{t.explainer}</p>
+
+  <PendingChanges {app} />
 
   {#if error}
     <p class="notice" role="alert">{error}</p>

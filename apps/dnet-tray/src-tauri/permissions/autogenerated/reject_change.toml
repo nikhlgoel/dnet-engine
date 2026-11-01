@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-reject-change"
+description = "Enables the reject_change command without any pre-configured scope."
+commands.allow = ["reject_change"]
+
+[[permission]]
+identifier = "deny-reject-change"
+description = "Denies the reject_change command without any pre-configured scope."
+commands.deny = ["reject_change"]

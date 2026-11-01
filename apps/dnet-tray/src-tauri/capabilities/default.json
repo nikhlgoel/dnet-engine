@@ -21,6 +21,9 @@
     "allow-list-rules",
     "allow-add-rule",
     "allow-remove-rule",
+    "allow-list-pending",
+    "allow-reject-change",
+    "allow-approve-change",
     "allow-set-encrypted-dns",
     "allow-check-updates",
     "allow-open-login-page"

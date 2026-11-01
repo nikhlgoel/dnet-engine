@@ -13,6 +13,7 @@ import { brutalWarning } from './messages';
 import {
   parseActivity,
   parseEndpoints,
+  parsePending,
   parseProfiles,
   parseRulesReply,
   parseSnapshot,
@@ -195,6 +196,12 @@ export async function createTauriBridge(): Promise<Bridge> {
     async rules() {
       return parseRulesReply(await invoke('list_rules'));
     },
+    async pending() {
+      return parsePending(await invoke('list_pending'));
+    },
+    approveChange: (id) => call('approve_change', { id }),
+    rejectChange: (id) => call('reject_change', { id }),
+
     async setEncryptedDns(block) {
       const reply = await call('set_encrypted_dns', { block });
       return reply.ok && typeof reply.consequence === 'string' ? { ok: true as const, consequence: reply.consequence } : reply;

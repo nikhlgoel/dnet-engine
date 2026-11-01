@@ -11,6 +11,7 @@ import type {
   EndpointView,
   FailureCause,
   PathView,
+  PendingView,
   ProfileView,
   RuleView,
   RulesView,
@@ -170,6 +171,8 @@ export interface MockController extends Bridge {
   emit(event: string, because: string): void;
   /** Make the next `stabilize(true)` fail with this reason. */
   failNext(reason: string): void;
+  /** Put a change that redirects traffic in the waiting list, as the service does; returns its id. */
+  hold(what: string): string;
 }
 
 const BUILTIN_RULES: RuleView[] = [
@@ -188,6 +191,8 @@ export function createMockBridge(options: MockOptions = {}): MockController {
   ];
   let dns: EncryptedDnsSetting = { block: true, needsDisclosure: options.disclosed !== true };
   let ownRules: RuleView[] = [];
+  let held: PendingView[] = [];
+  let heldCount = 0;
   let profiles: ProfileView[] = [
     { id: 'awg-default', kind: 'AmneziaWg', tier: 'Tier2', brutal: false },
     { id: 'hy2-default', kind: 'Hysteria2', tier: 'Tier2', brutal: options.brutalOn === true },
@@ -358,6 +363,25 @@ export function createMockBridge(options: MockOptions = {}): MockController {
       if (blocked) return blocked;
       if (!ownRules.some((r) => r.id === id)) return refuse('there is no rule with that id');
       ownRules = ownRules.filter((r) => r.id !== id);
+      return { ok: true };
+    },
+    hold(what: string) {
+      heldCount += 1;
+      const id = `c${heldCount}`;
+      held = [...held, { id, what, expiresUnixMs: now() + 10 * 60 * 1000 }];
+      return id;
+    },
+    async pending() {
+      return held.map((h) => ({ ...h }));
+    },
+    async approveChange(id) {
+      if (!held.some((h) => h.id === id)) return refuse('no change is waiting under that name');
+      held = held.filter((h) => h.id !== id);
+      return { ok: true };
+    },
+    async rejectChange(id) {
+      if (!held.some((h) => h.id === id)) return refuse('no change is waiting under that name');
+      held = held.filter((h) => h.id !== id);
       return { ok: true };
     },
     async setEncryptedDns(block) {

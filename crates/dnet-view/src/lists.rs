@@ -14,6 +14,8 @@ use crate::text::plain;
 const MAX_ENDPOINTS: usize = 64;
 /// More rules than any real set holds.
 const MAX_RULES: usize = 512;
+/// At most this many changes wait for approval at once (`dnetd::approval::MAX_HELD`).
+const MAX_PENDING: usize = 16;
 
 /// The bundled connection methods (`dnet_core::catalogue`); a longer list is not that list.
 const MAX_PROFILES: usize = 16;
@@ -91,6 +93,22 @@ pub fn profiles(reply: &Value) -> Result<Value, String> {
         }));
     }
     Ok(json!({ "profiles": out }))
+}
+
+/// `ListPending` as the window's list (T160): what is waiting for an elevated approval, in the service's own
+/// words, and until when. The id is how the window asks to approve or drop one; it names a change and is not a
+/// secret.
+pub fn pending(reply: &Value) -> Result<Value, String> {
+    let mut out = Vec::new();
+    for item in items(reply, "pending", MAX_PENDING)? {
+        out.push(json!({
+            "id": plain(text(item, "id")?, 32),
+            "what": plain(text(item, "what")?, 400),
+            "expiresUnixMs": item.get("expires_unix_ms").and_then(Value::as_u64)
+                .ok_or_else(|| "a waiting change had no deadline".to_owned())?,
+        }));
+    }
+    Ok(json!({ "pending": out }))
 }
 
 /// `ListRules` as the window's list, with the encrypted-name setting that rides along with it.

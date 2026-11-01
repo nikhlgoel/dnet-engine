@@ -19,6 +19,7 @@
 //! The shapes are pinned by golden files in `tests/fixtures`, which the window's own tests parse with the
 //! window's own parser, so the two sides cannot drift apart without a test failing on one of them.
 
+pub mod approver;
 pub mod bridge;
 pub mod events;
 pub mod link;

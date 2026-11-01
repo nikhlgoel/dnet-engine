@@ -83,12 +83,35 @@ async fn each_refusal_keeps_its_code_and_the_services_own_words() {
         ("InvalidRequest", "Refused"),
         ("Unauthorized", "Refused"),
         ("InternalError", "Refused"),
+        ("ApprovalRequired", "Refused"),
     ] {
         let link = FakeLink::new(move |_| refusal(wire, "the reason in the service's words"));
         let out = Bridge::new(link).stabilize(true, false).await;
         assert_eq!(out["code"], json!(window), "{wire}");
         assert_eq!(out["reason"], json!("the reason in the service's words"));
     }
+}
+
+/// A change that waits for approval is shown to the person whole, with the command that approves it:
+/// even with the longest label and address the service lets through, nothing is cut.
+#[tokio::test]
+async fn a_change_that_waits_for_approval_is_shown_whole() {
+    let longest = "a".repeat(67);
+    let held = dnet_ipc::protocol::IpcError::ApprovalRequired {
+        id: "a1b2c3d4".into(),
+        what: format!("Adding the server \"{longest}\" at {longest} made by the setup guide"),
+    }
+    .to_string();
+    assert!(held.chars().count() <= 400, "{}", held.chars().count());
+    let wording = held.clone();
+    let link = FakeLink::new(move |_| refusal("ApprovalRequired", &wording));
+    let out = Bridge::new(link).stabilize(true, false).await;
+    assert_eq!(out["code"], json!("Refused"));
+    assert_eq!(out["reason"], json!(held));
+    assert!(out["reason"]
+        .as_str()
+        .unwrap()
+        .contains("dnetctl approve a1b2c3d4"));
 }
 
 #[tokio::test]
@@ -705,4 +728,50 @@ async fn a_result_or_address_the_service_would_refuse_is_not_sent_and_not_repeat
         assert_eq!(out["ok"], json!(false));
         assert!(!out.to_string().contains("SENTINEL"), "{out}");
     }
+}
+
+// ---------------------------------------------------------------------- held changes (T160)
+
+#[tokio::test]
+async fn dropping_a_waiting_change_sends_exactly_that_and_nothing_else() {
+    let link = echo_ok(json!({ "applied": true }));
+    let seen = link.seen.clone();
+    let out = Bridge::new(link).reject_change("a1b2c3d4").await;
+    assert_eq!(out, json!({ "ok": true }));
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![Request::RejectChange {
+            id: "a1b2c3d4".to_string()
+        }]
+    );
+}
+
+/// A name that is not a plain short name is refused here, before anything is sent.
+#[tokio::test]
+async fn a_change_name_the_service_would_refuse_is_not_sent() {
+    for bad in ["", "A1", "a b", "../x", &"a".repeat(33)] {
+        let link = echo_ok(json!({ "applied": true }));
+        let seen = link.seen.clone();
+        let out = Bridge::new(link).reject_change(bad).await;
+        assert_eq!(out["ok"], json!(false), "{bad:?}");
+        assert!(seen.lock().unwrap().is_empty(), "{bad:?} was sent");
+    }
+}
+
+#[tokio::test]
+async fn a_drop_the_service_does_not_confirm_is_not_reported_as_done() {
+    let link = echo_ok(json!({}));
+    let out = Bridge::new(link).reject_change("a1b2c3d4").await;
+    assert_eq!(out["ok"], json!(false));
+}
+
+#[tokio::test]
+async fn the_waiting_list_refuses_what_is_not_a_list() {
+    let link = echo_ok(json!({ "pending": "none" }));
+    assert!(Bridge::new(link).pending().await.is_err());
+    let link = echo_ok(json!({ "pending": [{ "id": "a1", "what": "x" }] }));
+    assert!(
+        Bridge::new(link).pending().await.is_err(),
+        "a change with no deadline is not one this program draws"
+    );
 }

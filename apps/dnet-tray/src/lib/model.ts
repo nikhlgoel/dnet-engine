@@ -383,3 +383,25 @@ export function parseActivity(value: unknown, atMs: number): ActivityItem {
   const seq = o.seq === undefined || o.seq === null ? null : num(o.seq, 'a sequence number');
   return { seq, event: text(o.event, 'an event name', 48), because: text(o.because, 'a reason', 400), atMs };
 }
+
+/** A change that redirects traffic and waits for the person to approve it (T160): what it would do, and until when. */
+export interface PendingView {
+  /** Names the change; it is not a secret, because approving needs the Windows prompt and not the name. */
+  id: string;
+  /** In the service's own words: for example the server's name and address. */
+  what: string;
+  /** When it is dropped if nobody approves it, in milliseconds since 1970. */
+  expiresUnixMs: number;
+}
+
+export function parsePending(value: unknown): PendingView[] {
+  const o = obj(value, 'the waiting changes');
+  return list(o.pending, 'the waiting changes', 16).map((item) => {
+    const p = obj(item, 'a waiting change');
+    return {
+      id: text(p.id, 'a change id', 32),
+      what: text(p.what, 'what a change does', 400),
+      expiresUnixMs: num(p.expiresUnixMs, 'a deadline'),
+    };
+  });
+}

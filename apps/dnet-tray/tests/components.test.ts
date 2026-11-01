@@ -407,3 +407,54 @@ describe('theme and motion', () => {
     expect(document.documentElement.getAttribute('data-motion')).toBe('reduce');
   });
 });
+
+describe('Changes waiting for approval (T160)', () => {
+  it('lists a waiting change in the Servers view with what it does, and approving it removes it', async () => {
+    const bridge = mount();
+    const id = bridge.hold('Adding the server "home" at 203.0.113.9');
+    const approving = vi.spyOn(bridge, 'approveChange');
+    const dropping = vi.spyOn(bridge, 'rejectChange');
+    await go('Servers');
+    const approve = await screen.findByRole('button', { name: /Approve: Adding the server "home" at 203\.0\.113\.9/ });
+    expect(screen.getByRole('heading', { level: 2, name: 'Waiting for your approval' })).toBeTruthy();
+    expect(await violations()).toEqual([]);
+
+    await fireEvent.click(approve);
+    await waitFor(() => expect(screen.queryByRole('button', { name: /^Approve:/ })).toBeNull());
+    expect(await screen.findByText('Approved and applied.')).toBeTruthy();
+    expect(approving).toHaveBeenCalledWith(id);
+    expect(dropping).not.toHaveBeenCalled();
+    expect(await bridge.pending()).toEqual([]);
+  });
+
+  it('drops a waiting change without applying it', async () => {
+    const bridge = mount();
+    const id = bridge.hold('Sending example.com around the tunnel');
+    const approving = vi.spyOn(bridge, 'approveChange');
+    const dropping = vi.spyOn(bridge, 'rejectChange');
+    await go('Rules');
+    await fireEvent.click(await screen.findByRole('button', { name: /^Drop: Sending example\.com/ }));
+    expect(await screen.findByText('Dropped. The change was not applied.')).toBeTruthy();
+    expect(dropping).toHaveBeenCalledWith(id);
+    expect(approving).not.toHaveBeenCalled();
+    expect(await bridge.pending()).toEqual([]);
+  });
+
+  it('shows nothing at all when nothing waits', async () => {
+    mount();
+    await go('Servers');
+    await screen.findByRole('heading', { level: 1, name: 'Servers' });
+    expect(screen.queryByText('Waiting for your approval')).toBeNull();
+  });
+
+  it('says why when the approval did not go through, in the words it was given', async () => {
+    const bridge = mount();
+    bridge.hold('Adding the server "home"');
+    await go('Servers');
+    const approve = await screen.findByRole('button', { name: /^Approve:/ });
+    // The change goes away behind the window's back (dropped by dnetctl, or it expired).
+    await bridge.rejectChange((await bridge.pending())[0]!.id);
+    await fireEvent.click(approve);
+    expect(await screen.findByText(/no change is waiting under that name/)).toBeTruthy();
+  });
+});

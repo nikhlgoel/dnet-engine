@@ -305,3 +305,34 @@ describe('rules (T108)', () => {
   });
 });
 
+describe('changes waiting for approval (T160)', () => {
+  it('reads the waiting list, approves and drops by name, and asks for nothing else', async () => {
+    const { b, calls } = await bridge((c) =>
+      c === 'list_pending'
+        ? { pending: [{ id: 'a1b2c3d4', what: 'Adding the server "home"', expiresUnixMs: 601000 }] }
+        : c === 'approve_change' || c === 'reject_change'
+          ? { ok: true }
+          : answers[c],
+    );
+    expect((await b.pending()).map((p) => [p.id, p.what])).toEqual([['a1b2c3d4', 'Adding the server "home"']]);
+    expect(await b.approveChange('a1b2c3d4')).toEqual({ ok: true });
+    expect(await b.rejectChange('a1b2c3d4')).toEqual({ ok: true });
+    expect(calls.list.filter(([c]) => c.endsWith('_pending') || c.endsWith('_change'))).toEqual([
+      ['list_pending', {}],
+      ['approve_change', { id: 'a1b2c3d4' }],
+      ['reject_change', { id: 'a1b2c3d4' }],
+    ]);
+  });
+
+  it('refuses a waiting list that is not a list', async () => {
+    const { b } = await bridge((c) => (c === 'list_pending' ? { pending: 'some' } : answers[c]));
+    await expect(b.pending()).rejects.toThrow();
+  });
+
+  it('shows a refused approval with the reason it was given', async () => {
+    const { b } = await bridge((c) =>
+      c === 'approve_change' ? { ok: false, reason: 'Not approved. Nothing was changed.', code: 'Refused' } : answers[c],
+    );
+    expect(await b.approveChange('a1')).toEqual({ ok: false, reason: 'Not approved. Nothing was changed.', code: 'Refused' });
+  });
+});
