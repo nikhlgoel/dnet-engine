@@ -94,6 +94,19 @@ pub enum Command {
         keys: Option<String>,
         feed: Option<String>,
     },
+    /// List the changes waiting for approval (T160).
+    Pending,
+    /// Approve a waiting change. It opens its own elevated window (Windows asks the person first),
+    /// shows what the change does, and applies it only if they type `yes`.
+    Approve {
+        id: String,
+        /// Keep the window open at the end. Set when this program opened the window itself.
+        pause: bool,
+    },
+    /// Withdraw a waiting change without applying it.
+    Reject {
+        id: String,
+    },
     Help,
 }
 
@@ -109,6 +122,8 @@ impl Command {
                 | Command::BrutalOn { .. }
                 | Command::BrutalOff { .. }
                 | Command::RemoveRule { .. }
+                | Command::Approve { .. }
+                | Command::Reject { .. }
         )
     }
 }
@@ -158,9 +173,15 @@ commands:
                          directly over your network if you are disconnected: only because you asked)
   import-feed            hand the service signed profile updates from files: --keys-file <path>
                          and/or --feed-file <path>. The service checks signatures; nothing here does.
+  pending                list the changes waiting for approval
+  approve <id>           approve a waiting change: Windows asks you first, then the change is shown
+                         and applied only if you type yes
+  reject <id>            drop a waiting change without applying it
   help                   show this text
 
 Endpoints, rules, the encrypted-DNS choice and Brutal can be changed only while disconnected.
+Adding or turning on a server, a rule that goes around the tunnel and an import wait for your
+approval ('pending', 'approve'): a program running as you cannot give it for you.
 
 options:
   --json                 print the service's answers as JSON (for scripts)
@@ -180,6 +201,7 @@ options:
   --keys-file <path>     import-feed: a signed keys document (taken first, if both are given)
   --feed-file <path>     import-feed: a signed profile feed
   -f, --follow           events: keep watching until interrupted
+  --pause                approve: keep the window open at the end (set when it opens its own)
   --allow-unprivileged-service
                          DEVELOPMENT ONLY: also talk to a service that is not running as SYSTEM
                          or an administrator. Without it a process posing as the service is refused.
@@ -243,6 +265,12 @@ fn command_named(name: &str) -> Option<Command> {
             keys: None,
             feed: None,
         },
+        "pending" => Command::Pending,
+        "approve" => Command::Approve {
+            id: String::new(),
+            pause: false,
+        },
+        "reject" => Command::Reject { id: String::new() },
         "help" | "--help" | "-h" => Command::Help,
         _ => return None,
     })
@@ -349,6 +377,7 @@ pub fn parse(args: &[String]) -> Result<Invocation, String> {
                 *wait = false;
             }
             ("-f" | "--follow", Command::Events { follow }) => *follow = true,
+            ("--pause", Command::Approve { pause, .. }) => *pause = true,
             ("--host", Command::AddEndpoint { .. }) => {
                 host = Some(
                     rest.next()
@@ -485,6 +514,11 @@ pub fn parse(args: &[String]) -> Result<Invocation, String> {
         }
         Command::BrutalOff { profile } => {
             *profile = word.ok_or("brutal-off needs a profile id (see 'dnetctl profiles')")?;
+        }
+        Command::Approve { id, .. } | Command::Reject { id } => {
+            *id = word.ok_or_else(|| {
+                format!("{} needs a change id (see 'dnetctl pending')", shown(first))
+            })?;
         }
         Command::ImportFeed { keys, feed } => {
             if keys.is_none() && feed.is_none() {
@@ -1004,5 +1038,54 @@ mod tests {
     fn typed_text_is_printed_back_without_control_characters() {
         let error = parsed(&["\u{1b}[31mred\u{1b}[0m"]).unwrap_err();
         assert!(!error.contains('\u{1b}'), "{error:?}");
+    }
+
+    #[test]
+    fn approve_pending_and_reject_parse() {
+        assert_eq!(command(&["pending"]), Command::Pending);
+        assert_eq!(
+            command(&["approve", "a1b2"]),
+            Command::Approve {
+                id: "a1b2".into(),
+                pause: false
+            }
+        );
+        assert_eq!(
+            command(&["approve", "a1b2", "--pause"]),
+            Command::Approve {
+                id: "a1b2".into(),
+                pause: true
+            }
+        );
+        assert_eq!(
+            command(&["reject", "a1b2"]),
+            Command::Reject { id: "a1b2".into() }
+        );
+    }
+
+    #[test]
+    fn approve_and_reject_need_an_id_and_nothing_else() {
+        for name in ["approve", "reject"] {
+            let args = [name.to_string()];
+            assert!(parse(&args).unwrap_err().contains("needs a change id"));
+            let two = [name.to_string(), "a".into(), "b".into()];
+            assert!(parse(&two).unwrap_err().contains("one word too many"));
+        }
+    }
+
+    /// There is no way to skip the question in the elevated window: no `--yes`, and `--pause` belongs
+    /// to `approve` alone.
+    #[test]
+    fn there_is_no_option_that_answers_for_the_person() {
+        for args in [
+            vec!["approve", "a", "--yes"],
+            vec!["approve", "a", "-y"],
+            vec!["approve", "a", "--assume-yes"],
+            vec!["reject", "a", "--pause"],
+            vec!["pending", "--pause"],
+        ] {
+            let owned: Vec<String> = args.iter().map(|a| (*a).to_string()).collect();
+            assert!(parse(&owned).is_err(), "{args:?} was accepted");
+        }
     }
 }

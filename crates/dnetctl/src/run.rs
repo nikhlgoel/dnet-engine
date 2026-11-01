@@ -68,6 +68,22 @@ pub trait Connector {
         &self,
         trust_any_service: bool,
     ) -> impl Future<Output = Result<Connection<Self::Stream>, ClientError>>;
+
+    /// Whether this program holds an elevated token (the person answered the Windows prompt).
+    fn is_elevated(&self) -> bool {
+        false
+    }
+
+    /// Run this program again with `args` in an elevated window, which makes Windows ask the person,
+    /// and wait for it. Its exit code, or why it could not be done (the person said no).
+    fn relaunch_elevated(&self, _args: &[String]) -> Result<i32, String> {
+        Err("this program cannot ask Windows for elevation here".to_string())
+    }
+
+    /// Show `prompt` and return the line the person types. Empty when there is no one to ask.
+    fn ask_line(&self, _prompt: &str) -> String {
+        String::new()
+    }
 }
 
 /// What one request came to.
@@ -378,6 +394,17 @@ pub async fn run<C: Connector>(
             connect(&mut connection, request, wait, &invocation, sink).await
         }
         Command::Disconnect { wait } => disconnect(&mut connection, wait, &invocation, sink).await,
+        Command::Pending => pending(&mut connection, invocation.json, sink).await,
+        Command::Reject { ref id } => {
+            let request = Request::RejectChange { id: id.clone() };
+            change(&mut connection, &request, &invocation, sink, |_| {
+                Some("Dropped. The change was not applied.".to_string())
+            })
+            .await
+        }
+        Command::Approve { ref id, pause } => {
+            approve(&mut connection, connector, id, pause, &invocation, sink).await
+        }
         Command::Events { follow } => {
             events(&mut connection, follow, invocation.json, sink, interrupt).await
         }
@@ -714,6 +741,150 @@ async fn stats<S: AsyncRead + AsyncWrite + Unpin>(
             }
         }
     }
+}
+
+/// The changes waiting for approval (T160).
+async fn pending<S: AsyncRead + AsyncWrite + Unpin>(
+    connection: &mut Connection<S>,
+    json: bool,
+    sink: &mut dyn Sink,
+) -> i32 {
+    match ask(connection, &Request::ListPending).await {
+        Err(e) => problem(sink, &e),
+        Ok(Answer::Refused(r)) => refusal(sink, &r),
+        Ok(Answer::Done(value)) => {
+            if json {
+                sink.out(&pretty(&value));
+                return exit::OK;
+            }
+            match render::pending(&value, now_unix_ms()) {
+                Ok(text) => {
+                    sink.out(&text);
+                    exit::OK
+                }
+                Err(why) => problem(sink, &ClientError::Malformed(why)),
+            }
+        }
+    }
+}
+
+fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// `dnetctl approve <id>` (T160, ADR-0008 F13).
+///
+/// Approving is the one act a program running as the person must not be able to do alone, so the
+/// service accepts it only from an elevated client. This command therefore has two halves. The
+/// ordinary half checks that the change exists and shows what it is, then runs this program again in
+/// its own elevated window, which makes Windows ask the person on the secure desktop. The elevated
+/// half shows the change once more, because the Windows prompt names this program and not the server,
+/// and applies it only if the person types `yes`. There is deliberately no option to skip that: a
+/// program that started the elevated half could otherwise answer for the person.
+async fn approve<S: AsyncRead + AsyncWrite + Unpin, C: Connector>(
+    connection: &mut Connection<S>,
+    connector: &C,
+    id: &str,
+    pause: bool,
+    invocation: &Invocation,
+    sink: &mut dyn Sink,
+) -> i32 {
+    let code = approve_once(connection, connector, id, invocation, sink).await;
+    if pause {
+        // The window this program opened closes when it ends; let the person read the result.
+        let _ = connector.ask_line("Press Enter to close this window.");
+    }
+    code
+}
+
+async fn approve_once<S: AsyncRead + AsyncWrite + Unpin, C: Connector>(
+    connection: &mut Connection<S>,
+    connector: &C,
+    id: &str,
+    invocation: &Invocation,
+    sink: &mut dyn Sink,
+) -> i32 {
+    // What the change is, as the service describes it. A name the service does not hold is said now,
+    // before the person is asked anything.
+    let what = match ask(connection, &Request::ListPending).await {
+        Err(e) => return problem(sink, &e),
+        Ok(Answer::Refused(r)) => return refusal(sink, &r),
+        Ok(Answer::Done(value)) => match waiting_change(&value, id) {
+            Ok(Some(what)) => what,
+            Ok(None) => {
+                sink.err(&format!(
+                    "dnetctl: no change is waiting under '{}'. It may have been applied, dropped, or \
+                     have waited more than ten minutes. 'dnetctl pending' lists what waits.",
+                    render::plain(id)
+                ));
+                return exit::REFUSED;
+            }
+            Err(why) => return problem(sink, &ClientError::Malformed(why)),
+        },
+    };
+    sink.out(&format!(
+        "Waiting for your approval: {}",
+        render::plain(&what)
+    ));
+
+    if !connector.is_elevated() {
+        sink.out(
+            "Windows will now ask whether to allow this. Only you can answer that prompt; a program \
+             running as you cannot.",
+        );
+        let mut args = vec!["approve".to_string(), id.to_string(), "--pause".to_string()];
+        if invocation.trust_any_service {
+            args.push("--allow-unprivileged-service".to_string());
+        }
+        return match connector.relaunch_elevated(&args) {
+            Ok(code) => code,
+            Err(why) => {
+                sink.err(&format!(
+                    "dnetctl: not approved: {}. Nothing was changed; the change keeps waiting for ten \
+                     minutes from when it was asked for.",
+                    render::plain(&why)
+                ));
+                exit::REFUSED
+            }
+        };
+    }
+
+    let answer = connector.ask_line(&format!(
+        "Type yes to apply it, or anything else to leave it waiting: {}\n> ",
+        render::plain(&what)
+    ));
+    if answer.trim() != "yes" {
+        sink.err(
+            "dnetctl: not approved. Nothing was changed. 'dnetctl reject <id>' drops the change; \
+             otherwise it is dropped after ten minutes.",
+        );
+        return exit::REFUSED;
+    }
+    let request = Request::ApproveChange { id: id.to_string() };
+    change(connection, &request, invocation, sink, |_| {
+        Some("Approved and applied.".to_string())
+    })
+    .await
+}
+
+/// The description of the waiting change `id` in a `ListPending` reply, if the service holds it.
+fn waiting_change(value: &Value, id: &str) -> Result<Option<String>, String> {
+    let waiting = value
+        .get("pending")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "the list of waiting changes is missing".to_string())?;
+    for item in waiting {
+        if item.get("id").and_then(Value::as_str) == Some(id) {
+            let what = item
+                .get("what")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "a waiting change does not say what it does".to_string())?;
+            return Ok(Some(what.to_string()));
+        }
+    }
+    Ok(None)
 }
 
 async fn list<S: AsyncRead + AsyncWrite + Unpin>(

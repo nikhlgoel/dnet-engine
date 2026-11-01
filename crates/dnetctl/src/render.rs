@@ -424,6 +424,53 @@ pub fn stats(reply: &StatsReply) -> String {
     lines.join("\n")
 }
 
+/// The changes waiting for approval, one per line (T160). `now_ms` is the time to count the
+/// minutes left from; it is given so the text can be tested.
+pub fn pending(value: &Value, now_ms: u64) -> Result<String, String> {
+    let waiting = value
+        .get("pending")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "the list of waiting changes is missing".to_string())?;
+    if waiting.is_empty() {
+        return Ok("Nothing is waiting for approval.".to_string());
+    }
+    let mut lines = vec![format!(
+        "{} {} waiting for approval:",
+        waiting.len(),
+        if waiting.len() == 1 {
+            "change"
+        } else {
+            "changes"
+        }
+    )];
+    for item in waiting {
+        let id = item
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "a waiting change has no id".to_string())?;
+        let what = item
+            .get("what")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "a waiting change does not say what it does".to_string())?;
+        let expires = item
+            .get("expires_unix_ms")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "a waiting change has no deadline".to_string())?;
+        let minutes = expires.saturating_sub(now_ms).div_ceil(60_000);
+        lines.push(format!(
+            "  {}  {}  (dropped in {} min)",
+            plain(id),
+            plain(what),
+            minutes
+        ));
+    }
+    lines.push(
+        "Approve one with 'dnetctl approve <id>', or drop it with 'dnetctl reject <id>'."
+            .to_string(),
+    );
+    Ok(lines.join("\n"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
