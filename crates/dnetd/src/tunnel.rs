@@ -106,6 +106,16 @@ impl<H: TunnelHost> Tunnels<H> {
         }
     }
 
+    /// The process id of the primary core of the tunnel that is up, if there is one and the runtime knows it.
+    pub async fn primary_core_pid(&self) -> Option<u32> {
+        let active = self.active.lock().await;
+        active
+            .as_ref()?
+            .runtime
+            .core_pid(CoreBinding::PrimaryCore)
+            .await
+    }
+
     /// Whether a tunnel is up.
     #[cfg(test)]
     pub async fn is_up(&self) -> bool {

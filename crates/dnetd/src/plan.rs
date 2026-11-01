@@ -29,8 +29,14 @@ use dnet_config::hysteria2::{Hysteria2ClientParams, Hysteria2Settings, Hysteria2
 use dnet_config::primary::{
     generate_primary_core_config, to_json, FakeIpHalf, PrimaryCoreInput, PrimaryTransport,
 };
+use dnet_config::probe::SocksAuth;
 use dnet_config::reality::{RealityClientParams, RealitySettings, RealityTransport};
+use dnet_config::secret::Secret;
 use dnet_config::secret_store::{SecretKey, SecretStore};
+use dnet_config::session::{
+    generate_session_config, Carrier as SessionCarrier, CarrierKind, ControlApi, SessionInput,
+    SessionProbeInput, SESSION_PREFIX,
+};
 use dnet_config::ActiveEndpointBypass;
 use dnet_core::builtin_rules::with_active_endpoint;
 use dnet_core::endpoint::{Endpoint, EndpointAddress};
@@ -39,6 +45,8 @@ use dnet_core::profile::{Carrier, ConnectionProfile, CoreBinding, ProfileKind};
 use dnet_core::rule::RoutingRule;
 use dnet_core::session::FailureCause;
 use dnet_probe::runner::ProbeJob;
+
+use crate::session_switch::{pick_control_port, ControlSecret};
 
 /// The AmneziaWG adapter's name. It is also the leaf of the core's control pipe.
 pub const AMNEZIAWG_ADAPTER: &str = "dnet-awg0";
@@ -88,8 +96,55 @@ pub struct TunnelPlan {
     pub bypass: ActiveEndpointBypass,
     /// Present for an AmneziaWG profile only.
     pub awg: Option<AwgTunnel>,
+    /// Present when the connection is a session over carriers (ADR-0008): how to reach the core's control API
+    /// and which carriers it holds, so that the carrier can be switched without ending the connection.
+    pub session: Option<SessionInfo>,
     /// The primary core's configuration. **Contains credentials.**
     config_json: String,
+}
+
+/// How the service reaches one core's control API: a loopback port and a secret made for this connection alone.
+/// The secret is also written into the core's restricted configuration file; nowhere else.
+#[derive(Clone)]
+pub struct ControlChannel {
+    pub port: u16,
+    pub secret: ControlSecret,
+}
+
+impl ControlChannel {
+    /// A free loopback port and a fresh secret.
+    pub fn fresh() -> Result<Self, PlanError> {
+        Ok(Self {
+            port: pick_control_port().map_err(|_| {
+                PlanError::new("no loopback port was available for the core's control")
+            })?,
+            secret: ControlSecret::generate().map_err(|_| {
+                PlanError::new("no randomness was available for the core's control")
+            })?,
+        })
+    }
+}
+
+impl std::fmt::Debug for ControlChannel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "ControlChannel {{ port: {}, secret: <redacted> }}",
+            self.port
+        )
+    }
+}
+
+/// What a session connection holds besides its configuration. Read by the carrier switch (T169 step e), which
+/// is not wired yet.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct SessionInfo {
+    pub control: ControlChannel,
+    /// The carriers in the core's selector, in the order they were given.
+    pub carriers: Vec<CarrierKind>,
+    /// The carrier the session starts on.
+    pub active: CarrierKind,
 }
 
 impl TunnelPlan {
@@ -109,6 +164,7 @@ impl TunnelPlan {
             core,
             bypass,
             awg,
+            session: None,
             config_json: "{}".into(),
         }
     }
@@ -120,6 +176,7 @@ impl std::fmt::Debug for TunnelPlan {
             .field("core", &self.core)
             .field("bypass", &self.bypass)
             .field("awg", &self.awg.as_ref().map(|_| "<tunnel parameters>"))
+            .field("session", &self.session)
             .field("config_json", &"<redacted>")
             .finish()
     }
@@ -167,6 +224,30 @@ pub fn server_port(kind: ProfileKind, credentials: &EndpointCredentials) -> Opti
         ProfileKind::Hysteria2 => credentials.hysteria2.as_ref().map(|h| h.server_port),
         ProfileKind::VlessReality => credentials.reality.as_ref().map(|r| r.server_port),
     }
+}
+
+/// Where a profile's probes and live checks fetch from. A profile carried by the session is measured at the
+/// session's origin (an address inside the session, reachable only through it); AmneziaWG, and an endpoint
+/// set up before the session existed, keep the origin stored with the endpoint.
+pub fn origin_for(
+    kind: ProfileKind,
+    credentials: &EndpointCredentials,
+) -> Option<dnet_core::origin::Origin> {
+    if kind != ProfileKind::AmneziaWg && credentials.session.is_some() {
+        return Some(dnet_provision::bootstrap::session_measurement_origin());
+    }
+    credentials.measure_origin.clone()
+}
+
+/// Where the profiles of a race are measured. A race covers the profiles a proxy can probe (never AmneziaWG),
+/// so on an endpoint with a session it is the session's origin, and otherwise the one stored with the endpoint.
+pub fn race_origin(credentials: &EndpointCredentials) -> Option<dnet_core::origin::Origin> {
+    origin_for(ProfileKind::Hysteria2, credentials)
+}
+
+/// Whether a connection of `kind` to an endpoint with these credentials is a session over carriers.
+pub fn carried_by_session(kind: ProfileKind, credentials: &EndpointCredentials) -> bool {
+    kind != ProfileKind::AmneziaWg && credentials.session.is_some()
 }
 
 /// The ports the pre-connect reachability check may touch: the ports of profiles carried over TCP,
@@ -417,6 +498,36 @@ pub fn probe_job(
             kind_name(profile.kind())
         ))
     })?;
+    // A server that serves the session forwards its carriers to the session and nothing else, so it is
+    // probed the way it will be used: the session over the one carrier under test.
+    if let (true, Some(session)) = (
+        carried_by_session(profile.kind(), credentials),
+        credentials.session.as_ref(),
+    ) {
+        // Replaced by the job, which makes the proxy's credentials itself.
+        let placeholder = SocksAuth {
+            username: "x".into(),
+            password: Secret::new("x"),
+        };
+        let device_address = format!("{}/{SESSION_PREFIX}", session.device_address);
+        return ProbeJob::new_session(
+            profile.clone(),
+            SessionProbeInput {
+                socks_auth: &placeholder,
+                carrier: SessionCarrier {
+                    transport: transport.borrowed(),
+                    endpoint: &bypass,
+                    brutal: profile.brutal(),
+                },
+                device_private_key: &session.device_private_key,
+                server_public_key: &session.server_public_key,
+                device_address: &device_address,
+                session_port: session.session_port,
+                socks_port,
+            },
+        )
+        .map_err(|e| PlanError::new(format!("the connection could not be tested: {e}")));
+    }
     ProbeJob::new(profile.clone(), &bypass, transport.borrowed(), socks_port)
         .map_err(|e| PlanError::new(format!("the connection could not be tested: {e}")))
 }
@@ -431,6 +542,43 @@ pub fn plan_tunnel(
     rules: &[RoutingRule],
     fakeip: FakeIpHalf,
 ) -> Result<TunnelPlan, PlanError> {
+    plan_tunnel_with(
+        PlanInputs {
+            profile,
+            endpoint,
+            credentials,
+            client,
+            rules,
+            fakeip,
+        },
+        None,
+    )
+}
+
+/// Everything one connection is planned from.
+#[derive(Clone, Copy)]
+pub struct PlanInputs<'a> {
+    pub profile: &'a ConnectionProfile,
+    pub endpoint: &'a Endpoint,
+    pub credentials: &'a EndpointCredentials,
+    pub client: &'a ClientDefinitions,
+    pub rules: &'a [RoutingRule],
+    pub fakeip: FakeIpHalf,
+}
+
+/// [`plan_tunnel`] with the control channel given (a session connection makes a fresh one when it is `None`).
+pub fn plan_tunnel_with(
+    inputs: PlanInputs<'_>,
+    control: Option<ControlChannel>,
+) -> Result<TunnelPlan, PlanError> {
+    let PlanInputs {
+        profile,
+        endpoint,
+        credentials,
+        client,
+        rules,
+        fakeip,
+    } = inputs;
     let (endpoint_ip, bypass) = dialled(endpoint, profile, credentials)?;
     let transport = primary_transport(profile.kind(), credentials, client);
     // The rules held while disconnected have no endpoint to bypass. The tunnel's must: the core's
@@ -441,6 +589,28 @@ pub fn plan_tunnel(
             "the routing rules could not be completed for this endpoint: {e}"
         ))
     })?;
+
+    if carried_by_session(profile.kind(), credentials) {
+        let control = match control {
+            Some(control) => control,
+            None => ControlChannel::fresh()?,
+        };
+        let (config, info) = session_config(
+            PlanInputs {
+                rules: &rules,
+                ..inputs
+            },
+            endpoint_ip,
+            control,
+        )?;
+        return Ok(TunnelPlan {
+            core: profile.core_binding(),
+            bypass,
+            awg: None,
+            session: Some(info),
+            config_json: to_json(&config),
+        });
+    }
 
     let config = generate_primary_core_config(PrimaryCoreInput {
         active_profile: profile,
@@ -475,8 +645,103 @@ pub fn plan_tunnel(
         core: profile.core_binding(),
         bypass,
         awg,
+        session: None,
         config_json: to_json(&config),
     })
+}
+
+/// The configuration of a session connection: every carrier the endpoint has (so the connection can move
+/// between them without ending), starting on the one `profile` names.
+fn session_config(
+    inputs: PlanInputs<'_>,
+    endpoint_ip: Ipv4Addr,
+    control: ControlChannel,
+) -> Result<(dnet_config::PrimaryCoreConfig, SessionInfo), PlanError> {
+    let PlanInputs {
+        profile,
+        credentials,
+        client,
+        rules,
+        fakeip,
+        ..
+    } = inputs;
+    let session = credentials
+        .session
+        .as_ref()
+        .ok_or_else(|| PlanError::new("the endpoint has no session"))?;
+    let active = match profile.kind() {
+        ProfileKind::Hysteria2 => CarrierKind::Hysteria2,
+        ProfileKind::VlessReality => CarrierKind::Reality,
+        ProfileKind::AmneziaWg => {
+            return Err(PlanError::new("AmneziaWG does not run over the session"))
+        }
+    };
+
+    // One leaf per carrier the endpoint has, each dialling its own port on the endpoint's host.
+    struct Leaf {
+        kind: CarrierKind,
+        transport: OwnedTransport,
+        bypass: ActiveEndpointBypass,
+    }
+    let mut leaves = Vec::new();
+    for (kind, profile_kind) in [
+        (CarrierKind::Hysteria2, ProfileKind::Hysteria2),
+        (CarrierKind::Reality, ProfileKind::VlessReality),
+    ] {
+        let (Some(transport), Some(port)) = (
+            primary_transport(profile_kind, credentials, client),
+            server_port(profile_kind, credentials),
+        ) else {
+            continue;
+        };
+        let address = EndpointAddress::new(endpoint_ip.to_string(), port)
+            .map_err(|_| PlanError::new("the endpoint address is not valid"))?;
+        leaves.push(Leaf {
+            kind,
+            transport,
+            bypass: ActiveEndpointBypass::new(&address),
+        });
+    }
+    let carriers: Vec<SessionCarrier<'_>> = leaves
+        .iter()
+        .map(|leaf| SessionCarrier {
+            transport: leaf.transport.borrowed(),
+            endpoint: &leaf.bypass,
+            // The person's opt-in applies to the Hysteria 2 carrier, and only while it is the chosen profile.
+            brutal: (leaf.kind == CarrierKind::Hysteria2
+                && profile.kind() == ProfileKind::Hysteria2)
+                .then(|| profile.brutal())
+                .flatten(),
+        })
+        .collect();
+
+    let device_address = format!("{}/{SESSION_PREFIX}", session.device_address);
+    let control_secret = control.secret.for_config();
+    let config = generate_session_config(SessionInput {
+        carriers: &carriers,
+        active,
+        rules,
+        fakeip,
+        device_private_key: &session.device_private_key,
+        server_public_key: &session.server_public_key,
+        device_address: &device_address,
+        session_port: session.session_port,
+        control: ControlApi {
+            port: control.port,
+            secret: &control_secret,
+        },
+    })
+    .map_err(|e| PlanError::new(format!("the connection could not be configured: {e}")))?;
+
+    let kinds = leaves.iter().map(|leaf| leaf.kind).collect();
+    Ok((
+        config,
+        SessionInfo {
+            control,
+            carriers: kinds,
+            active,
+        },
+    ))
 }
 
 #[cfg(test)]
@@ -568,6 +833,7 @@ mod tests {
                     flow: VlessFlow::Vision,
                 },
             }),
+            session: None,
         }
     }
 
@@ -1166,5 +1432,397 @@ mod tests {
         let (endpoint, secrets) = stored("home", "vpn.example.com", Some(credentials()));
         let text = assess_endpoints(&[endpoint], &secrets).problems.join(" ");
         assert!(!text.contains(SENTINEL), "{text}");
+    }
+
+    // ---------------------------------------------------------------- the session (ADR-0008, T169)
+
+    fn session_bundle() -> dnet_config::credentials::SessionBundle {
+        use base64::engine::general_purpose::STANDARD;
+        use base64::Engine as _;
+        dnet_config::credentials::SessionBundle {
+            device_private_key: Secret::new(STANDARD.encode([5u8; 32])),
+            server_public_key: STANDARD.encode([6u8; 32]),
+            device_address: Ipv4Addr::new(10, 9, 0, 2),
+            session_port: 25182,
+        }
+    }
+
+    fn with_session() -> EndpointCredentials {
+        EndpointCredentials {
+            session: Some(session_bundle()),
+            ..credentials()
+        }
+    }
+
+    fn control() -> ControlChannel {
+        ControlChannel {
+            port: 29090,
+            secret: ControlSecret::new("k".repeat(64)).unwrap(),
+        }
+    }
+
+    fn session_plan(kind: ProfileKind, credentials: &EndpointCredentials) -> TunnelPlan {
+        plan_tunnel_with(
+            PlanInputs {
+                profile: &profile(kind),
+                endpoint: &endpoint("203.0.113.10"),
+                credentials,
+                client: &ClientDefinitions::default(),
+                rules: &builtin_rules(None),
+                fakeip: FakeIpHalf::Low,
+            },
+            Some(control()),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_hysteria_2_or_reality_connection_to_an_endpoint_with_a_session_runs_over_the_session() {
+        for kind in [ProfileKind::Hysteria2, ProfileKind::VlessReality] {
+            let plan = session_plan(kind, &with_session());
+            let v = json(&plan);
+            assert_eq!(v["endpoints"][0]["detour"], "carrier", "{kind:?}");
+            assert_eq!(v["route"]["final"], "proxy", "{kind:?}");
+            let info = plan.session.as_ref().expect("session information");
+            assert_eq!(
+                info.carriers,
+                vec![CarrierKind::Hysteria2, CarrierKind::Reality]
+            );
+            assert_eq!(info.control.port, 29090);
+        }
+    }
+
+    #[test]
+    fn the_chosen_profile_is_the_carrier_the_session_starts_on() {
+        let hy2 = session_plan(ProfileKind::Hysteria2, &with_session());
+        let reality = session_plan(ProfileKind::VlessReality, &with_session());
+        let default_of = |plan: &TunnelPlan| {
+            json(plan)["outbounds"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|o| o["type"] == "selector")
+                .unwrap()["default"]
+                .clone()
+        };
+        assert_eq!(default_of(&hy2), "hy2");
+        assert_eq!(default_of(&reality), "reality");
+        assert_eq!(hy2.session.unwrap().active, CarrierKind::Hysteria2);
+        assert_eq!(reality.session.unwrap().active, CarrierKind::Reality);
+    }
+
+    #[test]
+    fn each_carrier_dials_its_own_port_and_the_host_route_is_for_the_chosen_one() {
+        let plan = session_plan(ProfileKind::VlessReality, &with_session());
+        let outbounds = json(&plan)["outbounds"].clone();
+        let port_of = |tag: &str| {
+            outbounds
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|o| o["tag"] == tag)
+                .unwrap()["server_port"]
+                .clone()
+        };
+        assert_eq!(port_of("hy2"), 44443);
+        assert_eq!(port_of("reality"), 8443);
+        assert_eq!(plan.bypass.host(), "203.0.113.10");
+        assert_eq!(plan.bypass.port(), 8443);
+    }
+
+    #[test]
+    fn an_endpoint_with_one_carrier_gets_a_session_over_just_that_one() {
+        let mut only_reality = with_session();
+        only_reality.hysteria2 = None;
+        let plan = session_plan(ProfileKind::VlessReality, &only_reality);
+        assert_eq!(
+            plan.session.as_ref().unwrap().carriers,
+            vec![CarrierKind::Reality]
+        );
+        let selector = json(&plan)["outbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["type"] == "selector")
+            .unwrap()
+            .clone();
+        assert_eq!(selector["outbounds"], serde_json::json!(["reality"]));
+    }
+
+    #[test]
+    fn amneziawg_and_an_endpoint_without_a_session_keep_the_shape_they_always_had() {
+        // AmneziaWG does not run over the session even when the endpoint has one.
+        let awg = session_plan(ProfileKind::AmneziaWg, &with_session());
+        assert!(awg.session.is_none() && awg.awg.is_some());
+        assert!(!to_json_text(&awg).contains("endpoints"));
+        // And an endpoint set up before the session existed is planned as before.
+        for kind in [ProfileKind::Hysteria2, ProfileKind::VlessReality] {
+            let old = plan(kind, "203.0.113.10").unwrap();
+            assert!(old.session.is_none(), "{kind:?}");
+            let text = to_json_text(&old);
+            for absent in ["\"endpoints\"", "\"selector\"", "clash_api"] {
+                assert!(!text.contains(absent), "{kind:?}: {absent}");
+            }
+        }
+    }
+
+    #[test]
+    fn what_is_written_into_the_core_is_what_the_service_will_send_to_it() {
+        let plan = session_plan(ProfileKind::Hysteria2, &with_session());
+        let api = &json(&plan)["experimental"]["clash_api"];
+        assert_eq!(api["external_controller"], "127.0.0.1:29090");
+        assert_eq!(api["secret"], "k".repeat(64));
+    }
+
+    #[test]
+    fn a_session_connection_makes_a_fresh_control_channel_each_time() {
+        let make = || {
+            plan_tunnel(
+                &profile(ProfileKind::Hysteria2),
+                &endpoint("203.0.113.10"),
+                &with_session(),
+                &ClientDefinitions::default(),
+                &builtin_rules(None),
+                FakeIpHalf::Low,
+            )
+            .unwrap()
+        };
+        let (a, b) = (make(), make());
+        let secret_of =
+            |plan: &TunnelPlan| json(plan)["experimental"]["clash_api"]["secret"].clone();
+        assert_ne!(secret_of(&a), secret_of(&b), "a secret was reused");
+        assert_eq!(secret_of(&a).as_str().unwrap().len(), 64);
+    }
+
+    #[test]
+    fn planning_a_session_with_the_same_control_channel_is_deterministic() {
+        let a = session_plan(ProfileKind::Hysteria2, &with_session());
+        let b = session_plan(ProfileKind::Hysteria2, &with_session());
+        assert_eq!(to_json_text(&a), to_json_text(&b));
+    }
+
+    #[test]
+    fn nothing_that_is_printed_about_a_session_plan_shows_a_secret() {
+        let plan = session_plan(ProfileKind::Hysteria2, &with_session());
+        let shown = format!("{plan:?} {:?}", plan.session);
+        for secret in [SENTINEL.to_owned(), "k".repeat(16), {
+            use base64::engine::general_purpose::STANDARD;
+            use base64::Engine as _;
+            STANDARD.encode([5u8; 32])
+        }] {
+            assert!(!shown.contains(&secret), "a secret was shown: {shown}");
+        }
+        assert!(shown.contains("redacted"));
+    }
+
+    #[test]
+    fn the_session_is_measured_at_its_own_origin_and_amneziawg_at_the_stored_one() {
+        let creds = with_session();
+        let session_origin = origin_for(ProfileKind::Hysteria2, &creds).unwrap();
+        assert_eq!(session_origin.host(), "10.9.0.254");
+        assert_eq!(
+            origin_for(ProfileKind::VlessReality, &creds),
+            Some(session_origin)
+        );
+        // AmneziaWG, and an endpoint with no session, keep the stored origin.
+        let stored = creds.measure_origin.clone();
+        assert_eq!(origin_for(ProfileKind::AmneziaWg, &creds), stored);
+        assert_eq!(
+            origin_for(ProfileKind::Hysteria2, &credentials()),
+            credentials().measure_origin
+        );
+        assert!(carried_by_session(ProfileKind::Hysteria2, &creds));
+        assert!(!carried_by_session(ProfileKind::AmneziaWg, &creds));
+        assert!(!carried_by_session(ProfileKind::Hysteria2, &credentials()));
+    }
+
+    #[test]
+    fn the_session_origin_is_tunnelled_by_the_rules_the_tunnel_is_given() {
+        // The origin is a private address; the built-in rules must send it into the tunnel (found by running
+        // the composed session), or a measurement through the session would never enter it.
+        use dnet_core::rule_eval::{evaluate, Flow, Transport};
+        let origin = origin_for(ProfileKind::Hysteria2, &with_session()).unwrap();
+        let flow =
+            Flow::to_address(origin.host().parse().unwrap()).on_port(origin.port(), Transport::Tcp);
+        assert_eq!(
+            evaluate(&builtin_rules(None), &flow).action,
+            dnet_core::rule::RuleAction::Tunnel
+        );
+    }
+
+    #[test]
+    fn the_real_core_accepts_what_the_plan_produces_for_a_session() {
+        let exe = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../vendor/primary-core/primary-core.exe");
+        if !(cfg!(windows) && exe.is_file()) {
+            eprintln!(
+                "SKIPPED: vendor/primary-core not fetched (cargo run -p xtask -- fetch-vendor)"
+            );
+            return;
+        }
+        for kind in [ProfileKind::Hysteria2, ProfileKind::VlessReality] {
+            let plan = session_plan(kind, &with_session());
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("core.json");
+            std::fs::write(&file, plan.config_json()).unwrap();
+            let out = std::process::Command::new(&exe)
+                .args(["check", "-c"])
+                .arg(&file)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{kind:?}: {}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+
+    // ------------------------------------------------------------------ probes through the session (T169)
+
+    fn session_job_for(
+        kind: ProfileKind,
+        credentials: &EndpointCredentials,
+    ) -> Result<ProbeJob, PlanError> {
+        probe_job(
+            &profile(kind),
+            &endpoint("203.0.113.10"),
+            credentials,
+            &ClientDefinitions::default(),
+            51999,
+        )
+    }
+
+    #[test]
+    fn an_endpoint_with_a_session_is_probed_through_it_over_the_one_carrier_under_test() {
+        for (kind, tag, port) in [
+            (ProfileKind::Hysteria2, "hy2", 44443),
+            (ProfileKind::VlessReality, "reality", 8443),
+        ] {
+            let job = session_job_for(kind, &with_session()).unwrap();
+            let config: Value = serde_json::from_str(job.config_json()).unwrap();
+            assert_eq!(config["endpoints"][0]["detour"], tag, "{kind:?}");
+            assert_eq!(config["outbounds"].as_array().unwrap().len(), 1, "{kind:?}");
+            assert_eq!(config["outbounds"][0]["tag"], tag);
+            assert_eq!(config["outbounds"][0]["server_port"], port);
+            assert_eq!(config["inbounds"][0]["listen_port"], 51999);
+            assert_eq!(config["route"]["final"], "proxy");
+        }
+    }
+
+    #[test]
+    fn an_endpoint_without_a_session_is_probed_as_it_always_was() {
+        for kind in [ProfileKind::Hysteria2, ProfileKind::VlessReality] {
+            let job = session_job_for(kind, &credentials()).unwrap();
+            assert!(!job.config_json().contains("\"endpoints\""), "{kind:?}");
+            let config: Value = serde_json::from_str(job.config_json()).unwrap();
+            assert_eq!(config["outbounds"][0]["tag"], "proxy", "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn amneziawg_is_still_not_probed_through_a_proxy_even_when_the_endpoint_has_a_session() {
+        assert!(session_job_for(ProfileKind::AmneziaWg, &with_session()).is_err());
+    }
+
+    #[test]
+    fn a_session_probe_for_a_carrier_the_endpoint_does_not_have_is_refused_by_name() {
+        let mut only_reality = with_session();
+        only_reality.hysteria2 = None;
+        let error = session_job_for(ProfileKind::Hysteria2, &only_reality).unwrap_err();
+        assert!(error.detail().contains("Hysteria 2"), "{error}");
+        assert!(session_job_for(ProfileKind::VlessReality, &only_reality).is_ok());
+    }
+
+    #[test]
+    fn a_session_probe_never_shows_a_credential_in_its_error_or_debug() {
+        let job = session_job_for(ProfileKind::Hysteria2, &with_session()).unwrap();
+        let shown = format!("{job:?}");
+        assert!(
+            !shown.contains(SENTINEL) && !shown.contains("endpoints"),
+            "{shown}"
+        );
+        // The configuration itself holds them: it is for the restricted file (this keeps the checks above honest).
+        assert!(job.config_json().contains(SENTINEL));
+    }
+
+    #[test]
+    fn a_race_is_measured_at_the_sessions_origin_when_the_endpoint_has_one() {
+        let session_origin = race_origin(&with_session()).unwrap();
+        assert_eq!(session_origin.host(), "10.9.0.254");
+        assert_eq!(session_origin.port(), 8080);
+        // An endpoint without a session is measured where it always was.
+        assert_eq!(race_origin(&credentials()), credentials().measure_origin);
+        // And the answer is the same as for either carrier profile.
+        assert_eq!(
+            Some(session_origin.clone()),
+            origin_for(ProfileKind::VlessReality, &with_session())
+        );
+    }
+
+    fn brutal_hysteria2() -> ConnectionProfile {
+        let mut hy2 = profile(ProfileKind::Hysteria2);
+        hy2.enable_brutal(
+            dnet_core::profile::BandwidthPair {
+                up_mbps: 50,
+                down_mbps: 200,
+            },
+            dnet_core::profile::BrutalAcknowledgement {
+                warning_revision: dnet_core::profile::BRUTAL_WARNING_REVISION,
+                acknowledged_at_unix: 1_757_635_200,
+            },
+        )
+        .unwrap();
+        hy2
+    }
+
+    #[test]
+    fn the_brutal_opt_in_reaches_a_session_probe_and_a_session_tunnel_only_for_hysteria_2() {
+        let creds = with_session();
+        let hy2 = brutal_hysteria2();
+        // The probe measures the profile as the tunnel will run it.
+        let probe = probe_job(
+            &hy2,
+            &endpoint("203.0.113.10"),
+            &creds,
+            &ClientDefinitions::default(),
+            51999,
+        )
+        .unwrap();
+        assert!(
+            probe.config_json().contains("up_mbps"),
+            "the probe lost Brutal"
+        );
+        assert!(probe.config_json().contains("down_mbps"));
+        let tunnel = plan_tunnel_with(
+            PlanInputs {
+                profile: &hy2,
+                endpoint: &endpoint("203.0.113.10"),
+                credentials: &creds,
+                client: &ClientDefinitions::default(),
+                rules: &builtin_rules(None),
+                fakeip: FakeIpHalf::Low,
+            },
+            Some(control()),
+        )
+        .unwrap();
+        assert!(
+            tunnel.config_json().contains("up_mbps"),
+            "the tunnel lost Brutal"
+        );
+        // Off: neither carries any bandwidth, which is the default congestion control.
+        let plain = probe_job(
+            &profile(ProfileKind::Hysteria2),
+            &endpoint("203.0.113.10"),
+            &creds,
+            &ClientDefinitions::default(),
+            51999,
+        )
+        .unwrap();
+        assert!(!plain.config_json().contains("up_mbps"));
+        // A REALITY connection never gets the Hysteria 2 carrier's Brutal, even with the carrier present.
+        let reality = session_plan(ProfileKind::VlessReality, &creds);
+        assert!(!reality.config_json().contains("up_mbps"));
     }
 }

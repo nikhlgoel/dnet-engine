@@ -95,6 +95,19 @@ pub trait Effects: Send + Sync + 'static {
     /// Take the tunnel down and undo what bringing it up did. Idempotent.
     fn stop_tunnel(&self) -> impl Future<Output = ()> + Send;
 
+    /// Move the connection that is up to `profile` on `endpoint` **without ending it**, when that can be done:
+    /// a session connection on the same endpoint whose carriers include the profile (ADR-0008). `true` means it
+    /// is now on that profile and nothing was torn down. `false` means it could not be done and nothing was
+    /// changed, and the caller then does what it always did: stops the tunnel and starts the new one. The
+    /// default cannot move anything, so a host without a session behaves exactly as before.
+    fn move_tunnel(
+        &self,
+        _profile: &ProfileId,
+        _endpoint: EndpointId,
+    ) -> impl Future<Output = bool> + Send {
+        async { false }
+    }
+
     /// One check that the carrying profile still moves traffic.
     fn live_check(&self, profile: &ProfileId) -> impl Future<Output = LiveCheck> + Send;
 
@@ -167,8 +180,34 @@ enum WorkKind {
         endpoint: EndpointId,
     },
     StopTunnel,
+    /// A stop that the engine followed at once with a start: tried as a live move first, and carried out as the
+    /// stop and the start it stands for if it cannot be done.
+    MoveTunnel {
+        profile: ProfileId,
+        endpoint: EndpointId,
+    },
     /// Everything queued before this has been carried out.
     Barrier(oneshot::Sender<()>),
+}
+
+/// A `StopTunnel` that is followed at once by a `StartTunnel` is one move. Nothing else is touched: a stop
+/// by itself (a disconnect, a failure) and a start by itself (the first connection) stay what they were, and
+/// two items with anything between them are not a pair.
+fn fold_moves(work: Vec<WorkKind>) -> Vec<WorkKind> {
+    let mut out = Vec::with_capacity(work.len());
+    let mut items = work.into_iter().peekable();
+    while let Some(item) = items.next() {
+        match (item, items.peek()) {
+            (WorkKind::StopTunnel, Some(WorkKind::StartTunnel { .. })) => {
+                let Some(WorkKind::StartTunnel { profile, endpoint }) = items.next() else {
+                    unreachable!("peeked a start")
+                };
+                out.push(WorkKind::MoveTunnel { profile, endpoint });
+            }
+            (other, _) => out.push(other),
+        }
+    }
+    out
 }
 
 // ------------------------------------------------------------------ the handle
@@ -442,6 +481,7 @@ impl<E: Effects> Actor<E> {
             }
         }
 
+        let mut work = fold_moves(work);
         if !work.is_empty() {
             // Everything this step starts shares one attempt number; whatever the previous step
             // started is now stale.
@@ -639,6 +679,22 @@ async fn execute<E: Effects>(
                 };
                 let _ = reports.send(Msg::Report { attempt, input }).await;
             }
+            WorkKind::MoveTunnel { profile, endpoint } => {
+                if let Some(token) = race.take() {
+                    token.cancel();
+                }
+                let input = if effects.move_tunnel(&profile, endpoint).await {
+                    Input::TunnelUp
+                } else {
+                    // Could not be done live: exactly the stop and the start the engine asked for.
+                    effects.stop_tunnel().await;
+                    match effects.start_tunnel(&profile, endpoint).await {
+                        Ok(()) => Input::TunnelUp,
+                        Err(cause) => Input::StartFailed(cause),
+                    }
+                };
+                let _ = reports.send(Msg::Report { attempt, input }).await;
+            }
             WorkKind::StopTunnel => effects.stop_tunnel().await,
             WorkKind::Barrier(done) => {
                 let _ = done.send(());
@@ -807,6 +863,8 @@ mod tests {
         failing_endpoint: Mutex<Option<EndpointId>>,
         /// The watch handed to the orchestrator when a tunnel comes up, if the test wants one.
         watch: Mutex<Option<TestWatch>>,
+        /// Whether a live move of the connection succeeds.
+        movable: AtomicBool,
     }
 
     /// A watch: the machine says which adapter carries the tunnel. By default it only follows; one
@@ -900,6 +958,7 @@ mod tests {
                 portal_found_by_reach: AtomicBool::new(false),
                 failing_endpoint: Mutex::new(None),
                 watch: Mutex::new(None),
+                movable: AtomicBool::new(false),
             })
         }
         fn record(&self, call: impl Into<String>) {
@@ -958,6 +1017,10 @@ mod tests {
             let delay = *self.stop_delay.lock().unwrap();
             tokio::time::sleep(delay).await;
             self.record("stop");
+        }
+        async fn move_tunnel(&self, profile: &ProfileId, _endpoint: EndpointId) -> bool {
+            self.record(format!("move[{profile}]"));
+            self.movable.load(Ordering::SeqCst)
         }
         async fn live_check(&self, _profile: &ProfileId) -> LiveCheck {
             self.record("check");
@@ -1883,5 +1946,181 @@ mod tests {
         rig.handle.disconnect().unwrap();
         until(&rig.handle, |s| s.status == ConnectionStatus::Disconnected).await;
         assert!(rig.handle.stats().is_none());
+    }
+
+    // ------------------------------------------------------------------ live moves (ADR-0008, T169 step e)
+
+    fn shape(work: &[WorkKind]) -> Vec<&'static str> {
+        work.iter()
+            .map(|w| match w {
+                WorkKind::Reach(_) => "reach",
+                WorkKind::StartRace { .. } => "race",
+                WorkKind::CancelRace => "cancel",
+                WorkKind::StartTunnel { .. } => "start",
+                WorkKind::StopTunnel => "stop",
+                WorkKind::MoveTunnel { .. } => "move",
+                WorkKind::Barrier(_) => "barrier",
+            })
+            .collect()
+    }
+
+    fn start(name: &str) -> WorkKind {
+        WorkKind::StartTunnel {
+            profile: ProfileId::new(name),
+            endpoint: EndpointId::new(),
+        }
+    }
+
+    #[test]
+    fn a_stop_followed_at_once_by_a_start_is_one_move_and_nothing_else_is_touched() {
+        assert_eq!(
+            shape(&fold_moves(vec![WorkKind::StopTunnel, start("a")])),
+            ["move"]
+        );
+        // Alone, or not next to each other, they are what they were.
+        for (label, work, expected) in [
+            ("a start alone", vec![start("a")], vec!["start"]),
+            ("a stop alone", vec![WorkKind::StopTunnel], vec!["stop"]),
+            (
+                "a start then a stop",
+                vec![start("a"), WorkKind::StopTunnel],
+                vec!["start", "stop"],
+            ),
+            (
+                "something between them",
+                vec![WorkKind::StopTunnel, WorkKind::CancelRace, start("a")],
+                vec!["stop", "cancel", "start"],
+            ),
+            (
+                "two stops then a start",
+                vec![WorkKind::StopTunnel, WorkKind::StopTunnel, start("a")],
+                vec!["stop", "move"],
+            ),
+            (
+                "two pairs",
+                vec![
+                    WorkKind::StopTunnel,
+                    start("a"),
+                    WorkKind::StopTunnel,
+                    start("b"),
+                ],
+                vec!["move", "move"],
+            ),
+            ("nothing", vec![], vec![]),
+        ] {
+            assert_eq!(shape(&fold_moves(work)), expected, "{label}");
+        }
+    }
+
+    #[test]
+    fn the_move_keeps_the_profile_and_the_endpoint_of_the_start_it_replaces() {
+        let endpoint = EndpointId::new();
+        let folded = fold_moves(vec![
+            WorkKind::StopTunnel,
+            WorkKind::StartTunnel {
+                profile: ProfileId::new("reality-default"),
+                endpoint,
+            },
+        ]);
+        match folded.as_slice() {
+            [WorkKind::MoveTunnel {
+                profile,
+                endpoint: e,
+            }] => {
+                assert_eq!(profile.as_str(), "reality-default");
+                assert_eq!(*e, endpoint);
+            }
+            _ => panic!("expected one move: {:?}", shape(&folded)),
+        }
+    }
+
+    /// The scenario of the test above this module's endpoint test: two endpoints, the one in use stops answering.
+    async fn move_scenario(movable: bool) -> Rig {
+        let first = endpoint("first");
+        let script = Script::new();
+        script.movable.store(movable, Ordering::SeqCst);
+        *script.stop_delay.lock().unwrap() = Duration::from_millis(700);
+        *script.failing_endpoint.lock().unwrap() = Some(first.id());
+        script
+            .races
+            .lock()
+            .unwrap()
+            .push_back(Some(selected("hy2-default")));
+        let rig = rig_with(script, vec![first, endpoint("second")]);
+        rig.handle.connect(None).unwrap();
+        until(&rig.handle, |s| s.status == ConnectionStatus::Connected).await;
+        for _ in 0..600 {
+            let calls = rig.script.calls();
+            if calls.iter().any(|c| c.starts_with("move")) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        // Let whatever the move led to finish.
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        rig
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn when_the_effects_can_move_the_connection_nothing_is_taken_down_and_the_connection_stays_up(
+    ) {
+        let rig = move_scenario(true).await;
+        let calls = rig.script.calls();
+        assert!(calls.iter().any(|c| c.starts_with("move[")), "{calls:?}");
+        // The one start is the first connection's; the move replaced the stop and the start.
+        assert_eq!(
+            calls.iter().filter(|c| c.starts_with("start")).count(),
+            1,
+            "a start was made as well as the move: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|c| c == "stop"),
+            "the tunnel was stopped although the move succeeded: {calls:?}"
+        );
+        until(&rig.handle, |s| s.status == ConnectionStatus::Connected).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn when_the_effects_cannot_move_it_the_old_tunnel_is_fully_stopped_before_the_new_one_starts(
+    ) {
+        let rig = move_scenario(false).await;
+        let calls = rig.script.calls();
+        let moved = calls
+            .iter()
+            .position(|c| c.starts_with("move["))
+            .expect("a move was attempted");
+        let stop = calls
+            .iter()
+            .position(|c| c == "stop")
+            .expect("the old tunnel was stopped");
+        let second_start = calls
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.starts_with("start"))
+            .nth(1)
+            .map(|(i, _)| i)
+            .expect("the new tunnel was started");
+        // Attempted first, and the order that keeps traffic from leaking is kept: stop, then start.
+        assert!(moved < stop && stop < second_start, "{calls:?}");
+        until(&rig.handle, |s| s.status == ConnectionStatus::Connected).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_first_connection_and_a_disconnect_never_ask_for_a_move() {
+        let script = Script::new();
+        script.movable.store(true, Ordering::SeqCst);
+        script
+            .races
+            .lock()
+            .unwrap()
+            .push_back(Some(selected("hy2-default")));
+        let rig = rig_with(script, vec![endpoint("only")]);
+        rig.handle.connect(None).unwrap();
+        until(&rig.handle, |s| s.status == ConnectionStatus::Connected).await;
+        rig.handle.disconnect().unwrap();
+        until(&rig.handle, |s| s.status == ConnectionStatus::Disconnected).await;
+        let calls = rig.script.calls();
+        assert!(!calls.iter().any(|c| c.starts_with("move")), "{calls:?}");
+        assert!(calls.iter().any(|c| c == "stop"), "{calls:?}");
     }
 }

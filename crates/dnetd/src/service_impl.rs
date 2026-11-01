@@ -1357,7 +1357,8 @@ mod tests {
             .find_map(|l| l.strip_prefix("public_key="))
             .unwrap();
         let report = serde_json::json!({
-            "version": 1,
+            "version": 2,
+            "session": crate::server_setup::session_printed_by(&prepared.script),
             "amneziawg": { "server_public_key_hex": "d".repeat(64), "listen_port": 51820,
                 "client_address": "10.66.0.2", "prefix_len": 24, "client_public_key_hex": client },
             "hysteria2": { "server_port": 44443, "server_name": crate::server_setup::DEFAULT_SITE,

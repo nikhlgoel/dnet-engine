@@ -18,9 +18,9 @@ use dnet_config::credentials::EndpointCredentials;
 use dnet_config::reality::TargetDomain;
 use dnet_ipc::server_setup::{PortToOpen, Prepared, ServerKind};
 use dnet_provision::bootstrap::{
-    self, BootstrapPlan, BootstrapReport, Ports, ReportError, ServerArch,
+    self, BootstrapPlan, BootstrapReport, Ports, ReportError, ServerArch, SessionPlan,
 };
-use dnet_provision::client_keys::{self, ClientKeys};
+use dnet_provision::client_keys::{self, ClientKeys, SessionKeys};
 use dnet_provision::provider::Protocol;
 use dnet_provision::server_pins::ServerPins;
 
@@ -52,6 +52,9 @@ pub enum SetupError {
 
 struct Pending {
     keys: ClientKeys,
+    /// The device's session key pair (ADR-0008). Only the public half is in the script; the private half
+    /// goes into the credentials with the others once the server has reported.
+    session_keys: SessionKeys,
     plan: BootstrapPlan,
     script: String,
     kind: ServerKind,
@@ -126,6 +129,7 @@ impl ServerSetup {
             .cores_for(arch_of(kind))
             .map_err(|_| SetupError::NoBuild)?;
         let keys = ClientKeys::generate().map_err(|_| SetupError::Script)?;
+        let session_keys = SessionKeys::generate().map_err(|_| SetupError::Script)?;
         let obfuscation = client_keys::random_obfuscation().map_err(|_| SetupError::Script)?;
         let ports = Ports::default();
         let plan = BootstrapPlan {
@@ -135,10 +139,14 @@ impl ServerSetup {
             obfuscation,
             hysteria2_server_name: DEFAULT_SITE.to_owned(),
             reality_target: TargetDomain::parse(DEFAULT_SITE).map_err(|_| SetupError::Script)?,
+            session: SessionPlan {
+                device_public_keys: vec![session_keys.public_b64().to_owned()],
+            },
         };
         let script = bootstrap::script(&plan).map_err(|_| SetupError::Script)?;
         let pending = Pending {
             keys,
+            session_keys,
             plan,
             script,
             kind,
@@ -197,6 +205,7 @@ impl ServerSetup {
         // The origin the script put on the server: without it no connection could be tested or checked.
         Ok(report.credentials(
             &pending.keys,
+            &pending.session_keys,
             pending.plan.obfuscation,
             Some(bootstrap::measurement_origin()),
         ))
@@ -212,6 +221,25 @@ impl ServerSetup {
     pub fn waiting(&self) -> bool {
         self.slot().is_some()
     }
+}
+
+/// The session part of the report a server would print for `script`: its public key, and the devices the
+/// script was given, read off the script the way the server would. For the tests that fake a server.
+#[cfg(test)]
+pub(crate) fn session_printed_by(script: &str) -> serde_json::Value {
+    let devices = script
+        .split("\"devices\": [")
+        .nth(1)
+        .and_then(|rest| rest.split("]},").next())
+        .map(|list| serde_json::from_str::<serde_json::Value>(&format!("[{list}]")))
+        .expect("the script lists its devices")
+        .expect("the devices are JSON");
+    serde_json::json!({
+        "server_public_key": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=",
+        "port": 25182,
+        "server_address": "10.9.0.1",
+        "devices": devices,
+    })
 }
 
 #[cfg(test)]
@@ -260,7 +288,8 @@ mod tests {
             ServerKind::Arm64 => ('b', 'd'),
         };
         let mut report = json!({
-            "version": 1,
+            "version": 2,
+            "session": super::session_printed_by(&prepared.script),
             "amneziawg": {
                 "server_public_key_hex": "d".repeat(64), "listen_port": 51820,
                 "client_address": "10.66.0.2", "prefix_len": 24, "client_public_key_hex": client,

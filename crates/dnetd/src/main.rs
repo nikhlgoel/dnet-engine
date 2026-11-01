@@ -64,11 +64,16 @@ mod feed_trust;
 mod feed_trial;
 // Asks the network whether a captive portal is in the way (T077); used by the real effects.
 #[cfg_attr(not(windows), allow(dead_code))]
+mod listener;
+#[cfg_attr(not(windows), allow(dead_code))]
 mod portal_probe;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod recovery;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod service_impl;
+#[cfg(test)]
+mod session_e2e;
+mod session_switch;
 // Brings one tunnel up and down; used by the real effects (T126).
 #[cfg_attr(not(windows), allow(dead_code))]
 mod tunnel;
