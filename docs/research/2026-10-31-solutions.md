@@ -325,3 +325,32 @@ Before step 2 the code that matters most is small: the nudge, the client configu
 changes land in `dnet-config` (the generator), `dnetd` (the switch and nudge, power events, the job object), `dnet-provision` (the
 server script) and `dnet-ipc` (pending changes, read-only split). All of it touches the privileged-operation, IPC and
 core-configuration list in `CLAUDE.md`, so every commit needs the mandatory security review.
+
+---
+
+## 10. Found while building it (2026-11-01)
+
+Running the composed system (the script's server configuration and the session generator's client configuration, in
+two copies of the pinned core, on loopback; `crates/dnetd/src/session_e2e.rs`) found things reading and the spike did not.
+Each is now a test.
+
+| # | Finding | Effect | What was done |
+|---|---|---|---|
+| 1 | **The measurement origin at the server's own session address is unreachable.** The server's user-space network stack owns that address, answers a connection to it itself ("connection refused" from inside the session) and the exit's rules never see it | The session could never be measured | The session origin is its own address, `10.9.0.254`, distinct from the server (`10.9.0.1`) and every device (`10.9.0.2` to `.9`); a test pins the invariant |
+| 2 | **The client's built-in rules sent the measurement origin around the tunnel**, for the existing origin too: `10.66.0.1` is inside `10.0.0.0/8`, which stays direct. Found by evaluating the rules, not by running the product | A fetch from the origin would go to the physical network. Every live check and probe through a Hysteria 2 or REALITY tunnel was affected (never run live, so never seen) | Two single-address `Tunnel` rules ahead of the private ranges (`dnet-core::builtin_rules`); a test shows the origins tunnel and their neighbours still bypass |
+| 3 | **A first version of my refusal checks proved nothing.** The client's own bypasses (the active endpoint's whole host, private ranges, link-local) sent the probes around the session, and "not reachable" cannot tell a refusal from a request left hanging | A mutation that broke the exit's rule still passed | The client's private bypasses are removed in the test, probes have three outcomes (answered, refused at once, hung), a real service on this machine's private address is the target, and the test checks that service is listening. Mutations of the exit rule and of the carrier lock are each caught |
+| 4 | **Loopback is stopped twice.** The server's user-space stack drops a packet addressed to loopback before any rule sees it ("Martian packet dropped"), and the exit's rule refuses it | Defence in depth; the stack's drop shows as silence, not a refusal | The test requires only "never answered" for loopback and "refused at once" for what only the rule can stop (private, link-local, the machine's own LAN address) |
+| 5 | **A carrier credential on its own reaches nothing**, shown with a third client that uses the Hysteria 2 carrier directly. With the carrier lock removed it reached the server's loopback origin | Confirms E1 and E2 are closed by the design | In the composed test; the mutation is caught |
+| 6 | **The unprivileged account must not own its directory.** Security review: if `dnet` owned `/var/lib/dnet/primary`, a flaw in the core could plant a symlink that the script (root, `cat >`) follows on its next run | Root on the server after a core compromise and a re-run | Root keeps the directory and files (group `dnet`, read only, `750` and `640`); the core needs to create nothing; tests pin it |
+
+**Things decided not to do, with the reason.** (a) *An `iptables` rule by user id* as a second layer under the core's own rules: it cannot be
+tested here, and Oracle Linux resolvers sit on a link-local address, so a blanket rule would break name resolution; the proven layers
+are the core's rules and the stack's drop. (b) *A default-deny inbound firewall with a self-reverting timer* (E5): the cost of a
+mistake is a locked-out owner on a machine they cannot reach, it cannot be tried on a real image from here, and Oracle's own images
+already ship a default-deny; the script now says only what it does. It stays open as part of the real-server run. (c) `MemoryDenyWriteExecute`
+and `SystemCallFilter` in the core's unit: not verifiable without the real server (`systemd-analyze security`), and a wrong one makes the core
+fail to start.
+
+**Not shown by any of this.** Real delay and loss; the Windows tunnel adapter and the guard; the script running as root on a real Linux image
+(only its text, its syntax and the configuration it writes are checked); the throughput of the user-space exit on the free server's CPU; and the
+REALITY handshake against a real site (here it is forwarded to a local TLS server).

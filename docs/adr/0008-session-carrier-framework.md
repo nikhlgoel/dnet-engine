@@ -291,9 +291,35 @@ need the mandatory security review and a run on a real server. Then P1 as writte
 
 | ID | Decision | Recommendation |
 |---|---|---|
-| **F8** | Make server profile v2 (audit G2) the first code change, under the security review | Yes |
+| **F8** | Make server profile v2 (audit G2) the first code change, under the security review | Yes. **Approved 2026-10-31** (the owner told the session to proceed with the plan that named it). Not started: the build tag (T155) and the configuration generator (T156) came first |
 | **F9** | Limit read-only detail to the console user and administrators, and ask for confirmation when a change redirects traffic (G5) | Yes |
 | **F10** | Allow a Network Truth report (G3, measured facts about the network, no claims) and an opt-in hostile-network posture (G4, changes system settings, needs its own ADR) | Network Truth yes; posture only after its ADR |
 | **F11** | Verification investment (G7): a Windows runner in CI for the elevated tests, a network-weather replay library, fuzz targets | Weather library and fuzz targets yes; the runner is your call on cost |
-| **F12** | Add `with_wireguard` to the client core's build tags and `with_wireguard,with_gvisor` to the server core's (amends ADR-0004; changes the pin file, the notices and the installer size) | Yes: S1 and S2 passed with it, and the design does not work without it |
+| **F12** | Add `with_wireguard` to the client core's build tags and `with_wireguard,with_gvisor` to the server core's (amends ADR-0004; changes the pin file, the notices and the installer size) | Yes: S1 and S2 passed with it, and the design does not work without it. **Approved and done 2026-10-31 (T155)**: the rebuilt core is 0.76 MB larger |
 | **F13** | Require approval by an elevated (UAC) client for changes that redirect traffic (audit E3; solutions §3.2) | Yes |
+
+## 12. Build status (2026-11-01)
+
+What exists, with the evidence; nothing in it is committed yet. Task numbers are in `specs/001-network-resilience-client/tasks.md`.
+
+| Part | State |
+|---|---|
+| Core build tags (F12) | Done (T155). The client core is 43,893,248 bytes (+0.76 MB). The server core was not rebuilt (a Linux cross-build) |
+| Session configuration and a probe through the session | Done (T156, T169): generated, and accepted by the **real pinned core** |
+| Carrier switch and nudge | Done (T157, T169): `session_switch.rs`, used by the real effects; the listener check (T169 d) is in place |
+| Live move in the connection layer | Done (T169 e): the orchestrator folds a stop-then-start into a move, tries it live, and falls back to the old stop-then-start |
+| Server profile v2 (F8) | Done as far as it can be shown without a real server (T158): the script, the plan, the version-2 report; the real core checks the configuration the script writes |
+| Per-device credentials | Done (T159): stored as format version 2 only when a session is present |
+| The whole composed on loopback | `crates/dnetd/src/session_e2e.rs`: the script's server configuration and the generator's client configuration in two real cores; the origin is reached, the exit refuses the machine it runs on, a carrier credential alone reaches nothing, and a 14 MB transfer crosses a switch to the TCP carrier and back in one connection (longest silence 0.2 s) |
+| Not done | Guard v2 (T161), the Registry and the live map (P1), power and session awareness (T162), the job object for the cores (T163), the hostile-network re-run of the spike (T164), UAC approval (T160), Memory (P5) |
+
+**What building it changed in this ADR's design.** (1) The session's measurement origin cannot be the server's own session address (the
+server's network stack answers it); it is `10.9.0.254`. (2) The client's built-in rules sent every private address, including a
+measurement origin, around the tunnel; the two origins now have single-address tunnel rules ahead of the private ranges (this also
+corrects the existing AmneziaWG origin). (3) A server that serves the session cannot be used by the old per-profile Hysteria 2 and REALITY
+configurations, so the client's use of the session had to land with the server profile (T169). (4) The unprivileged account on the server
+must not own its directory (root keeps it, group read only). Details: `docs/research/2026-10-31-solutions.md` section 10.
+
+**What is still unproven.** Real delay and loss, the Windows tunnel adapter with a live move, the guard, the script as root on a real
+Linux image, the free server's CPU with the user-space exit, and the REALITY handshake against a real site. S4 (guard), S7 to S9 and the
+real-server run in `LOCAL-COMMANDS.md` section 8 settle them.

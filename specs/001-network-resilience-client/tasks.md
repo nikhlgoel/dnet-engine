@@ -1623,6 +1623,121 @@ own, made by DNet Engine's wizard on Oracle Cloud Always Free (or any Linux serv
 
 ---
 
+### Session–carrier framework (added 2026-10-31; ADR-0008, proposed; the owner approved F8 and F12 the same day by telling the session to proceed; evidence: `docs/research/2026-10-31-solutions.md`, `testing/spike-carrier/`)
+
+> One session (an endpoint of the primary core) over replaceable carriers (Hysteria 2, REALITY), so a carrier can
+> be replaced without ending the person's connections. Proven on the pinned core with the extra build tag, on
+> loopback only. Every step below that touches the IPC boundary, privileged operations, key material, routing or
+> core-configuration generation needs the security review before it is committed.
+
+- [x] T155 [US1] The primary core is built with the session endpoint's tag (ADR-0008 F12; amends ADR-0004) — `crates/xtask/src/fetch_vendor.rs`, `server_cores.rs`
+  > Done 2026-10-31, test first. The previous pin refused the endpoint ("not included in this build"). Client core tags gain
+  > `with_wireguard`; the server core gets `with_wireguard,with_gvisor` (the endpoint's user-space stack). The test that asserted
+  > the exclusion was replaced by one that asserts the endpoint is present. Rebuilt with `fetch-vendor`: 43,097,600 to 43,893,248
+  > bytes (+0.76 MB, +1.8%). The installer size is **not** re-measured here (T115). The server core was not rebuilt (needs Go
+  > cross-builds; `build-server-cores`).
+- [x] T156 [US1] Generate the session configuration (`crates/dnet-config/src/session.rs`; `primary.rs` gains optional, skipped-when-empty parts)
+  > Done 2026-10-31, test first. Nine unit tests, each mutation-checked (five mutations of the generator were each caught by the
+  > test meant to catch them), plus `session_configs_are_accepted_by_the_pinned_core`, which has the **real** vendored core check
+  > the output (12 variants: two encrypted-DNS policies, both FakeIP halves, three carrier sets). The three existing profiles' output is unchanged (a test checks it). The control API requirements
+  > are measured facts about the pinned build, not assumptions: no Host check, TCP only, an empty secret disables authentication,
+  > an empty cross-origin list means allow-all. The core's endpoint type name is assembled in one constant so the source tree
+  > stays free of the trademark (`lint-branding`), as the lint's own source does. Not used by `dnetd` yet (T157).
+- [ ] T157 [US1] Switch the carrier and nudge the session (`dnetd`): a control API client, a per-run secret, the switch, then small probes through the session every 250 ms until one succeeds (at most 5 s); the Registry must classify the two benign `closed pipe` log lines per switch
+  > Depends on T156. Measured: without the nudge the largest stall was 12.6 s, with it 0.02 s (planned switch) and about 1 s after
+  > a dead carrier. Needs the security review (control endpoint, key material).
+  > **Built 2026-11-01, not wired** (`crates/dnetd/src/session_switch.rs`, test first, 20 tests): the per-run secret (64 hex characters,
+  > wiped, never printed), the control client (hand-written request, bounded reply, tags checked), and the nudge (every 250 ms for at
+  > most 5 s; a switch that failed is not followed by one). One test starts the **real vendored core** with a selector and its control
+  > API, switches with the real client, and reads back the leaf; it also checks the core refuses an unknown leaf and a wrong secret.
+  > Five mutations of the client were each caught. **Used for real by `session_e2e.rs`** (2026-11-01): the client switched real cores to the TCP
+  > carrier and back under a live transfer, the nudge recovered the session in 4 to 54 ms, and the transfer finished in one connection. Security review done: **one finding, to fix before wiring**: the port is chosen
+  > before the core binds it, so another local program could take it and receive the secret; confirm the listener's process id is the
+  > core's before the first request (`GetExtendedTcpTable`). Still open: that check, the Registry classifying the two benign "closed
+  > pipe" lines per switch, and the wiring itself, which waits for T158 and T159.
+- [x] T158 [US2] Server profile v2 (ADR-0008 F8; audit E1, E2, E5, E12): one core process; both carriers locked to the session port; the exit refuses private destinations except the measurement origin; a session key per device; an unprivileged, sandboxed unit; automatic security updates (`crates/dnet-provision/src/bootstrap.rs`)
+  > Done 2026-11-01 as far as it can be shown without a real server, test first. The script now makes the server's session key, writes a
+  > configuration **derived** from the keys and the devices (rewritten each run, replaced only after the core's own `check`, service
+  > restarted only if it changed), runs the core as an unprivileged `dnet` account with a sandbox (root owns its files, group read only),
+  > adds a second origin inside the session, and installs automatic security updates. The plan takes 1 to 8 device public keys; the report is
+  > **version 2** with a `session` section checked against the plan (devices, addresses, order). The firewall comment now says only what the
+  > step does. Tests: 153 in `dnet-provision`, including **the real core checking the configuration the script writes** (with a control that
+  > fails for the right reason), and `crates/dnetd/src/session_e2e.rs`, which runs the script's server configuration and the session generator's
+  > client configuration in two real cores: the origin is reached through the session, the exit refuses the machine it runs on (loopback, a
+  > metadata address, private addresses, a service on this machine's own LAN address), a carrier credential on its own reaches nothing, and
+  > a 14 MB transfer crosses a switch to the REALITY carrier and back in one connection (longest silence 0.2 s). Mutations of the exit rule and
+  > of the carrier lock are each caught. Six findings from building it are in `docs/research/2026-10-31-solutions.md` section 10,
+  > among them an **existing defect fixed**: the client's built-in rules sent the measurement origin around the tunnel (the existing origin too).
+  > **Not done, with reasons (solutions section 10):** a default-deny inbound firewall with a self-reverting timer (E5) and the
+  > `iptables` user-id layer. **Needs the owner:** the real-server run (`LOCAL-COMMANDS.md` section 8): `systemd-analyze security`, the
+  > script as root on a real image, the free server's CPU with the user-space exit, and an Oracle address that stays put (E13).
+  > Security review done: one finding, fixed (the unprivileged account must not own its directory; solutions section 10, finding 6).
+- [x] T159 [US2] Session credentials per device: the credential bundle, its stored form, and the guided setup producing it (`dnet-config::credentials`, `dnet-provision`, `dnetd/src/server_setup.rs`)
+  > Done 2026-11-01, test first. `SessionBundle` (the device's private key, the server's session public key, the device's address, the port) is
+  > part of `EndpointCredentials`; it is stored as **format version 2 only when a session is present**, so every bundle without one is still
+  > written as version 1 and read as before; a form that says version 1 cannot hold a session; a session needs a carrier; keys must be 32 bytes
+  > of base64; the address must be one of the eight device addresses (not the server's, not the origin's, not another network); errors name the
+  > field and never a value; `Debug` never shows the key. Seven tests, four mutations each caught. `report.credentials()` builds it from the
+  > device's `SessionKeys` and the server's report; the guided setup passes its pending keys. The shared constants (`SESSION_SERVER`,
+  > `SESSION_ORIGIN`, `SESSION_PORT`, `MAX_DEVICES`, `session_device_address`) now live once in `dnet-config::session`. The old text of this task
+  > follows for the record.
+  > (superseded) Session credentials per device: sealing the device's key pair and the server's session public key, the credential bundle, and the guided setup using the session origin (`dnet-config::credentials`, `dnet-provision`, `dnetd`)
+  > Started 2026-11-01: `SessionKeys` (a device's own key pair, base64, wiped on drop, never the AmneziaWG key) exists and the guided setup
+  > generates one and puts only its public half in the script; the report's `session_server_public_key()` and `session_device_address()` are
+  > there. **Still open:** the bundle in `EndpointCredentials` and its sealing, `credentials()` producing it, `measure_origin` set to
+  > `session_measurement_origin()`, and the generator's inputs read from the store (today the session generator is used only by tests).
+- [x] T169 [US1] **Use the session in `dnetd`** (ADR-0008; must land with the server profile, because a v2 server's carriers forward only to the session and refuse the old per-profile configuration)
+  > Found 2026-11-01 while closing T159. Steps, in order, each test first: (a) `plan_tunnel` builds the session configuration when the profile is
+  > Hysteria 2 or REALITY and the credentials have a session (all carriers the endpoint has; the profile chosen is the starting carrier; the control
+  > port and secret come from the caller and the plan carries them); (b) the race's probe job does the same, over one carrier with a loopback proxy
+  > (a v2 server refuses a probe that uses the carrier directly); (c) the measurement origin for a session-carried profile is
+  > `session_measurement_origin()`, and for AmneziaWG stays the stored one; (d) the control API's listener is confirmed to be the core we started
+  > before the secret is sent (T157 review finding); (e) the Conductor switches carrier with `switch_to` + nudge instead of restarting the tunnel
+  > (ADR-0008 §3.3), and the Registry classifies the two benign "closed pipe" lines; (f) a v1 server (no session) keeps working with the old shape.
+  > Needs the security review (key material, the control endpoint, core configuration generation).
+  > **Steps (a), (b), (c) done 2026-11-01**, test first, every behaviour mutation-checked (three survivors were found and killed with new tests):
+  > `plan_tunnel` builds the session configuration for a Hysteria 2 or REALITY profile whose endpoint has a session (every carrier the endpoint
+  > has, the chosen profile as the starting one, Brutal only on the Hysteria 2 carrier and only while it is the chosen profile) and the plan carries
+  > a fresh control channel (loopback port, 256-bit secret) for the switch; `probe_job` probes the one carrier under test **through the session**
+  > (`dnet-config::session::generate_session_probe_config`, `ProbeJob::new_session`), since a v2 server refuses a probe that uses its carrier directly;
+  > the race and the tunnel measure at `origin_for`/`race_origin` (the session's origin `10.9.0.254` for a session profile; the stored origin for
+  > AmneziaWG and for an endpoint without a session, planned exactly as before). The real core accepts all of it (`dnet-config` and `dnetd` tests).
+  > Security review of (a) to (c): no new finding beyond T157's (the control port is chosen before the core binds it: step d). The secret exists in
+  > the plan, the core's restricted file and the control client, is wiped on drop and never printed (tested); a private LAN host that has exactly one of the
+  > two origin addresses loses access to it while connected (the price of tunnelling the origins; documented in `builtin_rules`).
+  > **Steps (d), (e), (f) done 2026-11-01**, test first, mutation-checked: (d) `listener.rs` asks the system's own table of listening ports who owns
+  > the control port and the secret is sent only if **every** socket a loopback connection could reach belongs to the core we started (a pure parser,
+  > tested with a buffer that lies about its length, and the real call against this process); (e) the orchestrator folds a `StopTunnel` followed at once by
+  > a `StartTunnel` into a *move*; the real effects try it live (same endpoint, a carrier of this session, the listener check, then `switch_to` and the
+  > nudge) and on any refusal or failure return `false`, upon which the orchestrator does **exactly the stop and the start it did before** (stop fully
+  > before start, tested); a first connection, a disconnect and AmneziaWG never ask for a move; (f) an endpoint without a session is planned and probed
+  > exactly as before (tests). Security review of (d) and (e): no open finding. Residual, accepted: the check and the request are a few milliseconds
+  > apart, so a core that died and a program that bound its port in that gap could receive the secret, which allows only a carrier switch (a denial of
+  > service, no traffic redirected). The already-running network watch keeps its carrier kind until the next connection (the setup is updated for the next).
+  > **Not done:** the Registry classifying the two benign "closed pipe" log lines each switch writes (the Registry is ADR-0008 P1); the live move has not
+  > been run on Windows with a real tunnel adapter (the composed test `session_e2e.rs` proves the mechanism with real cores on loopback).
+- [ ] T160
+- [ ] T160 [US1] Control-surface hardening (audit E3, E4; ADR-0008 F13): changes that redirect traffic are held as pending and approved only by an elevated client; read-only detail limited to the console user and administrators
+  > Needs the security review. The elevation prompt runs on the secure desktop (Microsoft, "How User Account Control works").
+- [ ] T161 [US1] Guard v2 (ADR-0006 P3; `docs/research/2026-10-31-solutions.md` section 4): persistent filters tied to the service, the five yes/no lab checks
+  > Waits for the owner's approval of P3 (F2) and the lab run (S4).
+- [ ] T162 [US1] Power and session awareness (solutions section 6): power events, user-presence setting, tick-gap detector
+- [~] T163 [US1] Run the cores with a job object, then bisect child-process and dynamic-code restrictions (solutions section 5)
+  > **Job object done 2026-11-01**, test first, mutation-checked (`dnet-supervisor/src/job.rs`): every spawned core is put in one job with
+  > kill-on-close, so the system ends both cores when the service's process ends however it ends (a crash, a kill); before this only a dropped handle
+  > ended a core. Best effort: a core that cannot be put in the job still runs, supervised as before, and the failure is logged. Five tests, including the
+  > control (a process outside the job is untouched) and that the real `spawn` puts a core in the service's job. **Open:** the two restrictions to bisect
+  > (forbid the core creating child processes; forbid dynamic code), which need three elevated runs against a real tunnel (solutions section 5).
+- [ ] T164 [US1] Re-run `testing/spike-carrier` against the real build and over the Docker hostile-network lab with delay, loss and UDP blocked (solutions section 9, step 2)
+
+> Proposed 2026-10-31 from the owner's question about adapting to every kind of network
+> (`docs/research/2026-10-31-language-and-adaptive-paths.md`). None started; each needs the owner's go-ahead on that document's section 4.
+
+- [ ] T165 [US1] Read and show the link's facts (Wi-Fi generation, band, rate, signal; metered or roaming flag) as component evidence — `dnet-netstate`, after the Registry
+- [ ] T166 [US1] IPv6-only networks: a path rule that accepts them (today `paths.rs` needs an IPv4 default route) and NAT64 discovery or an IPv6 server address; lab first
+- [ ] T167 [US1] Metered-aware and network-aware policy (no hot standby or full race on metered links, measured keepalive on shared-address mobile, TCP carrier first when UDP is blocked); each row behind a measurement
+- [ ] T168 [US1] Spike: do the Windows UDP offloads (segmentation since Windows 10 2004, receive coalescing since Windows 11 24H2) help the QUIC path; the pinned QUIC library has offload code for Linux and macOS only
+
 ## Dependencies
 
 ```
