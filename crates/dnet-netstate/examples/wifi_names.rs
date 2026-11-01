@@ -9,6 +9,19 @@
 //! ```
 
 fn main() {
+    // The link facts (T165) need no name: they are printed even when the system will not say the name.
+    let mut links: Vec<_> = dnet_netstate::wifi::connected_links().into_iter().collect();
+    links.sort_by_key(|(id, _)| id.luid());
+    for (id, facts) in links {
+        println!(
+            "{}  {}  receive {:?} Mbit/s, transmit {:?} Mbit/s, signal {:?}%",
+            id.luid(),
+            facts.generation.label(),
+            facts.receive_mbps,
+            facts.transmit_mbps,
+            facts.signal_percent
+        );
+    }
     let names = dnet_netstate::wifi::connected_networks();
     if names.is_empty() {
         println!("no connected Wi-Fi network was reported (no Wi-Fi adapter, or not connected)");
