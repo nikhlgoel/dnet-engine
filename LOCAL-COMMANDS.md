@@ -258,3 +258,69 @@ run 9.2 "ssh -i <key> <user>@<server> 'ss -ltnp | grep 8080; curl -s -o /dev/nul
 run 9.3 "`$a = Get-NetAdapter | Where-Object InterfaceDescription -match 'tun|dnet' | Select-Object -First 1; `$b0 = (Get-NetAdapterStatistics -Name `$a.Name).SentBytes + (Get-NetAdapterStatistics -Name `$a.Name).ReceivedBytes; Invoke-WebRequest http://10.66.0.1:8080/bytes/1000 -UseBasicParsing | Select-Object StatusCode; Start-Sleep 600; `$b1 = (Get-NetAdapterStatistics -Name `$a.Name).SentBytes + (Get-NetAdapterStatistics -Name `$a.Name).ReceivedBytes; 'bytes in 10 minutes, idle: ' + (`$b1 - `$b0); netsh advfirewall firewall show rule name=all | Select-String -Pattern 'dnet|tun' "
 ```
 
+## 10. The session framework (T155 to T169): what I need from your machine
+
+**Before any command below, in every new terminal** (the `run` helper is forgotten when a terminal closes; an administrator PowerShell opens in `C:\WINDOWS\system32`, so go to the repository first):
+```powershell
+cd D:\main\projects\personal\dnet-engine
+function run { powershell -NoProfile -ExecutionPolicy Bypass -File testing\log.ps1 @args }
+```
+
+If you just installed Go, open a new terminal first, so it is on the path (`go version` should print a version).
+
+Everything here only reads, or runs tests; nothing changes your network. 10.4 ends the development service.
+Where a command talks to the service it uses the development build: run 4.1 first, and 4.2 (admin) to start the new service.
+A service started earlier is the old build and does not know these commands.
+After each command, tell me the numbers (or just say "done"): I read `.local-logs\<number>.log` myself.
+
+10.1 Rebuild the cores with the new build tags (needs Go; a few minutes; the first run after pulling)
+```powershell
+run 10.1 "cargo run -p xtask -- fetch-vendor; cargo run -p xtask -- verify-vendor; Get-Item vendor\primary-core\primary-core.exe,vendor\amneziawg-go\amneziawg-go.exe | Format-List Name,Length | Out-String -Width 200"
+```
+
+10.2 The tests that need an elevated shell, now including the supervisor and the trace (admin)
+```powershell
+run 10.2 "cargo test -p dnet-supervisor -p dnet-netstate -p dnet-config -p dnetd -p dnet-etw -- --ignored --nocapture"
+```
+
+10.3 The real cores against the new configs (needs 10.1 first; no admin): the session config, the probe config and the server config the script writes
+```powershell
+run 10.3 "cargo test -p dnet-config --test pinned_core_check -- --nocapture; cargo test -p dnetd session_e2e -- --nocapture; cargo test -p dnet-provision bootstrap -- --nocapture"
+```
+
+10.4 A core must die with the service (admin; connect first with `.\target\debug\dnetctl.exe connect`; this ends the development service from 4.2, so start it again with 4.2 afterwards)
+```powershell
+run 10.4 "Get-Process dnetd,primary-core,amneziawg-go -ErrorAction SilentlyContinue | Format-Table Id,ProcessName,StartTime | Out-String -Width 200; Stop-Process -Name dnetd -Force; Start-Sleep 3; 'after the service was killed:'; Get-Process dnetd,primary-core,amneziawg-go -ErrorAction SilentlyContinue | Format-Table Id,ProcessName,StartTime | Out-String -Width 200; 'done'"
+```
+
+10.5 What this machine and its link look like (admin: without it the Wi-Fi details say they need elevation; read-only; for the link-facts work, T165). Run it once on each network you use
+```powershell
+run 10.5 "netsh wlan show interfaces; Get-NetAdapter | Format-List Name,InterfaceDescription,Status,LinkSpeed,MediaType,PhysicalMediaType | Out-String -Width 200; ipconfig /all; Get-NetIPInterface | Format-Table InterfaceAlias,AddressFamily,NlMtu,InterfaceMetric,ConnectionState | Out-String -Width 200"
+```
+
+10.6 The service's own view of the same (needs the service running)
+```powershell
+run 10.6 ".\target\debug\dnetctl.exe status; .\target\debug\dnetctl.exe paths; .\target\debug\dnetctl.exe stats; .\target\debug\dnetctl.exe --json events"
+```
+
+10.7 On a real server, after the guide (section 8): the services, who owns the files, the listening ports, and that the core accepts the written config
+```powershell
+run 10.7 "ssh -i <key> <user>@<server> 'id dnet; ls -lR /var/lib/dnet | head -40; systemctl is-active dnet-primary dnet-origin-session dnet-origin dnet-net; ss -lunp; ss -ltnp; sudo -u dnet /opt/dnet/bin/primary-core check -c /var/lib/dnet/primary/server.json && echo CONFIG-OK; systemctl show dnet-primary -p User -p NoNewPrivileges -p ProtectSystem'"
+```
+
+10.8 The Windows approval prompt, end to end (T160; needs the new service installed and running; normal PowerShell, not admin; you answer one Windows prompt and type `yes` once)
+
+First ask for a change that has to wait: add a server with the connection file of one you already have (replace `<ip>` and `<file>`). It is refused on purpose with the words "waits for approval" and an id; the id is 8 letters and digits.
+```powershell
+run 10.8 ".\target\debug\dnetctl.exe add-endpoint uactest --host <ip> --credentials-file <file>; .\target\debug\dnetctl.exe pending; .\target\debug\dnetctl.exe endpoints"
+```
+Then approve it yourself, in the same window: `dnetctl approve <id>` opens a second window, Windows asks you, and that window shows the change and waits for you to type `yes`. Close it with Enter. Then:
+```powershell
+run 10.9 ".\target\debug\dnetctl.exe pending; .\target\debug\dnetctl.exe endpoints"
+```
+The server should now be listed and nothing waiting. Remove it afterwards with `dnetctl remove-endpoint <id>` (removing needs no approval).
+
+10.10 A made-up id is refused by both commands, and nothing is waiting (nothing to click)
+```powershell
+run 10.10 ".\target\debug\dnetctl.exe approve zz99; .\target\debug\dnetctl.exe reject zz99; .\target\debug\dnetctl.exe pending"
+```

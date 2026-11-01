@@ -1717,11 +1717,36 @@ own, made by DNet Engine's wizard on Oracle Cloud Always Free (or any Linux serv
   > **Not done:** the Registry classifying the two benign "closed pipe" log lines each switch writes (the Registry is ADR-0008 P1); the live move has not
   > been run on Windows with a real tunnel adapter (the composed test `session_e2e.rs` proves the mechanism with real cores on loopback).
 - [ ] T160
-- [ ] T160 [US1] Control-surface hardening (audit E3, E4; ADR-0008 F13): changes that redirect traffic are held as pending and approved only by an elevated client; read-only detail limited to the console user and administrators
+- [~] T160 [US1] Control-surface hardening (audit E3, E4; ADR-0008 F13): changes that redirect traffic are held as pending and approved only by an elevated client; read-only detail limited to the console user and administrators
   > Needs the security review. The elevation prompt runs on the secure desktop (Microsoft, "How User Account Control works").
+  > **Approval built 2026-11-01 (F13 approved by the owner), test first, mutation-checked; not committed.** `ClientIdentity.elevated` is read from the
+  > pipe client's token (`TokenElevation`; unreadable means no); a new request class `Approval` (elevated, console session, any account); `ApproveChange`,
+  > `RejectChange`, `ListPending` and the error `ApprovalRequired`; `dnetd/src/approval.rs` holds changes (ten minutes, eight at most, the same change twice
+  > is one, ids are not secrets); `DnetService` holds a new server, the setup guide's server, turning a server on, a bypass rule and an imported feed, and
+  > approving applies exactly the held request once; `dnetctl pending | approve | reject` (approve opens its own elevated window, shows the change again,
+  > applies only on a typed `yes`, has no skip option). Contract `IPC-27`. Tests: 8 contract, 7 authz, 10 for the holding store, 13 in the service, 14 in `dnetctl` (11 behaviour, 3 parsing), 3 for the elevation helper, 1 in `dnet-view`; and mutations
+  > (no elevation check; never hold; never remove after approval; accept any answer; skip the elevated hand-over) each failed the suite.
+  > **T160b done 2026-11-01 (not committed):** the window lists what waits (`PendingChanges`, in Servers and Rules; read every 4 s) with Approve and Drop. Approve cannot ask the service (the window is not elevated): the shell starts
+  > `dnetctl approve <id>` beside the window, which asks Windows and applies only on a typed `yes`; only the checked change name is handed over (`dnet_view::approver`, 6 tests). `dnet-view` reads and drops (golden `pending.json`, 4 tests),
+  > the shell has `list_pending`, `reject_change`, `approve_change` (permissions generated; the shell builds), the web side has the parser, bridge, mock and component (4 component tests with axe, 3 bridge tests,
+  > 1 fixture test; 267 web tests pass, 55.6 KB of 150). **Not run:** the real window with a real held change and the Windows prompt (needs the new service installed; the owner's click).
+  > **Open:** (a) the Approve button in the Wizard's finish (it shows the held message as a refusal; the list appears in Servers); (b) the read-only detail limit (E4,
+  > solutions 3.3); (c) a record of who proposed and approved; (d) the live Windows prompt, the owner's click (`LOCAL-COMMANDS.md` 10.8); (e) the residual in ADR-0008
+  > section 12.1: an administrator at the default prompt level can be bypassed by malware that knows how.
 - [ ] T161 [US1] Guard v2 (ADR-0006 P3; `docs/research/2026-10-31-solutions.md` section 4): persistent filters tied to the service, the five yes/no lab checks
   > Waits for the owner's approval of P3 (F2) and the lab run (S4).
-- [ ] T162 [US1] Power and session awareness (solutions section 6): power events, user-presence setting, tick-gap detector
+- [~] T162 [US1] Power and session awareness (solutions section 6): power events, user-presence setting, tick-gap detector
+  > **Tick-gap detector done 2026-11-01** (the ground truth in solutions section 6), test first, mutation-checked, not committed. `dnet_core::tick_gap::TickGap` is pure: it is given a
+  > monotonic and a wall reading each tick and reports a gap when either shows more than period + 5 s (the wall clock because the monotonic clock may not count
+  > sleep; a clock set backward is never a gap). `dnetd::netwatch::report_gaps` ticks every second and, on a gap, sends the same change the system's network
+  > notifications send, so the loop reads the paths and measures them again; `WindowsWatch::start` runs it. 10 tests for the detector, 4 for the task (paused clock),
+  > and breaking either clock check or the signal made them fail. **Power messages done (same day, not committed):** the service now accepts the power-event control (`svc.rs`); a resume message calls `resume::announce()`, and each
+  > `WindowsWatch` listens (`resume::subscribe()`) and sends the same change, so either signal makes the loop look again; 5 tests on the hub (a wake, none without an announcement, a burst is one wake-up,
+  > a late subscriber hears nothing old, every subscriber hears it), breaking the announcement failed 3. The handler itself needs the real service and is not run here. **Open:** the session-change control and the
+  > user-presence setting for Modern Standby (not accepted: the tick gap covers it), and marking carrier health stale.
+  > **Resume nudge done (same day, not committed):** on a resume (either signal's power-message path) a session connection also sends small connection attempts to its origin through the session every 500 ms for up to 30 s,
+  > until one is answered, so a carrier that died in the sleep is made again at once (`resume::forward_resumes`, 5 more tests; removing the nudge failed 2). The tick-gap path re-reads the paths only (it has no session
+  > to nudge by itself; a nudge there would repeat on a false alarm). The real test is a suspend and resume, the owner's, with the guard on and off (not run).
 - [~] T163 [US1] Run the cores with a job object, then bisect child-process and dynamic-code restrictions (solutions section 5)
   > **Job object done 2026-11-01**, test first, mutation-checked (`dnet-supervisor/src/job.rs`): every spawned core is put in one job with
   > kill-on-close, so the system ends both cores when the service's process ends however it ends (a crash, a kill); before this only a dropped handle
@@ -1733,7 +1758,12 @@ own, made by DNet Engine's wizard on Oracle Cloud Always Free (or any Linux serv
 > Proposed 2026-10-31 from the owner's question about adapting to every kind of network
 > (`docs/research/2026-10-31-language-and-adaptive-paths.md`). None started; each needs the owner's go-ahead on that document's section 4.
 
-- [ ] T165 [US1] Read and show the link's facts (Wi-Fi generation, band, rate, signal; metered or roaming flag) as component evidence — `dnet-netstate`, after the Registry
+- [~] T165 [US1] Read and show the link's facts (Wi-Fi generation, band, rate, signal; metered or roaming flag) as component evidence — `dnet-netstate`, after the Registry
+  > **Reader done 2026-11-01** (`dnet_netstate::wifi::connected_links`, not committed): generation (Wi-Fi 4 to 7, from the system's PHY type; an unknown number is never guessed into one),
+  > the negotiated receive and transmit rates, and the signal quality, from the same query that names the network; 5 tests, including one that checks the PHY numbers against the
+  > system's own constants. The `wifi_names` example prints them. **On the owner's machine the query returned nothing** from a normal (non-admin) session (the Windows 11 location-access
+  > refusal described in the module; not worked around), so it is untested on live data; run it from the service (SYSTEM) or with location access on to see. **Open:** the band (needs the channel,
+  > a second query), the metered and roaming flags, and showing them (waits for the Registry).
 - [ ] T166 [US1] IPv6-only networks: a path rule that accepts them (today `paths.rs` needs an IPv4 default route) and NAT64 discovery or an IPv6 server address; lab first
 - [ ] T167 [US1] Metered-aware and network-aware policy (no hot standby or full race on metered links, measured keepalive on shared-address mobile, TCP carrier first when UDP is blocked); each row behind a measurement
 - [ ] T168 [US1] Spike: do the Windows UDP offloads (segmentation since Windows 10 2004, receive coalescing since Windows 11 24H2) help the QUIC path; the pinned QUIC library has offload code for Linux and macOS only

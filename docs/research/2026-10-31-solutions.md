@@ -196,6 +196,8 @@ by malware does not gain elevation. *(Source.)* Design:
    crate already in the workspace). The window starts a tiny elevated approver (`dnetctl approve <id>`); no secret travels on a command line.
 3. The service records who proposed and who approved, and the window shows the last few.
 
+**Built 2026-11-01 (T160):** the design above, with these differences found while building it. (1) The approver is `dnetctl approve <id>`, which opens its own elevated window; that window shows the change again and needs a typed `yes`, because the Windows prompt names the program and not the server, and there is no option that skips the question. (2) The elevated account may differ from the console user's (a standard user typing an administrator's password), so the service checks the **token's elevation and the session**, not the account. (3) Held: a new server (by hand or by the setup guide), turning a server on, a rule that goes around the tunnel, an imported feed; not held: anything that only tightens. (4) Eight changes at most wait, the same change twice is one, so a flood cannot push out the one a person is reading. (5) **Residual:** on an administrator account at the default prompt level, malware that knows an auto-elevation bypass is not stopped (see ADR-0008 section 12.1); a standard-user account, or the "always notify" level, is the stronger setting.
+
 Everyday actions (connect, disconnect, status) stay unelevated. A standard user is asked for administrator credentials, which is
 already the situation at install. Residual: a person who clicks yes to anything; the prompt text is what protects them, so it
 names the server. *(Designed; the secure-desktop property is Source.)*

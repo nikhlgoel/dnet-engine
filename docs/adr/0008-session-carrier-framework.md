@@ -296,7 +296,7 @@ need the mandatory security review and a run on a real server. Then P1 as writte
 | **F10** | Allow a Network Truth report (G3, measured facts about the network, no claims) and an opt-in hostile-network posture (G4, changes system settings, needs its own ADR) | Network Truth yes; posture only after its ADR |
 | **F11** | Verification investment (G7): a Windows runner in CI for the elevated tests, a network-weather replay library, fuzz targets | Weather library and fuzz targets yes; the runner is your call on cost |
 | **F12** | Add `with_wireguard` to the client core's build tags and `with_wireguard,with_gvisor` to the server core's (amends ADR-0004; changes the pin file, the notices and the installer size) | Yes: S1 and S2 passed with it, and the design does not work without it. **Approved and done 2026-10-31 (T155)**: the rebuilt core is 0.76 MB larger |
-| **F13** | Require approval by an elevated (UAC) client for changes that redirect traffic (audit E3; solutions §3.2) | Yes |
+| **F13** | Require approval by an elevated (UAC) client for changes that redirect traffic (audit E3; solutions §3.2) | Yes. **Approved 2026-11-01 (the owner: "for the UAC approvals, you can go ahead") and built (T160, service side and `dnetctl`)**; see section 12 for what it does and does not stop |
 
 ## 12. Build status (2026-11-01)
 
@@ -323,3 +323,27 @@ must not own its directory (root keeps it, group read only). Details: `docs/rese
 **What is still unproven.** Real delay and loss, the Windows tunnel adapter with a live move, the guard, the script as root on a real
 Linux image, the free server's CPU with the user-space exit, and the REALITY handshake against a real site. S4 (guard), S7 to S9 and the
 real-server run in `LOCAL-COMMANDS.md` section 8 settle them.
+
+### 12.1 UAC approval (F13, T160): what it stops and what it does not
+
+Built 2026-11-01: a change that redirects traffic (a new server by hand or by the setup guide, turning a server on, a rule that goes around
+the tunnel, an imported feed) is **held** by the service for ten minutes, and `ApproveChange` is accepted only from a client whose token the
+service reads as elevated, in the console session (`dnet_ipc::authz`, `IPC-27`). `dnetctl pending | approve <id> | reject <id>`:
+`approve` shows the change, opens its own elevated window with the `runas` verb (Windows asks on the secure desktop), shows the change again
+there (the Windows prompt names the program, not the server) and applies it only if the person types `yes`. There is no option that skips
+that question.
+
+- **Stops:** a program running as the person, and the usual malware that has only that, from pointing the connection at a server of its own
+  through the control pipe. A flood of requests cannot push out the one the person is looking at (eight at most wait; the same request twice
+  is one).
+- **Does not stop:** (1) a person who types `yes` to something they did not read; (2) malware that already has administrator rights, or that
+  can obtain elevation without the prompt. Microsoft does not treat a UAC bypass as breaking a security boundary (recalled from its servicing
+  criteria, not re-checked this session), and on an administrator account at the default prompt level some Microsoft programs elevate
+  without asking. The protection is therefore strongest for a person who works as a **standard user** (the prompt then asks for an
+  administrator's password), or an administrator who sets the prompt level to "always notify"; (3) the config file itself, which only an
+  administrator can write.
+- **Window:** Servers and Rules list what waits, with Approve (which starts `dnetctl approve`, so the same two-step confirmation) and Drop (T160b). A change asked for in the window still comes back as a refusal that
+  says it waits, with the command; the list shows it within seconds.
+- **Not yet:** the read-only
+  detail limit for other accounts (solutions section 3.3, E4); a record of who proposed and approved (the service sees the class, not the
+  account, at the dispatch seam); and a live run of the Windows prompt (the owner's click; `LOCAL-COMMANDS.md` 10.8).
