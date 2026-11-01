@@ -23,6 +23,8 @@
 // will use them too. Their unit tests run on every platform.
 // What a person can safely hand over to explain a failure (T112); reached through the service.
 #[cfg_attr(not(windows), allow(dead_code))]
+mod approval;
+#[cfg_attr(not(windows), allow(dead_code))]
 mod configure;
 mod diagnostics;
 #[cfg_attr(not(windows), allow(dead_code))]

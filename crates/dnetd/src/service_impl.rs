@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use dnet_core::feed::fetch::FetchRoute;
 use dnet_core::posture::RoutingPosture;
 use dnet_core::profile::BandwidthPair;
+use dnet_core::rule::{RuleAction, RuleMatcher};
 use dnet_core::session::{CheckFailure, ConnectionEvent, DefinitionsChange};
 use dnet_ipc::authz::ConsoleSession;
 use dnet_ipc::protocol::{encode_state_snapshot, FeedImport, IpcError, Request, RequestClass};
@@ -83,6 +84,13 @@ pub struct DnetService {
     /// Setting up the person's own server from a script and a pasted result (T150). Without it the
     /// requests answer that they are not available.
     server_setup: Option<crate::server_setup::ServerSetup>,
+    /// Changes that redirect traffic, waiting for an elevated client to approve them (T160).
+    pending: Mutex<crate::approval::PendingChanges>,
+    /// Held across approving a change, so the same one is not applied twice by two approvers.
+    approving: Mutex<()>,
+    /// Whether such changes are held at all. True for every service built by `new`; only the tests
+    /// that exercise the changes themselves turn it off, and nothing outside tests can.
+    hold_changes: bool,
 }
 
 /// Starts a requested check and says which network it will use, or that one is under way.
@@ -168,6 +176,52 @@ fn unix_millis() -> u64 {
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
+/// A short random name for a held change: eight lower-case hex digits. It names a change; it is
+/// not a secret, since approving needs elevation and not the name.
+fn fresh_change_id() -> String {
+    let mut bytes = [0u8; 4];
+    // The system generator failing is not a state to carry on from with a guessable id.
+    getrandom::fill(&mut bytes).expect("the system random generator is available");
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn unknown_change(error: crate::approval::FindError) -> IpcError {
+    IpcError::InvalidRequest {
+        detail: match error {
+            crate::approval::FindError::Unknown => {
+                "no change is waiting under that name; it may have been applied, withdrawn or \
+                 dropped after ten minutes"
+            }
+            crate::approval::FindError::Expired => {
+                "that change waited more than ten minutes and was dropped; ask for it again"
+            }
+        }
+        .to_string(),
+    }
+}
+
+/// Text from a request, made safe to show in a prompt: no control characters, and not long.
+fn shown(text: &str) -> String {
+    let clean: String = text.chars().filter(|c| !c.is_control()).collect();
+    if clean.chars().count() > 64 {
+        let cut: String = clean.chars().take(64).collect();
+        format!("{cut}...")
+    } else {
+        clean
+    }
+}
+
+fn describe_matcher(matcher: &RuleMatcher) -> String {
+    match matcher {
+        RuleMatcher::Domain(name) => format!("traffic to {}", shown(name)),
+        RuleMatcher::DomainSuffix(name) => format!("traffic to {} and its subdomains", shown(name)),
+        RuleMatcher::IpCidr(range) => format!("traffic to {range}"),
+        RuleMatcher::Application(path) => format!("traffic from {}", shown(path)),
+        RuleMatcher::DnsPort => "name lookups".to_string(),
+        RuleMatcher::EncryptedDnsPort => "encrypted name lookups".to_string(),
+    }
+}
+
 impl DnetService {
     /// Build a service over `state`, resolving the console user with `console`, gated by
     /// the outcome of start-up recovery.
@@ -190,7 +244,17 @@ impl DnetService {
             check_requester: None,
             intent: None,
             server_setup: None,
+            pending: Mutex::new(crate::approval::PendingChanges::new()),
+            approving: Mutex::new(()),
+            hold_changes: true,
         }
+    }
+
+    /// For tests of the changes themselves: apply them as they are asked for, without holding them.
+    #[cfg(test)]
+    pub fn applying_changes_without_approval(mut self) -> Self {
+        self.hold_changes = false;
+        self
     }
 
     /// Attach the connection orchestrator. It must publish to [`DnetService::events`], so that a
@@ -606,22 +670,170 @@ impl Service for DnetService {
     }
 
     fn dispatch(&self, request: &Request) -> Result<String, IpcError> {
+        // The three requests about held changes are answered here, before the store is touched.
+        match request {
+            Request::ListPending => {
+                return Ok(self
+                    .pending
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .list_json(unix_millis()));
+            }
+            Request::RejectChange { id } => return self.reject_change(id),
+            Request::ApproveChange { id } => return self.approve_change(id),
+            _ => {}
+        }
+        if self.hold_changes {
+            if let Some(what) = self.redirects_traffic(request) {
+                return self.hold_change(request, what);
+            }
+        }
+        self.apply(request)
+    }
+
+    fn subscribe(&self) -> Result<Subscription, IpcError> {
+        self.events.subscribe()
+    }
+}
+
+impl DnetService {
+    /// The strict gate (T038, T124): refuses a change while a previous run's network changes are
+    /// unrestored or the saved configuration was refused.
+    fn refuse_while_unsafe(&self) -> Result<(), IpcError> {
+        if let Err(e) = &self.recovery {
+            return Err(IpcError::InternalError {
+                detail: e.to_string(),
+            });
+        }
+        if let Some(reason) = &self.config_refusal {
+            return Err(IpcError::InternalError {
+                detail: format!(
+                    "{reason}. DNet Engine will not connect or change anything until the \
+                     file is corrected or removed, then the service restarted"
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// If `request` changes where traffic goes, what it would do, in words for the person (T160).
+    ///
+    /// Held: a new server (added by hand or by the setup guide), turning a server on, a rule that
+    /// sends traffic around the tunnel, and an imported feed. Not held: everything that can only make
+    /// the connection stricter or leave it where it is (removing or turning off a server, a rule that
+    /// tunnels, captures or rejects, the encrypted-DNS setting, Brutal), and everything that is not a
+    /// change at all.
+    fn redirects_traffic(&self, request: &Request) -> Option<String> {
+        match request {
+            Request::AddEndpoint(new) => Some(format!(
+                "Adding the server \"{}\" at {}",
+                shown(new.label()),
+                shown(new.host())
+            )),
+            Request::FinishServer { label, host, .. } => Some(format!(
+                "Adding the server \"{}\" at {} made by the setup guide",
+                shown(label),
+                shown(host)
+            )),
+            Request::SetEndpointEnabled {
+                endpoint,
+                enabled: true,
+            } => {
+                let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+                // An unknown server is not held: applying it fails, and changes nothing.
+                let found = state.endpoints().iter().find(|e| e.id() == *endpoint)?;
+                Some(format!(
+                    "Turning on the server \"{}\"",
+                    shown(found.label())
+                ))
+            }
+            Request::AddRule {
+                matcher,
+                action: RuleAction::Bypass,
+            } => Some(format!(
+                "Sending {} around the tunnel",
+                describe_matcher(matcher)
+            )),
+            Request::ImportFeed(_) => {
+                Some("Importing connection-method definitions from a file".to_string())
+            }
+            _ => None,
+        }
+    }
+
+    /// Hold `request` and say so as the refusal it is: nothing was applied.
+    fn hold_change(&self, request: &Request, what: String) -> Result<String, IpcError> {
+        // A change that could not be applied even if approved is not worth anyone's prompt.
+        self.refuse_while_unsafe()?;
+        let held = self
+            .pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .hold(
+                request.clone(),
+                what.clone(),
+                unix_millis(),
+                fresh_change_id,
+            );
+        match held {
+            Ok(id) => {
+                // Only the id is logged: what a change names (a server's address) stays out of the log.
+                tracing::info!(change = %id, "a change that redirects traffic is waiting for approval");
+                Err(IpcError::ApprovalRequired { id, what })
+            }
+            Err(crate::approval::HoldError::Full) => Err(IpcError::InvalidRequest {
+                detail: "too many changes are waiting for approval; approve or withdraw one first \
+                         (`dnetctl pending`)"
+                    .to_string(),
+            }),
+        }
+    }
+
+    /// Apply the held change `id`. Only reached for an elevated client in the console session
+    /// (`dnet_ipc::authz`); the change applied is exactly the one held, never one the caller sends.
+    fn approve_change(&self, id: &str) -> Result<String, IpcError> {
+        let _one_at_a_time = self
+            .approving
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let found = self
+            .pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .find(id, unix_millis());
+        let held = found.map_err(unknown_change)?;
+        // A change that fails (a connection is up, say) stays held until it expires, so the person
+        // can try again without asking for it again.
+        let reply = self.apply(&held.request)?;
+        self.pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(id);
+        tracing::info!(change = %id, "a change was approved by an elevated client");
+        Ok(reply)
+    }
+
+    /// Drop the held change `id` without applying it.
+    fn reject_change(&self, id: &str) -> Result<String, IpcError> {
+        let found = self
+            .pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .find(id, unix_millis());
+        found.map_err(unknown_change)?;
+        self.pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(id);
+        tracing::info!(change = %id, "a waiting change was withdrawn");
+        Ok(APPLIED.to_string())
+    }
+
+    fn apply(&self, request: &Request) -> Result<String, IpcError> {
         // Strict gate (T038): nothing may change while a previous run's network changes
         // are still unrestored. Read-only queries still answer, so the user can see why.
         if request.class() == RequestClass::Mutating {
-            if let Err(e) = &self.recovery {
-                return Err(IpcError::InternalError {
-                    detail: e.to_string(),
-                });
-            }
-            if let Some(reason) = &self.config_refusal {
-                return Err(IpcError::InternalError {
-                    detail: format!(
-                        "{reason}. DNet Engine will not connect or change anything until the \
-                         file is corrected or removed, then the service restarted"
-                    ),
-                });
-            }
+            self.refuse_while_unsafe()?;
         }
         let mut state = self.state.lock().expect("domain state mutex poisoned");
         let orchestrator = self.orchestrator();
@@ -835,15 +1047,18 @@ impl Service for DnetService {
             | Request::StartProvisioning
             | Request::CancelProvisioning => Self::not_available("this configuration change"),
 
+            // Answered by `dispatch` before `apply` is reached; they never come through here.
+            Request::ListPending | Request::ApproveChange { .. } | Request::RejectChange { .. } => {
+                Err(IpcError::InternalError {
+                    detail: "a request about held changes reached the apply step".to_string(),
+                })
+            }
+
             // Streaming is handled by the connection loop (`Service::subscribe`), not one-shot dispatch.
             Request::Subscribe => Err(IpcError::InvalidRequest {
                 detail: "Subscribe is a streaming request, not a one-shot dispatch".to_string(),
             }),
         }
-    }
-
-    fn subscribe(&self) -> Result<Subscription, IpcError> {
-        self.events.subscribe()
     }
 }
 
@@ -862,6 +1077,11 @@ mod tests {
     /// A service with a fixed (test) console identity, so `dispatch` can be exercised
     /// without the OS console lookup.
     fn service() -> DnetService {
+        holding_service().applying_changes_without_approval()
+    }
+
+    /// The service as it is built for real: changes that redirect traffic are held for approval.
+    fn holding_service() -> DnetService {
         DnetService::new(
             DomainState::seeded(),
             Box::new(|| {
@@ -2434,5 +2654,279 @@ mod tests {
             "an endpoint that does not exist is not removed"
         );
         assert!(!refused["reason"].as_str().unwrap().is_empty());
+    }
+
+    // ------------------------------------------------------------------ T160: held changes
+
+    /// A service built the way the real one is (changes that redirect traffic are held), with a
+    /// store to save into.
+    fn holding_configurable_service() -> (DnetService, Arc<MemoryStateFile>) {
+        let (configurator, file) = memory_configurator();
+        (holding_service().with_configurator(configurator), file)
+    }
+
+    /// The id a held change waits under, from the refusal that says so.
+    fn held_id(reply: Result<String, IpcError>) -> String {
+        match reply {
+            Err(IpcError::ApprovalRequired { id, .. }) => id,
+            other => panic!("expected the change to be held, got {other:?}"),
+        }
+    }
+
+    fn pending_ids(svc: &DnetService) -> Vec<String> {
+        json_of(svc.dispatch(&Request::ListPending))["pending"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["id"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    fn add_home() -> Request {
+        Request::AddEndpoint(Box::new(new_endpoint("home")))
+    }
+
+    #[test]
+    fn a_new_server_is_held_not_applied_and_the_person_is_told_what_waits() {
+        let (svc, file) = holding_configurable_service();
+        match svc.dispatch(&add_home()) {
+            Err(IpcError::ApprovalRequired { id, what }) => {
+                assert!(what.contains("home"), "{what}");
+                assert!(what.contains("Adding the server"), "{what}");
+                assert!(!id.is_empty());
+            }
+            other => panic!("expected the change to be held, got {other:?}"),
+        }
+        // Nothing was applied and nothing was saved.
+        let listed = json_of(svc.dispatch(&Request::ListEndpoints));
+        assert!(listed["endpoints"].as_array().unwrap().is_empty());
+        assert!(file.bytes().is_none(), "something was saved");
+        assert_eq!(pending_ids(&svc).len(), 1);
+    }
+
+    #[test]
+    fn approving_applies_exactly_the_held_change_once() {
+        let (svc, file) = holding_configurable_service();
+        let id = held_id(svc.dispatch(&add_home()));
+
+        let reply = json_of(svc.dispatch(&Request::ApproveChange { id: id.clone() }));
+        assert!(reply["endpoint"].is_string(), "{reply}");
+        let listed = json_of(svc.dispatch(&Request::ListEndpoints));
+        assert_eq!(listed["endpoints"][0]["label"], "home");
+        let saved = dnet_config::persist::decode(&file.bytes().expect("saved")).unwrap();
+        assert_eq!(saved.endpoints.len(), 1);
+        assert!(pending_ids(&svc).is_empty());
+
+        // The same approval again finds nothing: a change is applied once.
+        match svc.dispatch(&Request::ApproveChange { id }) {
+            Err(IpcError::InvalidRequest { detail }) => {
+                assert!(detail.contains("no change is waiting"), "{detail}")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_withdrawn_change_is_never_applied() {
+        let (svc, file) = holding_configurable_service();
+        let id = held_id(svc.dispatch(&add_home()));
+        assert_eq!(
+            svc.dispatch(&Request::RejectChange { id: id.clone() })
+                .unwrap(),
+            APPLIED
+        );
+        assert!(pending_ids(&svc).is_empty());
+        assert!(matches!(
+            svc.dispatch(&Request::ApproveChange { id }),
+            Err(IpcError::InvalidRequest { .. })
+        ));
+        assert!(file.bytes().is_none());
+        let listed = json_of(svc.dispatch(&Request::ListEndpoints));
+        assert!(listed["endpoints"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn asking_again_for_the_same_change_does_not_add_a_second_one() {
+        let (svc, _file) = holding_configurable_service();
+        let first = held_id(svc.dispatch(&add_home()));
+        let again = held_id(svc.dispatch(&add_home()));
+        assert_eq!(first, again);
+        assert_eq!(pending_ids(&svc).len(), 1);
+    }
+
+    #[test]
+    fn changes_that_can_only_tighten_things_are_applied_without_waiting() {
+        let (svc, _file) = holding_configurable_service();
+        let id = held_id(svc.dispatch(&add_home()));
+        let added = json_of(svc.dispatch(&Request::ApproveChange { id }));
+        let endpoint = id_in(&added);
+
+        // Turning a server off, removing one, and tunnelling more are not held ...
+        assert_eq!(
+            svc.dispatch(&Request::SetEndpointEnabled {
+                endpoint,
+                enabled: false,
+            })
+            .unwrap(),
+            APPLIED
+        );
+        json_of(svc.dispatch(&Request::AddRule {
+            matcher: RuleMatcher::Domain("example.com".into()),
+            action: RuleAction::Tunnel,
+        }));
+        assert_eq!(
+            svc.dispatch(&Request::RemoveEndpoint { endpoint }).unwrap(),
+            APPLIED
+        );
+        // ... and none of them left anything waiting.
+        assert!(pending_ids(&svc).is_empty());
+    }
+
+    #[test]
+    fn turning_a_server_on_waits_and_names_it() {
+        let (svc, _file) = holding_configurable_service();
+        let id = held_id(svc.dispatch(&add_home()));
+        let endpoint = id_in(&json_of(svc.dispatch(&Request::ApproveChange { id })));
+        svc.dispatch(&Request::SetEndpointEnabled {
+            endpoint,
+            enabled: false,
+        })
+        .unwrap();
+
+        let turn_on = Request::SetEndpointEnabled {
+            endpoint,
+            enabled: true,
+        };
+        match svc.dispatch(&turn_on) {
+            Err(IpcError::ApprovalRequired { id, what }) => {
+                assert!(what.contains("Turning on"), "{what}");
+                assert!(what.contains("home"), "{what}");
+                json_of(svc.dispatch(&Request::ApproveChange { id }));
+            }
+            other => panic!("{other:?}"),
+        }
+        let listed = json_of(svc.dispatch(&Request::ListEndpoints));
+        assert_eq!(listed["endpoints"][0]["enabled"], true);
+    }
+
+    #[test]
+    fn turning_on_a_server_that_does_not_exist_is_not_held() {
+        let (svc, _file) = holding_configurable_service();
+        let reply = svc.dispatch(&Request::SetEndpointEnabled {
+            endpoint: EndpointId::new(),
+            enabled: true,
+        });
+        // The store says why; no prompt is raised for something that cannot happen.
+        assert!(
+            !matches!(reply, Err(IpcError::ApprovalRequired { .. })),
+            "{reply:?}"
+        );
+        assert!(pending_ids(&svc).is_empty());
+    }
+
+    #[test]
+    fn a_rule_that_goes_around_the_tunnel_waits_and_one_that_does_not_does_not() {
+        let (svc, _file) = holding_configurable_service();
+        let around = Request::AddRule {
+            matcher: RuleMatcher::Domain("example.com".into()),
+            action: RuleAction::Bypass,
+        };
+        match svc.dispatch(&around) {
+            Err(IpcError::ApprovalRequired { what, .. }) => {
+                assert!(what.contains("example.com"), "{what}");
+                assert!(what.contains("around the tunnel"), "{what}");
+            }
+            other => panic!("{other:?}"),
+        }
+        let rules_before = json_of(svc.dispatch(&Request::ListRules));
+        assert!(!rules_before.to_string().contains("example.com"));
+        // The control: the same domain through the tunnel is applied at once.
+        json_of(svc.dispatch(&Request::AddRule {
+            matcher: RuleMatcher::Domain("example.com".into()),
+            action: RuleAction::Tunnel,
+        }));
+        assert!(json_of(svc.dispatch(&Request::ListRules))
+            .to_string()
+            .contains("example.com"));
+    }
+
+    #[test]
+    fn an_imported_feed_and_a_server_from_the_guide_wait_too() {
+        let (svc, _file) = holding_configurable_service();
+        let import = Request::ImportFeed(FeedImport::new(Some("{}".to_string()), None).unwrap());
+        match svc.dispatch(&import) {
+            Err(IpcError::ApprovalRequired { what, .. }) => {
+                assert!(what.contains("Importing"), "{what}")
+            }
+            other => panic!("{other:?}"),
+        }
+        let finish = Request::FinishServer {
+            label: "from the guide".into(),
+            host: "203.0.113.9".into(),
+            report: "{}".into(),
+        };
+        match svc.dispatch(&finish) {
+            Err(IpcError::ApprovalRequired { what, .. }) => {
+                assert!(what.contains("from the guide"), "{what}");
+                assert!(what.contains("203.0.113.9"), "{what}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A change that fails when approved stays held, so the person need not ask for it again.
+    #[test]
+    fn a_change_that_fails_when_approved_stays_waiting() {
+        let (svc, _file) = holding_configurable_service();
+        let first = held_id(svc.dispatch(&add_home()));
+        json_of(svc.dispatch(&Request::ApproveChange { id: first }));
+        // Another server under the same name cannot be added; it is held all the same, and approving
+        // it fails with the store's reason.
+        let other = Request::AddEndpoint(Box::new(new_endpoint("home")));
+        let second = held_id(svc.dispatch(&other));
+        assert!(matches!(
+            svc.dispatch(&Request::ApproveChange { id: second.clone() }),
+            Err(IpcError::InvalidRequest { .. })
+        ));
+        assert_eq!(pending_ids(&svc), [second]);
+    }
+
+    #[test]
+    fn only_so_many_changes_wait() {
+        let (svc, _file) = holding_configurable_service();
+        for n in 0..crate::approval::MAX_HELD {
+            held_id(
+                svc.dispatch(&Request::AddEndpoint(Box::new(new_endpoint(&format!(
+                    "server{n}"
+                ))))),
+            );
+        }
+        match svc.dispatch(&Request::AddEndpoint(Box::new(new_endpoint(
+            "one-too-many",
+        )))) {
+            Err(IpcError::InvalidRequest { detail }) => {
+                assert!(detail.contains("too many changes"), "{detail}")
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(pending_ids(&svc).len(), crate::approval::MAX_HELD);
+    }
+
+    #[test]
+    fn what_waits_is_listed_without_the_credentials_it_would_install() {
+        let (svc, _file) = holding_configurable_service();
+        held_id(svc.dispatch(&add_home()));
+        let text = svc.dispatch(&Request::ListPending).unwrap();
+        for word in ["credentials", "password", "private", "secret"] {
+            assert!(!text.to_lowercase().contains(word), "{word} in {text}");
+        }
+        assert!(text.contains("home"));
+    }
+
+    #[test]
+    fn a_label_with_control_characters_is_cleaned_before_it_reaches_a_prompt() {
+        assert_eq!(shown("ho\u{7}me\nx"), "homex");
+        let long = "a".repeat(200);
+        assert!(shown(&long).chars().count() <= 67);
     }
 }
