@@ -39,7 +39,7 @@ use std::net::Ipv4Addr;
 use dnet_config::amneziawg::{ObfuscationParams, PrivateKey};
 use dnet_config::credentials::{
     parse_spki_sha256_hex, AmneziaWgCredentials, EndpointCredentials, Hysteria2Bundle,
-    RealityBundle,
+    RealityBundle, SessionBundle,
 };
 use dnet_config::hysteria2::{Hysteria2Credentials, Hysteria2EndpointParams, Hysteria2Obfs};
 use dnet_config::reality::{
@@ -50,13 +50,14 @@ use dnet_config::tls::ServerTrust;
 use dnet_core::origin::Origin;
 use serde::Deserialize;
 
-use crate::client_keys::ClientKeys;
+use crate::client_keys::{ClientKeys, SessionKeys};
 use crate::provider::{PortRule, Protocol};
 
 /// The line the script prints. Everything else it prints is progress text.
 pub const REPORT_PREFIX: &str = "DNET-BOOTSTRAP-REPORT ";
-/// The report format this crate reads.
-pub const REPORT_VERSION: u32 = 1;
+/// The report format this crate reads. 2 added the session (ADR-0008); a server set up by an older script
+/// reports 1 and is refused with the version, so the person sets it up again.
+pub const REPORT_VERSION: u32 = 2;
 /// Largest report accepted, in bytes. A report is a few hundred.
 pub const MAX_REPORT_BYTES: usize = 16 * 1024;
 
@@ -64,6 +65,13 @@ pub const MAX_REPORT_BYTES: usize = 16 * 1024;
 pub const TUNNEL_SERVER: Ipv4Addr = Ipv4Addr::new(10, 66, 0, 1);
 pub const TUNNEL_CLIENT: Ipv4Addr = Ipv4Addr::new(10, 66, 0, 2);
 pub const TUNNEL_PREFIX: u8 = 24;
+
+/// Inside the session (ADR-0008): the addresses and the port, defined once in `dnet-config`, where the client's
+/// configuration and the stored credentials need them too.
+pub use dnet_config::session::{
+    session_device_address, MAX_DEVICES, SESSION_ORIGIN, SESSION_PORT, SESSION_PREFIX,
+    SESSION_SERVER,
+};
 
 /// The port of the measurement origin on the server's tunnel address.
 pub const ORIGIN_PORT: u16 = 8080;
@@ -75,6 +83,12 @@ pub const ORIGIN_MAX_BYTES: usize = 1_048_576;
 /// a public address would be reached outside the tunnel and prove nothing.
 pub fn measurement_origin() -> Origin {
     Origin::parse(&format!("http://{TUNNEL_SERVER}:{ORIGIN_PORT}")).expect("a fixed, valid origin")
+}
+
+/// The same, for the session: an address inside it that the server's exit maps to its own loopback origin,
+/// so it is reachable only by a device with a key.
+pub fn session_measurement_origin() -> Origin {
+    Origin::parse(&format!("http://{SESSION_ORIGIN}:{ORIGIN_PORT}")).expect("a fixed, valid origin")
 }
 
 /// One server-side core, pinned.
@@ -181,6 +195,50 @@ pub struct BootstrapPlan {
     pub hysteria2_server_name: String,
     /// The site REALITY impersonates; handshakes that are not the client's are forwarded to it.
     pub reality_target: TargetDomain,
+    /// The devices that may use the session (ADR-0008).
+    pub session: SessionPlan,
+}
+
+/// Who may use the server's session. A device is its public key: the server holds no device secret, and a
+/// device is removed by leaving its key out the next time the script runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionPlan {
+    /// One per device, 32 bytes in standard base64, in the order the devices get their addresses.
+    pub device_public_keys: Vec<String>,
+}
+
+impl SessionPlan {
+    /// The address device number `index` has, and its key, in the form the script and the report use.
+    pub fn devices(&self) -> impl Iterator<Item = (Ipv4Addr, &str)> {
+        self.device_public_keys
+            .iter()
+            .enumerate()
+            .map(|(i, key)| (session_device_address(i), key.as_str()))
+    }
+
+    fn validate(&self) -> Result<(), BootstrapError> {
+        let keys = &self.device_public_keys;
+        if keys.is_empty() || keys.len() > MAX_DEVICES {
+            return Err(BootstrapError::Invalid("the number of devices"));
+        }
+        for (i, key) in keys.iter().enumerate() {
+            if !is_base64_key(key) {
+                return Err(BootstrapError::Invalid("a device key"));
+            }
+            if keys[..i].contains(key) {
+                return Err(BootstrapError::Invalid("a device key (it appears twice)"));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// 32 bytes in standard base64, 44 characters: the form the core's key generator prints and its
+/// configuration takes. Checking the alphabet is also what keeps the value safe in the script.
+fn is_base64_key(text: &str) -> bool {
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine as _;
+    text.len() == 44 && STANDARD.decode(text).is_ok_and(|bytes| bytes.len() == 32)
 }
 
 /// Why a script could not be made, or a report could not be used.
@@ -262,6 +320,7 @@ impl BootstrapPlan {
             .validate()
             .map_err(|_| BootstrapError::Invalid("the obfuscation parameters"))?;
         dns_name("the Hysteria 2 server name", &self.hysteria2_server_name)?;
+        self.session.validate()?;
         let ports = [
             self.ports.amneziawg_udp,
             self.ports.hysteria2_udp,
@@ -288,7 +347,11 @@ BASE=/opt/dnet
 BIN="$BASE/bin"
 STATE=/var/lib/dnet
 mkdir -p "$BIN" "$STATE/awg" "$STATE/primary"
-chmod 700 "$STATE" "$STATE/awg" "$STATE/primary"
+# $STATE can be walked through (not listed or read) so the unprivileged core can reach its own directory.
+chmod 711 "$STATE"
+chmod 700 "$STATE/awg"
+# $STATE/primary is made 700 by mkdir (umask 077) the first time; the end of this script gives it its final
+# owner and mode, and later runs leave it alone, so a running core never loses its directory in the middle.
 
 # ---- this must be the kind of machine the downloads are built for; say so before changing anything
 MACHINE=$(uname -m)
@@ -312,6 +375,13 @@ ensure openssl openssl openssl
 ensure python3 python3 python3
 ensure ip iproute2 iproute
 ensure sha256sum coreutils coreutils
+
+# ---- the core that faces the internet runs as a user of its own, with no shell and no home: a flaw in it
+# is then a flaw in an account that can read its own keys and nothing else on this machine
+id dnet >/dev/null 2>&1 \
+  || useradd --system --no-create-home --shell /usr/sbin/nologin dnet >/dev/null 2>&1 \
+  || useradd -r -M -s /sbin/nologin dnet >/dev/null 2>&1 || true
+id dnet >/dev/null 2>&1 || { echo "could not create the account the core runs as" >&2; exit 2; }
 
 # ---- the two cores, pinned: downloaded, checked, and only then made executable
 fetch() {
@@ -391,9 +461,24 @@ REALITY_SHORT=$(clean < "$STATE/primary/short_id")
 [ -n "$REALITY_PRIVATE" ] && [ -n "$REALITY_PUBLIC" ] && [ -n "$REALITY_UUID" ] && [ -n "$REALITY_SHORT" ] \
   || { echo "key generation produced an empty value" >&2; exit 1; }
 
-# ---- the primary core's server configuration: checked by the core itself before anything starts
-if [ ! -s "$STATE/primary/server.json" ]; then
-  cat > "$STATE/primary/server.json.new" <<CONFIG_EOF
+# ---- the session (ADR-0008): the server's own key pair. Each device has a key pair of its own, made on the
+# device; only the public halves are here, so a lost device is removed by leaving its key out.
+if [ ! -s "$STATE/primary/session.private" ] || [ ! -s "$STATE/primary/session.public" ]; then
+  PAIR=$("$BIN/primary-core" generate wg-keypair)
+  echo "$PAIR" | sed -n 's/^PrivateKey: *//p' | clean > "$STATE/primary/session.private"
+  echo "$PAIR" | sed -n 's/^PublicKey: *//p' | clean > "$STATE/primary/session.public"
+  chmod 600 "$STATE/primary/session.private" "$STATE/primary/session.public"
+fi
+SESSION_PRIVATE=$(clean < "$STATE/primary/session.private")
+SESSION_PUBLIC=$(clean < "$STATE/primary/session.public")
+[ "${#SESSION_PRIVATE}" -eq 44 ] && [ "${#SESSION_PUBLIC}" -eq 44 ] \
+  || { echo "could not make the session key" >&2; exit 1; }
+
+# ---- the primary core's server configuration: checked by the core itself before anything starts.
+# It is derived from the keys above and the devices in this script, so it is rewritten every time and
+# replaced only if the core accepts it; the service is restarted only if it actually changed.
+CONFIG_CHANGED=0
+cat > "$STATE/primary/server.json.new" <<CONFIG_EOF
 {
   "log": { "level": "warn", "timestamp": true },
   "inbounds": [
@@ -429,13 +514,49 @@ if [ ! -s "$STATE/primary/server.json" ]; then
       }
     }
   ],
-  "outbounds": [ { "type": "direct", "tag": "direct" } ]
+  "endpoints": [
+    {
+      "type": "@@SESSION_TYPE@@",
+      "tag": "session-in",
+      "system": false,
+      "address": [ "@@SESSION_SERVER@@/@@SESSION_PREFIX@@" ],
+      "private_key": "$SESSION_PRIVATE",
+      "listen_port": @@SESSION_PORT@@,
+      "peers": [
+@@SESSION_PEERS@@
+      ]
+    }
+  ],
+  "outbounds": [ { "type": "direct", "tag": "direct" } ],
+  "dns": { "servers": [ { "type": "local", "tag": "local" } ] },
+  "route": {
+    "default_domain_resolver": "local",
+    "final": "direct",
+    "rules": [
+      { "inbound": [ "hy2-in", "reality-in" ], "ip_cidr": [ "127.0.0.1/32" ], "port": [ @@SESSION_PORT@@ ], "network": [ "udp" ], "action": "route", "outbound": "direct" },
+      { "inbound": [ "hy2-in", "reality-in" ], "action": "reject" },
+      { "inbound": [ "session-in" ], "ip_cidr": [ "@@SESSION_ORIGIN@@/32" ], "port": [ @@ORIGIN_PORT@@ ], "action": "route", "outbound": "direct", "override_address": "127.0.0.1", "override_port": @@ORIGIN_PORT@@ },
+      { "inbound": [ "session-in" ], "action": "resolve", "strategy": "prefer_ipv4" },
+      { "inbound": [ "session-in" ], "ip_is_private": true, "action": "reject" }
+    ]
+  }
 }
 CONFIG_EOF
-  chmod 600 "$STATE/primary/server.json.new"
-  "$BIN/primary-core" check -c "$STATE/primary/server.json.new" || { rm -f "$STATE/primary/server.json.new"; echo "the core rejected its configuration" >&2; exit 5; }
+chmod 600 "$STATE/primary/server.json.new"
+"$BIN/primary-core" check -c "$STATE/primary/server.json.new" || { rm -f "$STATE/primary/server.json.new"; echo "the core rejected its configuration" >&2; exit 5; }
+if [ -s "$STATE/primary/server.json" ] && cmp -s "$STATE/primary/server.json.new" "$STATE/primary/server.json"; then
+  rm -f "$STATE/primary/server.json.new"
+else
+  [ -s "$STATE/primary/server.json" ] && CONFIG_CHANGED=1
   mv "$STATE/primary/server.json.new" "$STATE/primary/server.json"
 fi
+# The core runs as an account that may READ what it needs and may create or replace nothing here: root keeps
+# owning the directory and every file in it, with the account's group allowed read-only. (If the account owned
+# the directory, a flaw in the core could plant a symlink for the next run of this script, which is root and
+# writes server.json.new with `cat >`, to follow.)
+chown -R root:dnet "$STATE/primary"
+chmod 750 "$STATE/primary"
+find "$STATE/primary" -type f -exec chmod 640 {} +
 
 # ---- AmneziaWG configuration helper: speaks the core's control socket
 cat > "$BIN/dnet-uapi-set" <<'UAPI_EOF'
@@ -485,7 +606,9 @@ ip link set awg0 up
 AWGCONF_EOF
 chmod 0755 "$BIN/dnet-awg-configure"
 
-# ---- the machine's own firewall and forwarding: exactly the three ports, and the tunnel's exit
+# ---- the machine's own firewall: these three ports are opened, and the AmneziaWG tunnel's exit is forwarded.
+# It adds accept rules and sets no default of its own: what else is closed is up to the image's own rules
+# and the provider's network rules (the guide has the person open exactly these three there).
 cat > "$BIN/dnet-net-up" <<'NET_EOF'
 #!/bin/sh
 set -eu
@@ -575,7 +698,12 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
-ThreadingHTTPServer(("@@TUN_SERVER@@", @@ORIGIN_PORT@@), Handler).serve_forever()
+# The address to listen on is the one argument, and it must be one of the two this machine ever uses.
+import sys
+BIND = sys.argv[1] if len(sys.argv) == 2 else ""
+if BIND not in ("@@TUN_SERVER@@", "127.0.0.1"):
+    sys.exit("usage: dnet-origin <the tunnel address or 127.0.0.1>")
+ThreadingHTTPServer((BIND, @@ORIGIN_PORT@@), Handler).serve_forever()
 ORIGIN_EOF
 chmod 0755 "$BIN/dnet-origin"
 cat > /etc/systemd/system/dnet-origin.service <<'UNIT_EOF'
@@ -584,9 +712,31 @@ Description=DNet Engine endpoint: measurement origin (tunnel address only)
 After=network-online.target dnet-awg.service
 Requires=dnet-awg.service
 [Service]
-ExecStart=/usr/bin/python3 /opt/dnet/bin/dnet-origin
+ExecStart=/usr/bin/python3 /opt/dnet/bin/dnet-origin @@TUN_SERVER@@
 Restart=always
 RestartSec=2
+[Install]
+WantedBy=multi-user.target
+UNIT_EOF
+# The same origin for the session: on this machine's own loopback, where the session's exit maps the
+# session address to. It does not wait for the AmneziaWG tunnel, so the session works without it.
+cat > /etc/systemd/system/dnet-origin-session.service <<'UNIT_EOF'
+[Unit]
+Description=DNet Engine endpoint: measurement origin for the session (loopback only)
+After=network-online.target
+[Service]
+User=dnet
+Group=dnet
+ExecStart=/usr/bin/python3 /opt/dnet/bin/dnet-origin 127.0.0.1
+Restart=always
+RestartSec=2
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET
 [Install]
 WantedBy=multi-user.target
 UNIT_EOF
@@ -606,12 +756,34 @@ WantedBy=multi-user.target
 UNIT_EOF
 cat > /etc/systemd/system/dnet-primary.service <<'UNIT_EOF'
 [Unit]
-Description=DNet Engine endpoint: Hysteria 2 and VLESS+REALITY
+Description=DNet Engine endpoint: Hysteria 2, VLESS+REALITY and the session
 After=network-online.target dnet-net.service
 Requires=dnet-net.service
 [Service]
+# The part of the server that faces the internet and parses what strangers send. It binds ports above 1024,
+# makes no tunnel device (the session runs inside the core), and writes nothing, so it needs no privilege
+# at all: no capabilities, no new ones, a read-only system, no home, no devices, only IP sockets.
+User=dnet
+Group=dnet
 ExecStart=/opt/dnet/bin/primary-core run -c /var/lib/dnet/primary/server.json
 Restart=on-failure
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+UMask=0077
 [Install]
 WantedBy=multi-user.target
 UNIT_EOF
@@ -629,19 +801,42 @@ Restart=on-failure
 WantedBy=multi-user.target
 UNIT_EOF
 systemctl daemon-reload
-systemctl enable --now dnet-net.service dnet-primary.service dnet-awg.service dnet-origin.service >/dev/null
+systemctl enable --now dnet-net.service dnet-primary.service dnet-awg.service dnet-origin.service dnet-origin-session.service >/dev/null
 systemctl enable --now dnet-housekeeping.timer >/dev/null
+# A configuration that changed (a device added or removed) takes effect now, not at the next restart.
+if [ "$CONFIG_CHANGED" = 1 ]; then systemctl restart dnet-primary.service; fi
+
+# ---- security updates: a server nobody logs in to has to patch itself. Best effort on purpose: a failure
+# here must not undo a server that otherwise works, and it is reported by the next run's output.
+if need apt-get; then
+  DEBIAN_FRONTEND=noninteractive apt-get install -y unattended-upgrades >/dev/null 2>&1 || true
+  cat > /etc/apt/apt.conf.d/20auto-upgrades <<'APT_EOF'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+APT_EOF
+  cat > /etc/apt/apt.conf.d/52dnet-unattended <<'APT_EOF'
+Unattended-Upgrade::Automatic-Reboot "true";
+Unattended-Upgrade::Automatic-Reboot-Time "04:00";
+APT_EOF
+elif need dnf; then
+  dnf install -y dnf-automatic >/dev/null 2>&1 || true
+  if [ -f /etc/dnf/automatic.conf ]; then
+    sed -i 's/^apply_updates *=.*/apply_updates = yes/; s/^upgrade_type *=.*/upgrade_type = security/' /etc/dnf/automatic.conf
+    systemctl enable --now dnf-automatic.timer >/dev/null 2>&1 || true
+  fi
+fi
 
 @@KEEPALIVE@@
 
 # ---- the report: public material, and the shared secrets the client has to hold
 AWG_PUB="$AWG_PUB" HY2_SPKI="$HY2_SPKI" HY2_AUTH="$HY2_AUTH" HY2_OBFS="$HY2_OBFS" CERT_ALG="$CERT_ALG" \
 REALITY_PUBLIC="$REALITY_PUBLIC" REALITY_SHORT="$REALITY_SHORT" REALITY_UUID="$REALITY_UUID" \
+SESSION_PUBLIC="$SESSION_PUBLIC" \
 PRIMARY_SHA='@@PRIMARY_SHA@@' AWG_SHA='@@AWG_SHA@@' python3 - <<'REPORT_EOF'
 import json, os
 e = os.environ
 report = {
-    "version": 1,
+    "version": 2,
     "amneziawg": {"server_public_key_hex": e["AWG_PUB"], "listen_port": @@AWG_PORT@@,
                   "client_address": "@@TUN_CLIENT@@", "prefix_len": @@TUN_PREFIX@@,
                   "client_public_key_hex": "@@CLIENT_PUB@@"},
@@ -651,12 +846,38 @@ report = {
     "reality": {"server_port": @@REALITY_PORT@@, "target_domain": "@@REALITY_TARGET@@",
                 "public_key": e["REALITY_PUBLIC"], "short_id": e["REALITY_SHORT"],
                 "uuid": e["REALITY_UUID"], "flow": "xtls-rprx-vision"},
+    "session": {"server_public_key": e["SESSION_PUBLIC"], "port": @@SESSION_PORT@@,
+                "server_address": "@@SESSION_SERVER@@",
+                "devices": [@@SESSION_DEVICES@@]},
     "cores": {"primary_core": {"version": "@@PRIMARY_VERSION@@", "sha256": e["PRIMARY_SHA"]},
               "amneziawg": {"version": "@@AWG_VERSION@@", "sha256": e["AWG_SHA"]}},
 }
 print("DNET-BOOTSTRAP-REPORT " + json.dumps(report, separators=(",", ":")))
 REPORT_EOF
 "##;
+
+/// The peers of the server's session endpoint, one per device, as JSON for the configuration. The keys were
+/// checked to be base64 of 32 bytes, so nothing in them is shell or JSON syntax.
+fn session_peers(session: &SessionPlan) -> String {
+    session
+        .devices()
+        .map(|(address, key)| {
+            format!(
+                "        {{ \"public_key\": \"{key}\", \"allowed_ips\": [ \"{address}/32\" ] }}"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",\n")
+}
+
+/// The devices as the report prints them (a Python literal that is also valid JSON).
+fn session_devices_literal(session: &SessionPlan) -> String {
+    session
+        .devices()
+        .map(|(address, key)| format!("{{\"address\": \"{address}\", \"public_key\": \"{key}\"}}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
 /// The bootstrap script for `plan`. Fails, without making any text, if a value is not allowed in it.
 pub fn script(plan: &BootstrapPlan) -> Result<String, BootstrapError> {
@@ -699,6 +920,16 @@ pub fn script(plan: &BootstrapPlan) -> Result<String, BootstrapError> {
         ("TUN_SERVER", TUNNEL_SERVER.to_string()),
         ("TUN_CLIENT", TUNNEL_CLIENT.to_string()),
         ("TUN_PREFIX", TUNNEL_PREFIX.to_string()),
+        (
+            "SESSION_TYPE",
+            dnet_config::session::SESSION_ENDPOINT_TYPE.to_owned(),
+        ),
+        ("SESSION_SERVER", SESSION_SERVER.to_string()),
+        ("SESSION_ORIGIN", SESSION_ORIGIN.to_string()),
+        ("SESSION_PREFIX", SESSION_PREFIX.to_string()),
+        ("SESSION_PORT", SESSION_PORT.to_string()),
+        ("SESSION_PEERS", session_peers(&plan.session)),
+        ("SESSION_DEVICES", session_devices_literal(&plan.session)),
     ];
     // The keepalive is the standalone one, without its interpreter line: it is tested by itself, and the
     // same text is used here so the two cannot drift apart.
@@ -724,7 +955,26 @@ struct ReportWire {
     amneziawg: AwgWire,
     hysteria2: Hy2Wire,
     reality: RealityWire,
+    session: SessionWire,
     cores: CoresWire,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionWire {
+    /// The server's session public key, 32 bytes in standard base64. Public.
+    server_public_key: String,
+    port: u16,
+    server_address: Ipv4Addr,
+    devices: Vec<DeviceWire>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeviceWire {
+    address: Ipv4Addr,
+    /// The device key the server was given: ties this report to the script that made it.
+    public_key: String,
 }
 
 #[derive(Deserialize)]
@@ -816,6 +1066,10 @@ pub struct BootstrapReport {
     reality_public_key: RealityPublicKey,
     reality_short_id: Secret,
     reality_uuid: Secret,
+    session_server_public_key: String,
+    session_port: u16,
+    session_server_address: Ipv4Addr,
+    session_devices: Vec<(Ipv4Addr, String)>,
     primary_sha256: String,
     primary_version: String,
     awg_sha256: String,
@@ -926,6 +1180,24 @@ impl BootstrapReport {
             }
         }
 
+        let s = wire.session;
+        if !is_base64_key(&s.server_public_key) {
+            return Err(ReportError::Invalid("session public key"));
+        }
+        if s.port == 0 || s.server_address != SESSION_SERVER {
+            return Err(ReportError::Invalid("session address or port"));
+        }
+        if s.devices.is_empty() || s.devices.len() > MAX_DEVICES {
+            return Err(ReportError::Invalid("session devices"));
+        }
+        let mut session_devices = Vec::with_capacity(s.devices.len());
+        for device in s.devices {
+            if !is_base64_key(&device.public_key) {
+                return Err(ReportError::Invalid("session device key"));
+            }
+            session_devices.push((device.address, device.public_key));
+        }
+
         Ok(Self {
             awg_server_public_key_hex: a.server_public_key_hex,
             awg_port: a.listen_port,
@@ -942,6 +1214,10 @@ impl BootstrapReport {
             reality_public_key,
             reality_short_id: Secret::new(r.short_id),
             reality_uuid: Secret::new(r.uuid),
+            session_server_public_key: s.server_public_key,
+            session_port: s.port,
+            session_server_address: s.server_address,
+            session_devices,
             primary_sha256: wire.cores.primary_core.sha256,
             primary_version: wire.cores.primary_core.version,
             awg_sha256: wire.cores.amneziawg.sha256,
@@ -970,6 +1246,20 @@ impl BootstrapReport {
         if self.awg_client_public_hex != plan.awg_client_public_hex {
             return Err(ReportError::Mismatch("the client key"));
         }
+        // The session: the port, the server's address, and exactly the devices that were asked for, with the
+        // addresses they were to get, in order. A report that lists a device nobody asked for is refused.
+        if self.session_port != SESSION_PORT || self.session_server_address != SESSION_SERVER {
+            return Err(ReportError::Mismatch("the session address"));
+        }
+        let asked: Vec<(Ipv4Addr, &str)> = plan.session.devices().collect();
+        let told: Vec<(Ipv4Addr, &str)> = self
+            .session_devices
+            .iter()
+            .map(|(address, key)| (*address, key.as_str()))
+            .collect();
+        if asked != told {
+            return Err(ReportError::Mismatch("the session devices"));
+        }
         if self.primary_sha256 != plan.cores.primary_core.sha256
             || self.primary_version != plan.cores.primary_core.version
             || self.awg_sha256 != plan.cores.amneziawg.sha256
@@ -980,15 +1270,37 @@ impl BootstrapReport {
         Ok(())
     }
 
-    /// The credentials for the three profiles this endpoint serves. `keys` is the client's own key pair;
-    /// `obfuscation` is the set that was put in the script; `origin` is where probes will fetch from.
+    /// The server's session public key (32 bytes, standard base64). Public.
+    pub fn session_server_public_key(&self) -> &str {
+        &self.session_server_public_key
+    }
+
+    /// The address device number `index` has inside the session, if the server reported that many.
+    pub fn session_device_address(&self, index: usize) -> Option<Ipv4Addr> {
+        self.session_devices.get(index).map(|(address, _)| *address)
+    }
+
+    /// The credentials for the three profiles this endpoint serves, and the session over the carriers. `keys` is
+    /// the client's own AmneziaWG key pair; `session_keys` is this device's session key pair (the device that the
+    /// plan listed first, whose public half went into the script); `obfuscation` is the set that was put in the
+    /// script; `origin` is where probes will fetch from.
     pub fn credentials(
         &self,
         keys: &ClientKeys,
+        session_keys: &SessionKeys,
         obfuscation: ObfuscationParams,
         origin: Option<Origin>,
     ) -> EndpointCredentials {
         EndpointCredentials {
+            session: self
+                .session_devices
+                .first()
+                .map(|(address, _)| SessionBundle {
+                    device_private_key: Secret::new(session_keys.private_b64()),
+                    server_public_key: self.session_server_public_key.clone(),
+                    device_address: *address,
+                    session_port: self.session_port,
+                }),
             amneziawg: Some(AmneziaWgCredentials {
                 client_private_key: PrivateKey::new(keys.private_hex()),
                 server_public_key: self.awg_server_public_key_hex.clone(),

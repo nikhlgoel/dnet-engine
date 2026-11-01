@@ -72,6 +72,54 @@ impl ClientKeys {
     }
 }
 
+/// A device's key pair for the session (ADR-0008): the same curve as [`ClientKeys`], written the way the primary
+/// core takes it, as standard base64 of the 32 bytes. A key pair of its own: the AmneziaWG key is never reused
+/// for another protocol. The private half is wiped on drop and never printed.
+pub struct SessionKeys {
+    private_b64: Zeroizing<String>,
+    public_b64: String,
+}
+
+impl std::fmt::Debug for SessionKeys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "SessionKeys {{ private: <redacted>, public: {} }}",
+            self.public_b64
+        )
+    }
+}
+
+impl SessionKeys {
+    /// A fresh key pair from the operating system's randomness.
+    pub fn generate() -> Result<Self, KeyError> {
+        let mut private = Zeroizing::new([0u8; 32]);
+        getrandom::fill(&mut *private).map_err(|_| KeyError::NoRandomness)?;
+        Ok(Self::from_private(*private))
+    }
+
+    /// The key pair for a given private key (clamped as X25519 requires before the public half is derived).
+    pub fn from_private(private: [u8; 32]) -> Self {
+        use base64::engine::general_purpose::STANDARD;
+        use base64::Engine as _;
+        let public = MontgomeryPoint::mul_base_clamped(private).to_bytes();
+        Self {
+            private_b64: Zeroizing::new(STANDARD.encode(private)),
+            public_b64: STANDARD.encode(public),
+        }
+    }
+
+    /// 44 characters. The secret: it goes into the person's sealed credentials and nowhere else.
+    pub fn private_b64(&self) -> &str {
+        &self.private_b64
+    }
+
+    /// 44 characters. Public: goes to the server.
+    pub fn public_b64(&self) -> &str {
+        &self.public_b64
+    }
+}
+
 /// A uniform number in `low..=high`, from the operating system's randomness.
 fn random_in(low: u32, high: u32) -> Result<u32, KeyError> {
     debug_assert!(low <= high);
@@ -147,6 +195,41 @@ mod tests {
             let keys = ClientKeys::from_private(bytes(private));
             assert_eq!(keys.public_hex(), public);
             assert_eq!(keys.private_hex(), private);
+        }
+    }
+
+    #[test]
+    fn session_keys_are_the_same_curve_in_the_form_the_core_takes() {
+        use base64::engine::general_purpose::STANDARD;
+        use base64::Engine as _;
+        // The RFC 7748 known answers, in standard base64 of the raw 32 bytes.
+        let keys = SessionKeys::from_private(bytes(ALICE_PRIVATE));
+        assert_eq!(keys.public_b64(), STANDARD.encode(bytes(ALICE_PUBLIC)));
+        assert_eq!(keys.private_b64(), STANDARD.encode(bytes(ALICE_PRIVATE)));
+        assert_eq!(keys.public_b64().len(), 44);
+        // One person's two protocols never share a key.
+        let (session, awg) = (
+            SessionKeys::generate().unwrap(),
+            ClientKeys::generate().unwrap(),
+        );
+        assert_ne!(
+            STANDARD.decode(session.public_b64()).unwrap(),
+            bytes(awg.public_hex()).to_vec()
+        );
+    }
+
+    #[test]
+    fn generated_session_keys_are_distinct_and_the_private_half_never_prints() {
+        let (a, b) = (
+            SessionKeys::generate().unwrap(),
+            SessionKeys::generate().unwrap(),
+        );
+        assert_ne!(a.private_b64(), b.private_b64());
+        assert_ne!(a.public_b64(), b.public_b64());
+        for keys in [&a, &b] {
+            let shown = format!("{keys:?}");
+            assert!(!shown.contains(keys.private_b64()), "{shown}");
+            assert!(shown.contains(keys.public_b64()));
         }
     }
 

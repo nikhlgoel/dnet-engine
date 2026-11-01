@@ -324,7 +324,18 @@ impl Provider for MockProvider {
             .lines()
             .find_map(|l| l.strip_prefix("public_key="))
             .unwrap_or_default();
-        Ok(state.bootstrap_output.replace("{CLIENT_PUB}", client_pub))
+        // The same for the session: the devices the script was given, as the server's report lists them.
+        // (`"{SESSION_DEVICES}"` in the scripted output is replaced by that array.)
+        let devices = script
+            .split("\"devices\": [")
+            .nth(1)
+            .and_then(|rest| rest.split("]},").next())
+            .map(|list| format!("[{list}]"))
+            .unwrap_or_else(|| "[]".to_owned());
+        Ok(state
+            .bootstrap_output
+            .replace("{CLIENT_PUB}", client_pub)
+            .replace("\"{SESSION_DEVICES}\"", &devices))
     }
 
     fn install_keepalive(

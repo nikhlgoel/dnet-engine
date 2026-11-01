@@ -65,7 +65,7 @@ fn params() -> JobParams {
 /// What a correctly set-up server prints, for `params`.
 fn report_for(p: &JobParams, edit: impl FnOnce(&mut serde_json::Value)) -> String {
     let mut report = json!({
-        "version": 1,
+        "version": 2,
         "amneziawg": {
             "server_public_key_hex": "d".repeat(64),
             "listen_port": p.ports.amneziawg_udp,
@@ -88,6 +88,13 @@ fn report_for(p: &JobParams, edit: impl FnOnce(&mut serde_json::Value)) -> Strin
             "short_id": "0123456789abcdef",
             "uuid": "bf000d23-0752-40b4-affe-68f7707a9661",
             "flow": "xtls-rprx-vision"
+        },
+        "session": {
+            "server_public_key": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=",
+            "port": 25182,
+            "server_address": "10.9.0.1",
+            // The mock fills this in with the devices the script was given, as a real server would.
+            "devices": "{SESSION_DEVICES}"
         },
         "cores": {
             "primary_core": { "version": p.cores.primary_core.version, "sha256": p.cores.primary_core.sha256 },

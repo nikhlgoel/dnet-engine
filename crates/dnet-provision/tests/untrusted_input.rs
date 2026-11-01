@@ -12,7 +12,9 @@ const SENTINEL: &str = "SENTINEL";
 
 fn good_report() -> String {
     format!(
-        r#"{{"version":1,"amneziawg":{{"server_public_key_hex":"{d}","listen_port":51820,"client_address":"10.66.0.2","prefix_len":24,"client_public_key_hex":"{c}"}},"hysteria2":{{"server_port":44443,"server_name":"edge.example.net","spki_sha256_hex":"{e}","auth_password":"{SENTINEL}-auth-0123456789","obfs_password":"{SENTINEL}-obfs-0123456789","cert_key_algorithm":"ecdsa-p256"}},"reality":{{"server_port":8443,"target_domain":"www.example.com","public_key":"jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0","short_id":"0123456789abcdef","uuid":"bf000d23-0752-40b4-affe-68f7707a9661","flow":"xtls-rprx-vision"}},"cores":{{"primary_core":{{"version":"v1.14.0","sha256":"{a}"}},"amneziawg":{{"version":"v1.14.0","sha256":"{b}"}}}}}}"#,
+        r#"{{"version":2,"amneziawg":{{"server_public_key_hex":"{d}","listen_port":51820,"client_address":"10.66.0.2","prefix_len":24,"client_public_key_hex":"{c}"}},"hysteria2":{{"server_port":44443,"server_name":"edge.example.net","spki_sha256_hex":"{e}","auth_password":"{SENTINEL}-auth-0123456789","obfs_password":"{SENTINEL}-obfs-0123456789","cert_key_algorithm":"ecdsa-p256"}},"reality":{{"server_port":8443,"target_domain":"www.example.com","public_key":"jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0","short_id":"0123456789abcdef","uuid":"bf000d23-0752-40b4-affe-68f7707a9661","flow":"xtls-rprx-vision"}},"session":{{"server_public_key":"{k3}","port":25182,"server_address":"10.9.0.1","devices":[{{"address":"10.9.0.2","public_key":"{k1}"}}]}},"cores":{{"primary_core":{{"version":"v1.14.0","sha256":"{a}"}},"amneziawg":{{"version":"v1.14.0","sha256":"{b}"}}}}}}"#,
+        k1 = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+        k3 = "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=",
         c = "c".repeat(64),
         d = "d".repeat(64),
         e = "e".repeat(64),
