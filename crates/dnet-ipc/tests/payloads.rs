@@ -859,6 +859,7 @@ fn authenticated() -> ClientIdentity {
         sid: "S-1-5-21-1".into(),
         session_id: 9,
         authenticated: true,
+        elevated: false,
     }
 }
 
@@ -867,6 +868,7 @@ fn unauthenticated() -> ClientIdentity {
         sid: String::new(),
         session_id: 0,
         authenticated: false,
+        elevated: false,
     }
 }
 

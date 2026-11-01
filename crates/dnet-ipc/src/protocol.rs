@@ -33,6 +33,9 @@ pub enum RequestClass {
     Mutating,
     /// Needs an authenticated caller.
     Stream,
+    /// Needs an elevated client in the console session (T160): approving a held change. The person
+    /// answers a Windows elevation prompt for it; a program running as the same user cannot.
+    Approval,
 }
 
 /// Every request the service accepts.
@@ -55,6 +58,8 @@ pub enum Request {
     ListProfiles,
     ListRules,
     GetDiagnostics,
+    /// The changes held for approval (T160), with what each would do. Read-only.
+    ListPending,
     Connect {
         /// Explicit consent to a Tier 2 profile (FR-016b).
         acknowledge_tier2: bool,
@@ -131,6 +136,15 @@ pub enum Request {
     },
     StartProvisioning,
     CancelProvisioning,
+    /// Apply a held change (T160). Only an elevated client in the console session may ask; the change
+    /// is exactly the one held under `id`, which the caller cannot alter.
+    ApproveChange {
+        id: String,
+    },
+    /// Drop a held change without applying it (T160). Anyone who may make changes may withdraw one.
+    RejectChange {
+        id: String,
+    },
     Subscribe,
 }
 
@@ -280,7 +294,7 @@ impl Request {
         use Request::*;
         match self {
             GetVersion | GetState | GetSession | GetPaths | GetStats | ListEndpoints
-            | ListProfiles | ListRules | GetDiagnostics => RequestClass::ReadOnly,
+            | ListProfiles | ListRules | GetDiagnostics | ListPending => RequestClass::ReadOnly,
             Subscribe => RequestClass::Stream,
             Connect { .. }
             | Disconnect
@@ -298,7 +312,9 @@ impl Request {
             | PrepareServer { .. }
             | FinishServer { .. }
             | StartProvisioning
-            | CancelProvisioning => RequestClass::Mutating,
+            | CancelProvisioning
+            | RejectChange { .. } => RequestClass::Mutating,
+            ApproveChange { .. } => RequestClass::Approval,
         }
     }
 }
@@ -324,6 +340,14 @@ pub enum IpcError {
     NotConnected,
     #[error("service busy")]
     ServiceBusy,
+    /// The change redirects traffic, so it is held until an elevated client approves it (T160). The
+    /// service applied nothing. `what` names the change in the person's words and `id` is how to
+    /// approve it.
+    #[error(
+        "{what} waits for approval (change {id}). Approve it with `dnetctl approve {id}` and answer \
+         the Windows prompt; it is dropped after ten minutes"
+    )]
+    ApprovalRequired { id: String, what: String },
     #[error("internal error: {detail}")]
     InternalError {
         /// Still actionable; a bare internal error reaching the UI is a defect.
@@ -960,6 +984,26 @@ fn only_fields(value: &Value, allowed: &[&str]) -> Result<(), IpcError> {
     Ok(())
 }
 
+/// The longest a held change's name may be on the wire.
+pub const CHANGE_ID_MAX: usize = 32;
+
+/// A held change's id: short, lower-case letters and digits, so it can be typed and never carries
+/// anything else. It names a change; it is not a secret, because approval needs elevation, not the id.
+fn parse_change_id(text: &str) -> Result<String, IpcError> {
+    let good = !text.is_empty()
+        && text.len() <= CHANGE_ID_MAX
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
+    if good {
+        Ok(text.to_owned())
+    } else {
+        Err(invalid(
+            "`id` must be 1 to 32 lower-case letters and digits, as shown with the change",
+        ))
+    }
+}
+
 /// Decode a request from its wire JSON: `{ "request": "<Name>", <fields> }`.
 ///
 /// Every field is validated server-side; the caller is treated as hostile input
@@ -981,6 +1025,7 @@ pub fn decode_request(wire: &str) -> Result<Request, IpcError> {
         "ListProfiles" => Request::ListProfiles,
         "ListRules" => Request::ListRules,
         "GetDiagnostics" => Request::GetDiagnostics,
+        "ListPending" => Request::ListPending,
         "Connect" => Request::Connect {
             acknowledge_tier2: optional_flag(&value, "acknowledge_tier2")?,
             profile: optional_string(&value, "profile")?
@@ -1116,6 +1161,18 @@ pub fn decode_request(wire: &str) -> Result<Request, IpcError> {
         }
         "StartProvisioning" => Request::StartProvisioning,
         "CancelProvisioning" => Request::CancelProvisioning,
+        "ApproveChange" => {
+            only_fields(&value, &["request", "id"])?;
+            Request::ApproveChange {
+                id: parse_change_id(field_str(&value, "id")?)?,
+            }
+        }
+        "RejectChange" => {
+            only_fields(&value, &["request", "id"])?;
+            Request::RejectChange {
+                id: parse_change_id(field_str(&value, "id")?)?,
+            }
+        }
         "Subscribe" => Request::Subscribe,
         other => return Err(invalid(format!("unknown request {other:?}"))),
     };
@@ -1135,6 +1192,7 @@ pub fn encode_request(request: &Request) -> String {
         Request::ListProfiles => "ListProfiles",
         Request::ListRules => "ListRules",
         Request::GetDiagnostics => "GetDiagnostics",
+        Request::ListPending => "ListPending",
         Request::Connect { .. } => "Connect",
         Request::Disconnect => "Disconnect",
         Request::AddEndpoint(_) => "AddEndpoint",
@@ -1152,6 +1210,8 @@ pub fn encode_request(request: &Request) -> String {
         Request::FinishServer { .. } => "FinishServer",
         Request::StartProvisioning => "StartProvisioning",
         Request::CancelProvisioning => "CancelProvisioning",
+        Request::ApproveChange { .. } => "ApproveChange",
+        Request::RejectChange { .. } => "RejectChange",
         Request::Subscribe => "Subscribe",
     };
     let mut object = Map::new();
@@ -1245,6 +1305,9 @@ pub fn encode_request(request: &Request) -> String {
         Request::RemoveRule { rule } => {
             object.insert("rule".into(), Value::String(rule.to_string()));
         }
+        Request::ApproveChange { id } | Request::RejectChange { id } => {
+            object.insert("id".into(), Value::String(id.clone()));
+        }
         Request::DisableBrutal { profile } => {
             object.insert("profile".into(), Value::String(profile.as_str().to_owned()));
         }
@@ -1270,6 +1333,7 @@ fn error_code(error: &IpcError) -> &'static str {
         IpcError::CapacityUnavailable => "CapacityUnavailable",
         IpcError::NotConnected => "NotConnected",
         IpcError::ServiceBusy => "ServiceBusy",
+        IpcError::ApprovalRequired { .. } => "ApprovalRequired",
         IpcError::InternalError { .. } => "InternalError",
     }
 }

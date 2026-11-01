@@ -32,8 +32,9 @@ The privilege boundary lives here. `dnet-tray` is unprivileged; `dnetd` is Local
 
 | Class | Requests | Authorization |
 |---|---|---|
-| **Read-only** | `GetVersion`, `GetState`, `GetSession`, `GetPaths`, `GetStats`, `ListEndpoints`, `ListProfiles`, `ListRules`, `GetDiagnostics` | Authenticated caller |
-| **Mutating** | `Connect`, `Disconnect`, `AddEndpoint`, `RemoveEndpoint`, `SetEndpointEnabled`, `AddRule`, `RemoveRule`, `SetProfileParams`, `EnableBrutal`, `DisableBrutal`, `SetEncryptedDnsHandling`, `StartProvisioning`, `CancelProvisioning` | Interactive console user |
+| **Read-only** | `GetVersion`, `GetState`, `GetSession`, `GetPaths`, `GetStats`, `ListEndpoints`, `ListProfiles`, `ListRules`, `GetDiagnostics`, `ListPending` | Authenticated caller |
+| **Mutating** | `Connect`, `Disconnect`, `AddEndpoint`, `RemoveEndpoint`, `SetEndpointEnabled`, `AddRule`, `RemoveRule`, `SetProfileParams`, `EnableBrutal`, `DisableBrutal`, `SetEncryptedDnsHandling`, `StartProvisioning`, `CancelProvisioning`, `RejectChange` | Interactive console user |
+| **Approval** | `ApproveChange` | An **elevated** client in the console session (any account: a standard user who types an administrator's credentials into the Windows prompt runs the approver as that administrator) |
 | **Stream** | `Subscribe` | Authenticated caller |
 
 ---
@@ -337,6 +338,40 @@ are compiled in, and a request that names a place is refused.
   no more than 256 KiB; then the same verification and trial generation as an import.
 - A build with no trust anchor answers `InternalError` "not available in this build yet".
 
+### Changes held for approval (T160, IPC-27; ADR-0008 F13)
+
+A request that changes where traffic goes is **held**, not applied, until an elevated client approves it:
+`AddEndpoint`, `FinishServer`, `SetEndpointEnabled` with `enabled: true`, `AddRule` with `action: "bypass"` and
+`ImportFeed`. Everything that can only tighten the connection (removing or turning off a server, a rule that
+tunnels, captures or rejects, the encrypted-DNS choice, Brutal) is applied as before. The refusal is the error
+`ApprovalRequired`; **nothing was applied**:
+
+```jsonc
+{ "error": "ApprovalRequired", "retryable": false,
+  "detail": "Adding the server \"home\" at 203.0.113.9 waits for approval (change a1b2c3d4). Approve it with `dnetctl approve a1b2c3d4` and answer the Windows prompt; it is dropped after ten minutes" }
+```
+
+```jsonc
+{ "request": "ListPending" }                       // -> { "pending": [ { "id": "a1b2c3d4", "what": "Adding the server ...",
+                                                   //                     "proposed_unix_ms": 0, "expires_unix_ms": 600000 } ] }
+{ "request": "ApproveChange", "id": "a1b2c3d4" }   // -> the reply the held request would have had (Approval class)
+{ "request": "RejectChange",  "id": "a1b2c3d4" }   // -> { "applied": true }                         (Mutating class)
+```
+
+- The `id` is 1 to 32 lower-case letters and digits. It names a change; it is **not** a secret, because approval
+  is decided by the caller's token and not by knowing the id. Both requests carry nothing else: the change applied
+  is exactly the one held, never one the caller sends.
+- A change waits **ten minutes**, at most **eight** wait at once (a ninth is `InvalidRequest`, so a flood cannot
+  push out the one a person is looking at), and asking again for exactly the same change returns the same id
+  without extending its time.
+- A change that fails when approved (a connection is up, a name is taken) stays held until it expires, so the
+  person need not ask again.
+- `what` is for the person, built by the service from cleaned text; the credentials a held request carries never
+  appear in `ListPending`.
+- `ApproveChange` is refused as `Unauthorized` unless the client's token is elevated **as the service reads it**
+  (`TokenElevation`); a client's own claim counts for nothing. The reply names the cause, and the service is
+  not asked.
+
 ### `Subscribe → stream<ConnectionEvent>`
 
 Every event carries `because`. Event variants mirror `ConnectionEvent` in
@@ -416,7 +451,8 @@ contain that domain.
 
 ```jsonc
 { "error": "Unauthorized" | "InvalidRequest" | "TierDowngradeRequiresConsent"
-          | "CapacityUnavailable" | "NotConnected" | "ServiceBusy" | "InternalError",
+          | "CapacityUnavailable" | "NotConnected" | "ServiceBusy" | "InternalError"
+          | "ApprovalRequired",
   "detail": "human-readable, actionable",
   "retryable": true }
 ```
@@ -457,3 +493,4 @@ defect.
 | IPC-24 | `EnableBrutal` names a profile, both directions and the warning revision shown, and `DisableBrutal` a profile; both are Mutating, strict, bounded (1 to 1,000,000 Mbit/s), accept only the warning in force, round-trip, and never repeat what was sent; (daemon) only a Hysteria 2 profile, idle only, saved with the service's time, nothing changed on failure. |
 | IPC-23 | `ImportFeed` carries the keys document, the feed, or both, each within the size cap, and nothing else; an unknown field is refused without being repeated. |
 | IPC-15 | `GetVersion` is answered by the dispatch itself for any authenticated caller, never reaches the service, and tells an unauthenticated caller nothing; the reply has exactly the contracted keys; a client refuses a reply that is malformed, out of range, or from a service that predates the request. |
+| IPC-27 | The three new requests have the classes the design gives them; the console user **without** elevation cannot approve and the service is never asked; an elevated client in the console session can, whatever its account; an elevated client in another session cannot; withdrawing and listing need no elevation; ids that are not short plain names, and any extra field, are refused; the held reply names what waits, the change id and the command that approves it. (daemon) a held change is not applied or saved, approving applies exactly it once, a withdrawn one never applies, the same change twice is one change, tightening changes are not held, at most eight wait, and the list shows no credential. |

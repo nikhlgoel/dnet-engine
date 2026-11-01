@@ -17,8 +17,9 @@ use windows::Win32::Security::Authorization::{
     SDDL_REVISION_1, SE_FILE_OBJECT,
 };
 use windows::Win32::Security::{
-    GetTokenInformation, RevertToSelf, TokenSessionId, TokenUser, OWNER_SECURITY_INFORMATION,
-    PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
+    GetTokenInformation, RevertToSelf, TokenElevation, TokenSessionId, TokenUser,
+    OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, TOKEN_ELEVATION,
+    TOKEN_QUERY, TOKEN_USER,
 };
 use windows::Win32::System::Pipes::ImpersonateNamedPipeClient;
 use windows::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
@@ -134,10 +135,13 @@ unsafe fn read_impersonated_identity() -> Option<ClientIdentity> {
         let sid = token_user_sid(token)?;
         let session_id = token_session_id(token).unwrap_or(0);
         let authenticated = sid != ANONYMOUS_SID && !sid.is_empty();
+        // Read, never asked: a client that cannot be read is not elevated (fail closed).
+        let elevated = authenticated && token_is_elevated(token);
         Some(ClientIdentity {
             sid,
             session_id,
             authenticated,
+            elevated,
         })
     })();
 
@@ -221,6 +225,25 @@ pub fn pipe_owner_sid(handle: RawHandle) -> Option<String> {
     }
 }
 
+/// Whether the token is elevated: the process was started with the administrator's full rights, which
+/// Windows grants only after the person answers the elevation prompt (T160). A standard user's token
+/// and an administrator's filtered (unelevated) token both say no.
+///
+/// SAFETY: `token` is an open access token handle with `TOKEN_QUERY`.
+unsafe fn token_is_elevated(token: HANDLE) -> bool {
+    let mut elevation = TOKEN_ELEVATION::default();
+    let mut needed = 0u32;
+    GetTokenInformation(
+        token,
+        TokenElevation,
+        Some(&mut elevation as *mut TOKEN_ELEVATION as *mut c_void),
+        std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+        &mut needed,
+    )
+    .is_ok()
+        && elevation.TokenIsElevated != 0
+}
+
 /// SAFETY: `token` is an open access token handle with `TOKEN_QUERY`.
 unsafe fn token_session_id(token: HANDLE) -> Option<u32> {
     let mut session_id = 0u32;
@@ -241,5 +264,6 @@ fn unauthenticated() -> ClientIdentity {
         sid: String::new(),
         session_id: 0,
         authenticated: false,
+        elevated: false,
     }
 }
