@@ -514,6 +514,40 @@ impl<W: NetworkWatch> Loop<W> {
     }
 }
 
+/// T162 — tell the loop when the machine was frozen (a sleep the system did not announce).
+///
+/// Ticks every `period`; when a tick comes much later than it should on either of the two clocks
+/// `clocks` reads (monotonic, then wall, each as time since any fixed point), everything known about
+/// the network is stale, so one change is sent, which makes the loop read the paths and measure them
+/// again, exactly as it does when the system reports a change. The system's own power messages are
+/// not relied on (`dnet_core::tick_gap`). Ends when the receiver is gone.
+pub async fn report_gaps(
+    changes: mpsc::Sender<()>,
+    period: Duration,
+    mut clocks: impl FnMut() -> (Duration, Duration),
+) {
+    let mut detector =
+        dnet_core::tick_gap::TickGap::new(period, dnet_core::tick_gap::DEFAULT_TOLERANCE);
+    let mut ticker = tokio::time::interval(period);
+    // A tick that was missed is not made up with a burst: the point is the gap itself.
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            () = changes.closed() => return,
+            _ = ticker.tick() => {}
+        }
+        let (monotonic, wall) = clocks();
+        if let Some(gap) = detector.tick(monotonic, wall) {
+            tracing::info!(
+                late_secs = gap.late_by.as_secs(),
+                "the machine was not running for a while; the network is looked at again"
+            );
+            // Full means a change is already waiting to be read, which is as good.
+            let _ = changes.try_send(());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1289,5 +1323,97 @@ mod tests {
             snap.paths.iter().all(|p| !p.measured),
             "nothing is probed for an observed profile, so nothing is called measured"
         );
+    }
+
+    // ------------------------------------------------------------------ T162: a frozen machine
+
+    /// Clocks that advance one second per tick, except that the machine "sleeps" for `jump` seconds
+    /// before tick number `at` (counting from 1): both clocks, or only the wall clock.
+    fn scripted_clocks(
+        at: u64,
+        jump: u64,
+        wall_only: bool,
+    ) -> impl FnMut() -> (Duration, Duration) {
+        let mut tick = 0u64;
+        let (mut mono, mut wall) = (0u64, 1_000_000u64);
+        move || {
+            tick += 1;
+            mono += 1;
+            wall += 1;
+            if tick == at {
+                wall += jump;
+                if !wall_only {
+                    mono += jump;
+                }
+            }
+            (Duration::from_secs(mono), Duration::from_secs(wall))
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_frozen_machine_makes_the_loop_look_at_the_network_again_once() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let task = tokio::spawn(report_gaps(
+            tx,
+            Duration::from_secs(1),
+            scripted_clocks(10, 600, false),
+        ));
+
+        // Nothing for the nine steady ticks; then one change for the gap.
+        assert!(tokio::time::timeout(Duration::from_secs(8), rx.recv())
+            .await
+            .is_err());
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), rx.recv()).await,
+            Ok(Some(()))
+        );
+        // And no second one while time passes normally.
+        assert!(tokio::time::timeout(Duration::from_secs(60), rx.recv())
+            .await
+            .is_err());
+        task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_sleep_only_the_wall_clock_counted_is_noticed_too() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let task = tokio::spawn(report_gaps(
+            tx,
+            Duration::from_secs(1),
+            scripted_clocks(3, 1_800, true),
+        ));
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), rx.recv()).await,
+            Ok(Some(()))
+        );
+        task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_machine_that_never_freezes_never_sends_a_change() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let task = tokio::spawn(report_gaps(
+            tx,
+            Duration::from_secs(1),
+            scripted_clocks(u64::MAX, 0, false),
+        ));
+        assert!(tokio::time::timeout(Duration::from_secs(600), rx.recv())
+            .await
+            .is_err());
+        task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_watcher_ends_when_nobody_is_listening() {
+        let (tx, rx) = mpsc::channel(1);
+        let task = tokio::spawn(report_gaps(
+            tx,
+            Duration::from_secs(1),
+            scripted_clocks(u64::MAX, 0, false),
+        ));
+        drop(rx);
+        assert!(tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .is_ok());
     }
 }

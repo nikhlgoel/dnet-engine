@@ -72,6 +72,8 @@ mod portal_probe;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod recovery;
 #[cfg_attr(not(windows), allow(dead_code))]
+mod resume;
+#[cfg_attr(not(windows), allow(dead_code))]
 mod service_impl;
 #[cfg(test)]
 mod session_e2e;

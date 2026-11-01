@@ -15,7 +15,8 @@ use std::ffi::OsString;
 use std::time::Duration;
 
 use windows_service::service::{
-    ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus, ServiceType,
+    PowerEventParam, ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState,
+    ServiceStatus, ServiceType,
 };
 use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
 use windows_service::{define_windows_service, service_dispatcher};
@@ -49,6 +50,18 @@ fn run() -> anyhow::Result<()> {
             let _ = shutdown_tx.send(());
             ServiceControlHandlerResult::NoError
         }
+        // The machine woke (T162): every network watch looks again. These messages are one of two
+        // signals; on Modern Standby they are not dependable, which is why the time gap is the other.
+        ServiceControl::PowerEvent(
+            PowerEventParam::ResumeAutomatic
+            | PowerEventParam::ResumeSuspend
+            | PowerEventParam::ResumeCritical,
+        ) => {
+            crate::resume::announce();
+            ServiceControlHandlerResult::NoError
+        }
+        // Other power events (battery, a setting) are acknowledged and left alone.
+        ServiceControl::PowerEvent(_) => ServiceControlHandlerResult::NoError,
         ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
         _ => ServiceControlHandlerResult::NotImplemented,
     };
@@ -77,7 +90,9 @@ fn run() -> anyhow::Result<()> {
     // cut the tunnel off mid-way, leaving the next start's recovery to restore what it left.
     report(
         ServiceState::Running,
-        ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
+        ServiceControlAccept::STOP
+            | ServiceControlAccept::SHUTDOWN
+            | ServiceControlAccept::POWER_EVENT,
         Duration::default(),
     )?;
     tracing::info!("dnetd running as a Windows service");

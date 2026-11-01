@@ -264,6 +264,15 @@ impl SessionProbe for OriginProbe<'_> {
     }
 }
 
+/// [`OriginProbe`] that owns its origin, for a task that outlives the call that made it.
+pub struct OwnedOriginProbe(pub Origin);
+
+impl SessionProbe for OwnedOriginProbe {
+    async fn attempt(&self) -> bool {
+        OriginProbe(&self.0).attempt().await
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NudgePlan {
     /// Between the starts of two attempts.

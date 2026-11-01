@@ -36,6 +36,8 @@ pub struct WatchSetup {
     pub endpoint_ip: Option<Ipv4Addr>,
     /// The endpoint's TCP port, when it serves one, to aim a probe at.
     pub endpoint_tcp: Option<SocketAddrV4>,
+    /// The session's measurement origin, when the connection is a session: what a resume nudges (T162).
+    pub session_origin: Option<dnet_core::origin::Origin>,
 }
 
 pub struct WindowsWatch {
@@ -50,6 +52,31 @@ impl WindowsWatch {
     /// has ended is not an error to it.
     pub fn start(setup: WatchSetup, tunnels: Arc<Tunnels<WindowsHost>>) -> Self {
         let (tx, changes) = mpsc::channel(1);
+        // A sleep the system did not announce still makes the loop look again (T162).
+        {
+            let started = std::time::Instant::now();
+            tokio::spawn(crate::netwatch::report_gaps(
+                tx.clone(),
+                Duration::from_secs(1),
+                move || {
+                    let wall = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default();
+                    (started.elapsed(), wall)
+                },
+            ));
+        }
+        // The system's own word that the machine resumed (T162): the same look at the network, and
+        // a nudge of the session so a carrier that died in the sleep is made again at once.
+        tokio::spawn(crate::resume::forward_resumes(
+            crate::resume::subscribe(),
+            tx.clone(),
+            setup
+                .session_origin
+                .clone()
+                .map(crate::session_switch::OwnedOriginProbe),
+            crate::resume::nudge_plan_after_resume(),
+        ));
         match ChangeSource::start() {
             Ok((source, mut raw)) => {
                 // `settled` is not cancel-safe (it counts events as it goes), so it runs here, on

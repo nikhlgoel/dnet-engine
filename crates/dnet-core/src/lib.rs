@@ -40,5 +40,6 @@ pub mod rule_eval;
 pub mod selection;
 pub mod session;
 pub mod telemetry;
+pub mod tick_gap;
 pub mod tier;
 pub mod transport_params;
