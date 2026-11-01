@@ -33,6 +33,12 @@ pub trait CoreRuntime {
     /// Terminate a supervised core.
     async fn kill_core(&self, core: CoreBinding) -> Result<(), SupervisorError>;
 
+    /// The process id of a running core, if this runtime knows it. The default knows none, which makes a check
+    /// that needs it (confirming who listens on the core's control port) refuse instead of guess.
+    async fn core_pid(&self, _core: CoreBinding) -> Option<u32> {
+        None
+    }
+
     /// Replay every outstanding undo record, restoring routing/DNS/adapter state
     /// (SUP-04, data-model §Cross-cutting 1).
     async fn replay_undo(&self) -> Result<(), SupervisorError>;

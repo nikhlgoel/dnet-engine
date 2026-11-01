@@ -132,6 +132,14 @@ pub fn spawn(command: &CoreCommand) -> Result<RunningCore, SupervisorError> {
         core: command.core,
         detail: e.to_string(),
     })?;
+    // A core must not outlive the service even if the service is killed or crashes (T163).
+    #[cfg(windows)]
+    if let Some(process) = child.raw_handle() {
+        crate::job::bind_to_service_lifetime(
+            windows::Win32::Foundation::HANDLE(process),
+            &format!("{:?}", command.core),
+        );
+    }
 
     let (tx, rx) = oneshot::channel();
     let signal: ReadySignal = Arc::new(Mutex::new(Some(tx)));
@@ -243,6 +251,16 @@ mod tests {
             ready_marker: marker.map(str::to_string),
             ready_timeout: Duration::from_secs(5),
         }
+    }
+
+    /// A spawned core is in the service's job, so the system ends it when the service's process ends.
+    #[tokio::test]
+    async fn a_spawned_core_is_held_by_the_services_job() {
+        let core = spawn(&cmd("Start-Sleep -Seconds 60", None)).unwrap();
+        let process = core.child.raw_handle().expect("a running process");
+        assert!(crate::job::service_job_holds(
+            windows::Win32::Foundation::HANDLE(process)
+        ));
     }
 
     #[tokio::test]
