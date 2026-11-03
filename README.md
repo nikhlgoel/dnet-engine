@@ -7,8 +7,12 @@ campus network, a hostel, a café. It sends your traffic through a server **you*
 of several connection methods works on the network you are on, and it keeps the connection going when
 the network under it changes.
 
-> **Working name.** The product's release name is not decided. "DNet Engine" is what this repository
-> calls it.
+> **A free, open-source project**, made first for its author and friends and open to anyone who finds
+> it. "DNet Engine" names the technology. The finished program may get a different name; that would
+> change only what people see, not the engine's own names (the service, the pipe, the data folder),
+> which stay ([ADR-0009](docs/adr/0009-product-identity-and-identifiers.md)).
+> A one-page summary of what it does and does not do is at
+> [nikhlgoel.github.io/dnet-engine](https://nikhlgoel.github.io/dnet-engine/) (source in [`site/`](site/)).
 
 ## What it is, and what it is not
 

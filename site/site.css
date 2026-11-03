@@ -1,0 +1,309 @@
+/* The project's website. Every colour, size and space comes from tokens.css (the app's own design tokens,
+   copied in by the deploy workflow), so the page and the application look like one thing. No scripts, no
+   web fonts, nothing loaded from another site. */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+  scroll-padding-top: 4.5rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+}
+
+body {
+  margin: 0;
+  background: var(--c-base);
+  color: var(--c-text);
+  font-family: var(--font-ui);
+  font-size: var(--fs-lg);
+  line-height: var(--lh-body);
+}
+
+.wrap {
+  width: 100%;
+  max-width: 62rem;
+  margin-inline: auto;
+  padding-inline: var(--s-4);
+}
+
+a {
+  color: var(--c-text);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.2em;
+}
+
+a:hover {
+  text-decoration-thickness: 2px;
+}
+
+:focus-visible {
+  outline: 2px solid var(--c-focus);
+  outline-offset: 3px;
+  border-radius: var(--r-ctl);
+}
+
+.skip {
+  position: absolute;
+  inset-inline-start: var(--s-4);
+  inset-block-start: -4rem;
+  padding: var(--s-2) var(--s-3);
+  background: var(--c-paper);
+  color: var(--c-on-paper);
+  border-radius: var(--r-ctl);
+  z-index: 10;
+}
+
+.skip:focus {
+  inset-block-start: var(--s-3);
+}
+
+/* ---- header ---------------------------------------------------------------------------------- */
+.top {
+  position: sticky;
+  inset-block-start: 0;
+  z-index: 5;
+  background: var(--c-base);
+  border-block-end: 1px solid var(--c-line);
+}
+
+.bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2) var(--s-5);
+  padding-block: var(--s-3);
+}
+
+.brand {
+  font-family: var(--font-display);
+  font-size: var(--fs-xl);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.top nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-1) var(--s-4);
+}
+
+.top nav a {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--hit);
+  color: var(--c-text-2);
+  font-size: var(--fs-md);
+  text-decoration: none;
+}
+
+.top nav a:hover {
+  color: var(--c-text);
+  text-decoration: underline;
+}
+
+/* ---- sections -------------------------------------------------------------------------------- */
+section {
+  padding-block: var(--s-6);
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--font-display);
+  line-height: var(--lh-tight);
+  margin: 0 0 var(--s-3);
+}
+
+h1 {
+  font-size: clamp(1.75rem, 4.5vw + 0.5rem, 2.75rem);
+  max-width: 22ch;
+}
+
+h2 {
+  font-size: var(--fs-2xl);
+}
+
+h3 {
+  font-size: var(--fs-xl);
+}
+
+p {
+  margin: 0 0 var(--s-4);
+  max-width: 68ch;
+}
+
+.kicker {
+  color: var(--c-text-2);
+  font-size: var(--fs-md);
+  margin-block-end: var(--s-3);
+}
+
+.lede {
+  font-size: var(--fs-xl);
+  color: var(--c-text-2);
+}
+
+.hero {
+  padding-block: var(--s-7) var(--s-6);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-3);
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--hit);
+  padding: var(--s-2) var(--s-4);
+  background: var(--c-paper);
+  color: var(--c-on-paper);
+  border: 1px solid var(--c-paper);
+  border-radius: var(--r-ctl);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.btn:hover {
+  text-decoration: underline;
+}
+
+.btn.ghost {
+  background: transparent;
+  color: var(--c-text);
+  border-color: var(--c-line-strong);
+}
+
+.note {
+  margin-block-start: var(--s-5);
+  padding: var(--s-3) var(--s-4);
+  background: var(--c-card);
+  border: 1px solid var(--c-line);
+  border-inline-start: 4px solid var(--c-probe);
+  border-radius: var(--r-ctl);
+}
+
+/* ---- cards and limits ------------------------------------------------------------------------ */
+.cards {
+  list-style: none;
+  margin: var(--s-4) 0 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 17rem), 1fr));
+  gap: var(--s-4);
+}
+
+.cards li {
+  padding: var(--s-4);
+  background: var(--c-card);
+  border: 1px solid var(--c-line);
+  border-radius: var(--r-card);
+}
+
+.cards h3 {
+  font-size: var(--fs-lg);
+}
+
+.cards p {
+  margin: 0;
+  color: var(--c-text-2);
+  font-size: var(--fs-md);
+}
+
+.limits {
+  margin: var(--s-4) 0 0;
+  display: grid;
+  gap: var(--s-3);
+}
+
+.limits > div {
+  padding: var(--s-3) var(--s-4);
+  background: var(--c-card);
+  border: 1px solid var(--c-line);
+  border-inline-start: 4px solid var(--c-warn);
+  border-radius: var(--r-ctl);
+}
+
+.limits dt {
+  font-weight: 600;
+  margin-block-end: var(--s-1);
+}
+
+.limits dd {
+  margin: 0;
+  color: var(--c-text-2);
+  max-width: 68ch;
+}
+
+/* ---- table ----------------------------------------------------------------------------------- */
+.table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--c-line);
+  border-radius: var(--r-card);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-md);
+}
+
+th,
+td {
+  padding: var(--s-3) var(--s-4);
+  text-align: start;
+  vertical-align: top;
+  border-block-end: 1px solid var(--c-line);
+}
+
+th {
+  background: var(--c-card);
+  color: var(--c-text-2);
+  font-weight: 600;
+}
+
+tbody tr:last-child td {
+  border-block-end: 0;
+}
+
+td:last-child {
+  color: var(--c-text-2);
+}
+
+.plain {
+  padding-inline-start: var(--s-5);
+  margin: 0 0 var(--s-4);
+}
+
+.plain li {
+  margin-block-end: var(--s-2);
+}
+
+/* ---- footer ---------------------------------------------------------------------------------- */
+.foot {
+  margin-block-start: var(--s-6);
+  padding-block: var(--s-5);
+  border-block-start: 1px solid var(--c-line);
+  color: var(--c-text-2);
+  font-size: var(--fs-md);
+}
+
+.foot p {
+  margin-block-end: var(--s-2);
+}
+
+.foot a {
+  color: var(--c-text);
+}

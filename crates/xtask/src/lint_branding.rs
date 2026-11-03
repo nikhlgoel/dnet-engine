@@ -39,7 +39,7 @@ fn forbidden_terms() -> Vec<String> {
 }
 
 /// Surfaces the obligation actually covers: anything user-facing or promotional.
-const LINTED_ROOTS: &[&str] = &["apps", "installer", "crates", "vendor"];
+const LINTED_ROOTS: &[&str] = &["apps", "installer", "crates", "vendor", "site"];
 const LINTED_ROOT_FILES: &[&str] = &["README.md"];
 
 /// Attribution is required, so these surfaces are allowed to name the vendors.
