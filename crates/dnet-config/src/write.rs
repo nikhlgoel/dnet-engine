@@ -416,6 +416,26 @@ mod private_dir_tests {
     /// The helper the tests above rely on really does what they assume. Elevated, a new directory is owned
     /// by `BA` (Administrators); after the helper it must be owned by the user's own account, which is what
     /// makes the refusal tests mean the same thing in every shell.
+    /// Whether the owner in an SDDL string is one account rather than a group. An ordinary account prints as its
+    /// SID (`O:S-1-...`); the built-in Administrator account, which is what a CI runner signs in as, prints as the
+    /// alias `LA`. Groups and the system account (`BA`, `SY`, `WD`) are what a directory someone else
+    /// pre-created must not be owned by, and they are not accounts.
+    fn owner_is_an_account(sddl: &str) -> bool {
+        sddl.starts_with("O:S-1-") || sddl.starts_with("O:LA")
+    }
+
+    #[test]
+    fn an_account_owner_is_told_from_a_group_owner() {
+        assert!(owner_is_an_account("O:S-1-5-21-1-2-3-1001D:P(A;;FA;;;SY)"));
+        assert!(
+            owner_is_an_account("O:LAD:(A;OICIID;FA;;;SY)"),
+            "the built-in Administrator account, which is what a CI runner signs in as"
+        );
+        assert!(!owner_is_an_account("O:BAD:P(A;;FA;;;SY)"), "a group");
+        assert!(!owner_is_an_account("O:SYD:P(A;;FA;;;SY)"), "SYSTEM");
+        assert!(!owner_is_an_account("O:WDD:"), "Everyone");
+    }
+
     #[test]
     fn the_owner_helper_leaves_an_ordinary_user_as_the_owner() {
         let root = tempfile::tempdir().unwrap();
@@ -427,8 +447,8 @@ mod private_dir_tests {
         let sddl = read_owner_and_dacl_sddl(&dir).unwrap();
         cleanup(&dir);
         assert!(
-            sddl.starts_with("O:S-1-"),
-            "owned by an account's own SID, not a group alias: {sddl}"
+            owner_is_an_account(&sddl),
+            "owned by an account, not a group alias: {sddl}"
         );
         assert!(
             !sddl.starts_with("O:SY") && !sddl.starts_with("O:BA"),
