@@ -34,6 +34,7 @@ pub mod probe_plan;
 pub mod profile;
 pub mod profile_start;
 pub mod quality;
+pub mod registry;
 pub mod reprobe;
 pub mod rule;
 pub mod rule_eval;
