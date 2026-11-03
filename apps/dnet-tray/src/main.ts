@@ -12,8 +12,9 @@ async function bridge() {
     return createTauriBridge();
   }
   // A browser tab with no service behind it: the design's own scenarios, so the window can be developed and
-  // looked at. Never reached inside the real app, which has `__TAURI_INTERNALS__`.
-  const mock = createMockBridge({ initial: { state: 'ok', networks: 'two' }, disclosed: true });
+  // looked at. Never reached inside the real app, which has `__TAURI_INTERNALS__`. New servers and rules that send
+  // traffic around the tunnel wait for approval, as the installed service makes them (T160).
+  const mock = createMockBridge({ initial: { state: 'ok', networks: 'two' }, disclosed: true, holdChanges: true });
   // In development only (the condition is false in a production build, so this is removed from it): the mock
   // can be driven from the console, e.g. `__dnetMock.set({ state: 'fail', cause: 'NoUsablePath' })`.
   if (import.meta.env.DEV) (window as unknown as { __dnetMock: unknown }).__dnetMock = mock;
