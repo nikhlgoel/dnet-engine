@@ -183,6 +183,8 @@ pub(crate) fn build_service() -> std::sync::Arc<service_impl::DnetService> {
     // recovery, and only through an orchestrator that recovery allowed to exist.
     service.resume_if_left_on();
     let service = std::sync::Arc::new(service);
+    // Record what each part of the connection is doing, once a second, so the parts' ages are true (T170).
+    service.keep_components_current();
     // And keep trying while it is left on and down (T148): on a timer, and sooner when the network
     // changes. The change registration lives as long as the retries do.
     match dnet_netstate::notify::ChangeSource::start() {

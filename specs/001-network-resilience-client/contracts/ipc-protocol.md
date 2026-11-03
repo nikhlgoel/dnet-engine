@@ -217,8 +217,9 @@ that predates it answers `InvalidRequest` "unknown request", which a client show
   `dnet_core::registry::roll_up` a client can run), and a decoder refuses a reply whose `overall` differs: Ok over a Failed part,
   or Ok over no parts, contradicts itself. A part the decoder would refuse (an id empty once cleaned or too long, a reason too
   long) is left out by the service, so one odd part cannot make a client refuse the whole reply.
-- **Age is counted from the first time a reader saw the state** (the service records readings when asked). Recording on every
-  state change, so the age is the true moment, is the next step of T170.
+- **Age is counted from the moment the service first saw the state.** The service looks at its facts once a second for as long
+  as it runs (and again when asked), so `changed_ago_ms` is the real age to within a second, whether or not anyone asked.
+  A state that flips and flips back inside one second is not seen.
 
 ### Setting up the person's own server (T150, IPC-26)
 

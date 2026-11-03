@@ -325,6 +325,47 @@ impl DnetService {
         ))
     }
 
+    /// Look at the connection and the networks now and record what each part is doing (T170). The facts are the ones
+    /// `GetComponents` answers from; this is what makes a part's age the real moment it changed, not the moment a
+    /// client first asked.
+    pub(crate) fn refresh_components(&self) {
+        let orchestrator = self.orchestrator();
+        let snapshot = match &orchestrator {
+            Some(orchestrator) => orchestrator.snapshot(),
+            // The guard is gone by the end of this statement: it is never held while the tracker is locked.
+            None => self
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .idle_snapshot(),
+        };
+        let paths = orchestrator
+            .as_ref()
+            .and_then(|o| o.paths())
+            .unwrap_or_default();
+        self.components
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .refresh(&snapshot, &paths);
+    }
+
+    /// Keep the parts' states recorded once a second for as long as the service exists (T170). It holds the service
+    /// weakly, so it ends with it.
+    #[cfg_attr(not(windows), allow(dead_code))] // Started on Windows; the tests start it too.
+    pub fn keep_components_current(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
+        let weak = Arc::downgrade(self);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+            loop {
+                tick.tick().await;
+                let Some(service) = weak.upgrade() else {
+                    return;
+                };
+                service.refresh_components();
+            }
+        })
+    }
+
     fn remember(&self, profile: Option<&dnet_core::ids::ProfileId>) {
         if let Some(Err(error)) = self.intent.as_ref().map(|i| i.remember_on(profile)) {
             tracing::warn!(%error, "the connection will not be resumed after a restart: it could not be remembered");
@@ -1085,6 +1126,7 @@ impl DnetService {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
     use dnet_config::persist::{ConfigStore, MemoryStateFile};
     use dnet_config::secret_store::MemorySecretStore;
@@ -1152,6 +1194,55 @@ mod tests {
             reply.as_of_unix_ms > 1_600_000_000_000,
             "stamped with the time"
         );
+    }
+
+    /// The age of the connection part as a client reads it, `after` the service was built.
+    async fn session_age_ms(svc: &DnetService) -> u64 {
+        use dnet_core::registry::ComponentKind;
+        dnet_ipc::componentview::decode_components(&svc.dispatch(&Request::GetComponents).unwrap())
+            .unwrap()
+            .components
+            .iter()
+            .find(|c| c.kind == ComponentKind::Session)
+            .expect("the connection is reported")
+            .changed_ago_ms
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_service_records_its_parts_itself_so_an_age_counts_from_the_true_moment() {
+        let svc = Arc::new(service());
+        let _keeper = svc.keep_components_current();
+        // Let it take its first look at time zero, as it does the moment the service starts, before the clock jumps.
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(61)).await;
+
+        let age = session_age_ms(&svc).await;
+        assert!(
+            age >= 60_000,
+            "off for a minute, though nobody asked until now: {age} ms"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn without_that_task_an_age_counts_from_the_first_look() {
+        let svc = Arc::new(service());
+        tokio::time::advance(Duration::from_secs(61)).await;
+
+        let age = session_age_ms(&svc).await;
+        assert!(age < 1_000, "the control: first seen just now: {age} ms");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_task_ends_when_the_service_is_gone() {
+        let svc = Arc::new(service());
+        let keeper = svc.keep_components_current();
+        drop(svc);
+        tokio::time::advance(Duration::from_secs(2)).await;
+
+        tokio::time::timeout(Duration::from_secs(5), keeper)
+            .await
+            .expect("it stops once nothing holds the service")
+            .unwrap();
     }
 
     #[test]

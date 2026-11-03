@@ -17,7 +17,9 @@
 //! **The routing reading is a decision, not proof.** `RoutingPosture` is what the engine decided; nothing at the
 //! operating-system level enforces it yet (README, known limits), and the reading says so.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use tokio::time::Instant;
 
 use dnet_core::failure::explain;
 use dnet_core::path::{PathKind, PathRole};
@@ -297,6 +299,12 @@ impl Tracker {
     /// Write the reply for `GetComponents` from what has been recorded, ages counted back from `now`.
     pub fn encode(&self, now: Duration, as_of_unix_ms: u64) -> String {
         encode_components(&self.registry.snapshot(), now, as_of_unix_ms)
+    }
+
+    /// Record the facts now. The service calls this every second, so a state's age is the moment it changed.
+    pub fn refresh(&mut self, state: &StateSnapshot, paths: &PathsSnapshot) {
+        let now = self.epoch.elapsed();
+        self.observe_at(now, state, paths);
     }
 
     /// Look at the facts now, record them, and answer.
