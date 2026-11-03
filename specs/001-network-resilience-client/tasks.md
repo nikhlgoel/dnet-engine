@@ -1740,6 +1740,19 @@ own, made by DNet Engine's wizard on Oracle Cloud Always Free (or any Linux serv
   > dropped, the read order, approved outside the window while hidden); 14 hand mutations each failed the suite. 281 web tests pass, 57.9 KB of 150.
   > **Security review (self):** no new request, wire field or permission; the window shows only what the service listed; the pasted text is dropped as before;
   > the guide's checks read two read-only lists. **Not run:** the real window with the installed service (the owner's click, `LOCAL-COMMANDS.md` 10.8).
+  > **Checked before it is held, 2026-11-03, test first, mutation-checked.** The service held a change without checking it, so a wrong paste, a name in
+  > use, a program rule or a change asked for while connected reached the Windows prompt and failed only after the person approved it. `hold_change` now
+  > refuses at once what applying would refuse now, with the same reason (`refuse_what_cannot_apply`): the configurator's `check_add_endpoint` and
+  > `check_add_rule` share their checks with the real adds (`endpoint_for`, `rule_allowed`, `label_taken`) and keep nothing; the guided setup's result is
+  > read against the setup waiting (`ServerSetup::finish` changes nothing unless the setup has expired) and its keys dropped; the idle check runs for every
+  > held kind. An imported feed is still held unchecked (taking its documents is the check, and it changes the feed's store). Approving checks again. Contract
+  > IPC-27 updated. Tests: 4 configurator, 7 service (a name in use, a result that does not match or has nothing to finish, a setup that waited too long,
+  > no setup in the build, a program rule, no configurator, three kinds while connected); two older tests now ask for two same-named servers and use a real
+  > setup result. Mutation run on the new and moved functions: every mutant caught once the expired-setup test was added (it alone sees the clock); two
+  > survivors outside this change are older (`plan_tunnel_with`, and `with_production_orchestrator`, which Linux does not build).
+  > **Security review (self):** no new request or field; a client learns at once the reason it would have learned after approval, and nothing more (the
+  > reasons never repeat a value or a secret); the check holds no lock across another and takes the state lock only after the orchestrator's is released;
+  > a bounded report parse, as applying does; approval stays the only way a held change is applied.
   > **Open:** (b) the read-only detail limit (E4,
   > solutions 3.3); (c) a record of who proposed and approved; (d) the live Windows prompt, the owner's click (`LOCAL-COMMANDS.md` 10.8); (e) the residual in ADR-0008
   > section 12.1: an administrator at the default prompt level can be bypassed by malware that knows how.

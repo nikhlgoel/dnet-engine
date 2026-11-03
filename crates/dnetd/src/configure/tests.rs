@@ -705,6 +705,97 @@ fn there_is_a_limit_to_how_many_rules_a_person_adds() {
     assert!(refused(&error).contains("at most"), "{error:?}");
 }
 
+// ------------------------------------------------------------------ checked before it is held (T160)
+
+/// A change that redirects traffic is checked before anyone is asked to approve it: the check says
+/// exactly what adding would say, and keeps nothing.
+#[test]
+fn checking_an_endpoint_says_what_adding_it_would_say_and_keeps_nothing() {
+    let mut rig = Rig::new();
+    rig.add("first");
+    let (count, bytes, secrets) = (
+        rig.state.endpoints().len(),
+        rig.file_bytes(),
+        rig.secrets.inner.len(),
+    );
+
+    rig.configurator
+        .check_add_endpoint(&rig.state, &new_endpoint("second"))
+        .unwrap();
+    let checked = rig
+        .configurator
+        .check_add_endpoint(&rig.state, &new_endpoint("first"))
+        .unwrap_err();
+    let added = rig
+        .configurator
+        .add_endpoint(&mut rig.state.clone(), &new_endpoint("first"))
+        .unwrap_err();
+    assert_eq!(refused(&checked), refused(&added));
+    assert_eq!(rig.state.endpoints().len(), count);
+    assert_eq!(rig.file_bytes(), bytes);
+    assert_eq!(rig.secrets.inner.len(), secrets);
+}
+
+#[test]
+fn checking_an_endpoint_past_the_most_that_can_be_kept_is_refused() {
+    let mut rig = Rig::new();
+    for n in 0..MAX_ENDPOINTS {
+        rig.add(&format!("e{n}"));
+    }
+    let error = rig
+        .configurator
+        .check_add_endpoint(&rig.state, &new_endpoint("one-too-many"))
+        .unwrap_err();
+    assert!(refused(&error).contains("64"), "{error:?}");
+}
+
+#[test]
+fn checking_a_rule_says_what_adding_it_would_say_and_keeps_nothing() {
+    let rig = Rig::new();
+    let before = rig.state.rules().len();
+    rig.configurator
+        .check_add_rule(
+            &rig.state,
+            &RuleMatcher::Domain("example.com".into()),
+            RuleAction::Bypass,
+        )
+        .unwrap();
+    let program = rig
+        .configurator
+        .check_add_rule(
+            &rig.state,
+            &RuleMatcher::Application(r"C:pp.exe".into()),
+            RuleAction::Bypass,
+        )
+        .unwrap_err();
+    assert!(refused(&program).contains("program"), "{program:?}");
+    assert_eq!(rig.state.rules().len(), before);
+    assert!(rig.file_bytes().is_none());
+}
+
+#[test]
+fn checking_a_rule_past_the_limit_is_refused() {
+    let mut rig = Rig::new();
+    for i in 0..dnet_config::persist::MAX_USER_RULES {
+        rig.configurator
+            .add_rule(
+                &mut rig.state,
+                RuleMatcher::Domain(format!("host{i}.example.com")),
+                RuleAction::Tunnel,
+            )
+            .unwrap();
+    }
+    let error = rig
+        .configurator
+        .check_add_rule(
+            &rig.state,
+            &RuleMatcher::Domain("one-more.example.com".into()),
+            RuleAction::Bypass,
+        )
+        .unwrap_err();
+    assert!(refused(&error).contains("at most"), "{error:?}");
+}
+
 // ------------------------------------------------------------------ encrypted DNS
 
 #[test]

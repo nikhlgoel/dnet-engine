@@ -805,10 +805,56 @@ impl DnetService {
         }
     }
 
+    /// Refuse now what applying `request` would refuse now, with the same reason, so nobody is asked
+    /// to approve a change that cannot be made: a name in use, a pasted result that does not match
+    /// the setup waiting, a rule the store would not take, a connection that is up, a build that
+    /// cannot make the change at all. Nothing is changed or saved here; approving checks again,
+    /// because the store may change while the change waits.
+    ///
+    /// An imported feed is not checked here: taking its documents is what checks them, and that
+    /// changes the feed's own store.
+    fn refuse_what_cannot_apply(&self, request: &Request) -> Result<(), IpcError> {
+        match request {
+            Request::AddEndpoint(new) => {
+                let configurator = self.before_change()?;
+                let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+                configurator.check_add_endpoint(&state, new)?;
+            }
+            Request::FinishServer {
+                label,
+                host,
+                report,
+            } => {
+                let configurator = self.before_change()?;
+                let Some(setup) = &self.server_setup else {
+                    return Self::not_available("setting up a server").map(drop);
+                };
+                // The keys read off the result are dropped here; approving reads them again.
+                let credentials = setup
+                    .finish(report, unix_millis() / 1000)
+                    .map_err(setup_refusal)?;
+                let new = dnet_ipc::protocol::NewEndpoint::new(label, host, credentials)?;
+                let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+                configurator.check_add_endpoint(&state, &new)?;
+            }
+            Request::AddRule { matcher, action } => {
+                let configurator = self.before_change()?;
+                let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+                configurator.check_add_rule(&state, matcher, *action)?;
+            }
+            Request::SetEndpointEnabled { .. } => {
+                self.before_change()?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     /// Hold `request` and say so as the refusal it is: nothing was applied.
     fn hold_change(&self, request: &Request, what: String) -> Result<String, IpcError> {
         // A change that could not be applied even if approved is not worth anyone's prompt.
         self.refuse_while_unsafe()?;
+        self.refuse_what_cannot_apply(request)?;
         let held = self
             .pending
             .lock()
@@ -2157,7 +2203,10 @@ mod tests {
         }
 
         fn orchestrated_service() -> DnetService {
-            let service = service();
+            orchestrate(service())
+        }
+
+        fn orchestrate(service: DnetService) -> DnetService {
             let endpoint = Endpoint::new(
                 EndpointId::new(),
                 "home",
@@ -2190,6 +2239,44 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
             panic!("never reached {want:?}; last {:?}", state_of(svc));
+        }
+
+        /// T160: a change cannot be made while a connection is up, so it is refused at once, not
+        /// held for a prompt that could only end in that refusal.
+        #[tokio::test(start_paused = true)]
+        async fn a_change_asked_for_while_connected_is_refused_not_held() {
+            let (configurator, _file) = memory_configurator();
+            let svc = orchestrate(holding_service().with_configurator(configurator));
+            // A server of the store's, turned off, to be turned on again while connected.
+            let id = held_id(svc.dispatch(&add_home()));
+            let endpoint = id_in(&json_of(svc.dispatch(&Request::ApproveChange { id })));
+            svc.dispatch(&Request::SetEndpointEnabled {
+                endpoint,
+                enabled: false,
+            })
+            .unwrap();
+            svc.dispatch(&connect_request()).unwrap();
+            until_status(&svc, ConnectionStatus::Connected).await;
+
+            for request in [
+                Request::AddEndpoint(Box::new(new_endpoint("office"))),
+                Request::AddRule {
+                    matcher: RuleMatcher::Domain("example.com".into()),
+                    action: RuleAction::Bypass,
+                },
+                Request::SetEndpointEnabled {
+                    endpoint,
+                    enabled: true,
+                },
+            ] {
+                match svc.dispatch(&request) {
+                    Err(IpcError::InvalidRequest { detail }) => {
+                        assert!(detail.contains("disconnect"), "{detail}")
+                    }
+                    other => panic!("expected a refusal, got {other:?}"),
+                }
+            }
+            assert!(pending_ids(&svc).is_empty());
         }
 
         #[tokio::test(start_paused = true)]
@@ -3006,7 +3093,7 @@ mod tests {
 
     #[test]
     fn an_imported_feed_and_a_server_from_the_guide_wait_too() {
-        let (svc, _file) = holding_configurable_service();
+        let svc = holding_serving();
         let import = Request::ImportFeed(FeedImport::new(Some("{}".to_string()), None).unwrap());
         match svc.dispatch(&import) {
             Err(IpcError::ApprovalRequired { what, .. }) => {
@@ -3014,10 +3101,13 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+        let prepared =
+            dnet_ipc::server_setup::decode_prepared(&svc.dispatch(&prepare_amd64()).unwrap())
+                .unwrap();
         let finish = Request::FinishServer {
             label: "from the guide".into(),
             host: "203.0.113.9".into(),
-            report: "{}".into(),
+            report: printed(&prepared),
         };
         match svc.dispatch(&finish) {
             Err(IpcError::ApprovalRequired { what, .. }) => {
@@ -3032,12 +3122,18 @@ mod tests {
     #[test]
     fn a_change_that_fails_when_approved_stays_waiting() {
         let (svc, _file) = holding_configurable_service();
+        // Two servers under one name, asked for before either is added: each could be added then,
+        // so both wait. Once the first is added, the second cannot be, and approving it fails with
+        // the store's reason.
         let first = held_id(svc.dispatch(&add_home()));
+        let elsewhere = dnet_ipc::protocol::NewEndpoint::new(
+            "home",
+            "198.51.100.7",
+            crate::configure::tests::credentials(),
+        )
+        .unwrap();
+        let second = held_id(svc.dispatch(&Request::AddEndpoint(Box::new(elsewhere))));
         json_of(svc.dispatch(&Request::ApproveChange { id: first }));
-        // Another server under the same name cannot be added; it is held all the same, and approving
-        // it fails with the store's reason.
-        let other = Request::AddEndpoint(Box::new(new_endpoint("home")));
-        let second = held_id(svc.dispatch(&other));
         assert!(matches!(
             svc.dispatch(&Request::ApproveChange { id: second.clone() }),
             Err(IpcError::InvalidRequest { .. })
@@ -3082,5 +3178,106 @@ mod tests {
         assert_eq!(shown("ho\u{7}me\nx"), "homex");
         let long = "a".repeat(200);
         assert!(shown(&long).chars().count() <= 67);
+    }
+
+    // ------------------------------------------------- T160: what cannot be applied is not held
+
+    /// The holding service with the guided setup, as it is built for real.
+    fn holding_serving() -> DnetService {
+        holding_configurable_service()
+            .0
+            .with_server_setup(crate::server_setup::ServerSetup::new(Some(setup_pins())))
+    }
+
+    /// What a refusal says, for a change that must be refused and not held.
+    fn refusal(reply: Result<String, IpcError>) -> String {
+        match reply {
+            Err(IpcError::InvalidRequest { detail } | IpcError::InternalError { detail }) => detail,
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    /// Nobody is asked to approve a change that applying would refuse: the same reason is given at
+    /// once, and nothing waits.
+    #[test]
+    fn a_server_whose_name_is_taken_is_refused_before_anyone_is_asked() {
+        let (svc, _file) = holding_configurable_service();
+        let id = held_id(svc.dispatch(&add_home()));
+        json_of(svc.dispatch(&Request::ApproveChange { id }));
+
+        let reason = refusal(svc.dispatch(&add_home()));
+        assert!(reason.contains("label already exists"), "{reason}");
+        assert!(pending_ids(&svc).is_empty());
+    }
+
+    #[test]
+    fn a_pasted_result_that_cannot_be_used_is_refused_before_anyone_is_asked() {
+        let svc = holding_serving();
+        // Nothing prepared yet, so there is nothing for the result to finish.
+        refusal(svc.dispatch(&finish("guide", "DNET-BOOTSTRAP-REPORT {}".into())));
+        let prepared =
+            dnet_ipc::server_setup::decode_prepared(&svc.dispatch(&prepare_amd64()).unwrap())
+                .unwrap();
+        // Prepared, but what was pasted holds no report.
+        refusal(svc.dispatch(&finish("guide", "root@vm:~# ls\n".into())));
+        assert!(pending_ids(&svc).is_empty());
+
+        // The control: the server's own result waits, and approving it adds the server once.
+        let id = held_id(svc.dispatch(&finish("guide", printed(&prepared))));
+        json_of(svc.dispatch(&Request::ApproveChange { id }));
+        let listed = json_of(svc.dispatch(&Request::ListEndpoints));
+        assert_eq!(listed["endpoints"][0]["label"], "guide");
+        assert!(pending_ids(&svc).is_empty());
+    }
+
+    #[test]
+    fn a_result_for_a_setup_that_waited_too_long_is_refused_before_anyone_is_asked() {
+        let setup = crate::server_setup::ServerSetup::new(Some(setup_pins()));
+        // Prepared at the start of the clock: its six hours are long over.
+        let prepared = setup
+            .prepare(dnet_ipc::server_setup::ServerKind::Amd64, 0)
+            .unwrap();
+        let svc = holding_configurable_service().0.with_server_setup(setup);
+
+        let reason = refusal(svc.dispatch(&finish("guide", printed(&prepared))));
+        assert!(reason.contains("six hours"), "{reason}");
+        assert!(pending_ids(&svc).is_empty());
+    }
+
+    #[test]
+    fn a_server_from_the_guide_in_a_build_that_cannot_set_one_up_is_not_held() {
+        let (svc, _file) = holding_configurable_service();
+        let reason = refusal(svc.dispatch(&finish("guide", "DNET-BOOTSTRAP-REPORT {}".into())));
+        assert!(reason.contains("not available"), "{reason}");
+        assert!(pending_ids(&svc).is_empty());
+    }
+
+    #[test]
+    fn a_rule_that_cannot_be_applied_is_refused_before_anyone_is_asked() {
+        let (svc, _file) = holding_configurable_service();
+        let program = Request::AddRule {
+            matcher: RuleMatcher::Application(r"C:\app.exe".into()),
+            action: RuleAction::Bypass,
+        };
+        let reason = refusal(svc.dispatch(&program));
+        assert!(reason.contains("program"), "{reason}");
+        assert!(pending_ids(&svc).is_empty());
+    }
+
+    #[test]
+    fn a_change_in_a_service_that_cannot_save_is_not_held() {
+        // No configurator: no change to the configuration can be made, so none is held.
+        let svc = holding_service();
+        for request in [
+            add_home(),
+            Request::AddRule {
+                matcher: RuleMatcher::Domain("example.com".into()),
+                action: RuleAction::Bypass,
+            },
+        ] {
+            let reason = refusal(svc.dispatch(&request));
+            assert!(reason.contains("not available"), "{reason}");
+        }
+        assert!(pending_ids(&svc).is_empty());
     }
 }
