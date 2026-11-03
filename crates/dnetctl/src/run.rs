@@ -388,6 +388,7 @@ pub async fn run<C: Connector>(
             list(&mut connection, Request::ListEndpoints, &invocation, sink).await
         }
         Command::Paths => paths(&mut connection, invocation.json, sink).await,
+        Command::Components => components(&mut connection, invocation.json, sink).await,
         Command::Stats => stats(&mut connection, invocation.json, sink).await,
         Command::Connect { wait, .. } => {
             let request = request.expect("built above for a connect");
@@ -668,7 +669,7 @@ async fn status<S: AsyncRead + AsyncWrite + Unpin>(
     }
 }
 
-/// What a refusal of `GetPaths` or `GetStats` means when the service simply does not know the request:
+/// What a refusal of `GetPaths`, `GetStats` or `GetComponents` means when the service simply does not know the request:
 /// it is older than this program, and cannot say. That is not an empty answer, and is not shown as one.
 fn too_old(refusal: &dnet_ipc::client::Refusal) -> bool {
     refusal.code == "InvalidRequest" && refusal.detail.contains("unknown request")
@@ -703,6 +704,42 @@ async fn paths<S: AsyncRead + AsyncWrite + Unpin>(
                     sink,
                     &ClientError::Malformed(
                         "the networks are not in a form this client understands".to_string(),
+                    ),
+                ),
+            }
+        }
+    }
+}
+
+async fn components<S: AsyncRead + AsyncWrite + Unpin>(
+    connection: &mut Connection<S>,
+    json: bool,
+    sink: &mut dyn Sink,
+) -> i32 {
+    match ask(connection, &Request::GetComponents).await {
+        Err(e) => problem(sink, &e),
+        Ok(Answer::Refused(r)) if too_old(&r) => {
+            sink.err("dnetctl: this service is older than dnetctl and cannot report its parts; update the service.");
+            exit::REFUSED
+        }
+        Ok(Answer::Refused(r)) => refusal(sink, &r),
+        Ok(Answer::Done(value)) => {
+            if json {
+                sink.out(&pretty(&value));
+                return exit::OK;
+            }
+            match dnet_ipc::componentview::decode_components(&value.to_string()) {
+                Ok(reply) => {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+                    sink.out(&render::components(&reply, now));
+                    exit::OK
+                }
+                Err(_) => problem(
+                    sink,
+                    &ClientError::Malformed(
+                        "the parts are not in a form this client understands".to_string(),
                     ),
                 ),
             }

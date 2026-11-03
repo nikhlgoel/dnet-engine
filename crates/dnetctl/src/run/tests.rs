@@ -84,6 +84,8 @@ struct Stub {
     /// What `GetPaths` and `GetStats` answer.
     paths: Mutex<Result<String, IpcError>>,
     stats: Mutex<Result<String, IpcError>>,
+    /// What `GetComponents` answers.
+    components: Mutex<Result<String, IpcError>>,
     /// What `ListPending` answers.
     pending: Mutex<String>,
     /// Whether the client of the in-memory connection holds an elevated token, as the server sees it.
@@ -107,6 +109,11 @@ impl Stub {
                 0,
             ))),
             stats: Mutex::new(Ok(dnet_ipc::netview::encode_stats(None))),
+            components: Mutex::new(Ok(dnet_ipc::componentview::encode_components(
+                &[],
+                Duration::ZERO,
+                0,
+            ))),
             pending: Mutex::new(r#"{"pending":[]}"#.to_string()),
             client_elevated: Mutex::new(false),
             bus: EventBus::new(),
@@ -212,6 +219,7 @@ impl Service for Stub {
                 .map(|()| r#"{"applied":true}"#.to_string()),
             Request::GetPaths => self.paths.lock().unwrap().clone(),
             Request::GetStats => self.stats.lock().unwrap().clone(),
+            Request::GetComponents => self.components.lock().unwrap().clone(),
             _ => Ok("{}".to_string()),
         }
     }
@@ -549,6 +557,92 @@ async fn paths_json_is_the_services_own_answer() {
     assert_eq!(code, exit::OK);
     let value: serde_json::Value = serde_json::from_str(&shown.out()).expect("valid JSON");
     assert_eq!(value["paths"][0]["id"], "7");
+}
+
+fn two_components() -> String {
+    use dnet_core::registry::{Component, ComponentKind, ComponentState, Evidence};
+    let part = |kind, id: &str, state, reason: &str, at: u64| Component {
+        kind,
+        id: id.to_string(),
+        state,
+        reason: reason.to_string(),
+        changed_at: Duration::from_secs(at),
+        evidence: Evidence::default(),
+    };
+    dnet_ipc::componentview::encode_components(
+        &[
+            part(
+                ComponentKind::NetworkPath,
+                "interface-7",
+                ComponentState::Degraded,
+                "Wi-Fi: carrying the connection, but lossy or slow",
+                70,
+            ),
+            part(
+                ComponentKind::Session,
+                "connection",
+                ComponentState::Ok,
+                "Connected through Hysteria2",
+                10,
+            ),
+        ],
+        Duration::from_secs(100),
+        now_ms(),
+    )
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_parts_are_shown_with_their_state_reason_and_the_overall_state() {
+    let stub = Stub::new(vec![]);
+    *stub.components.lock().unwrap() = Ok(two_components());
+
+    let (code, shown) = go(&["components"], &stub).await;
+
+    assert_eq!(code, exit::OK, "{}", shown.err());
+    let out = shown.out();
+    assert!(out.contains("Degraded"), "the overall state: {out}");
+    assert!(
+        out.contains("Wi-Fi: carrying the connection, but lossy or slow"),
+        "{out}"
+    );
+    assert!(out.contains("Connected through Hysteria2"), "{out}");
+    assert!(out.contains("interface-7"), "{out}");
+    assert_eq!(stub.requests_named("GetComponents"), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn components_json_is_the_services_own_answer() {
+    let stub = Stub::new(vec![]);
+    *stub.components.lock().unwrap() = Ok(two_components());
+    let (code, shown) = go(&["components", "--json"], &stub).await;
+    assert_eq!(code, exit::OK);
+    let value: serde_json::Value = serde_json::from_str(&shown.out()).expect("valid JSON");
+    assert_eq!(value["overall"], "Degraded");
+    assert_eq!(value["components"][0]["id"], "interface-7");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_service_that_does_not_know_the_request_is_told_apart_from_an_empty_answer() {
+    let stub = Stub::new(vec![]);
+    *stub.components.lock().unwrap() = Err(IpcError::InvalidRequest {
+        detail: "unknown request \"GetComponents\"".to_string(),
+    });
+    let (code, shown) = go(&["components"], &stub).await;
+    assert_eq!(code, exit::REFUSED);
+    assert!(
+        shown.err().contains("older than dnetctl"),
+        "{}",
+        shown.err()
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_answer_a_client_cannot_read_is_reported_as_unreadable_and_not_shown() {
+    let stub = Stub::new(vec![]);
+    *stub.components.lock().unwrap() = Ok(r#"{"overall":"Fine","components":[]}"#.to_string());
+    let (code, shown) = go(&["components"], &stub).await;
+    assert_ne!(code, exit::OK);
+    assert!(shown.out().is_empty(), "{}", shown.out());
 }
 
 #[tokio::test(start_paused = true)]

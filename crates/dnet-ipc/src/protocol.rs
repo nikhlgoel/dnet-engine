@@ -54,6 +54,10 @@ pub enum Request {
     GetPaths,
     /// What the product did during this connection (T144). Same note as `GetPaths`.
     GetStats,
+    /// Every part of the connection with its state, the reason, and when it last changed (T170). Read-only,
+    /// and it carries no endpoint label, address or network name. Same note as `GetPaths`: a service that
+    /// predates it answers `InvalidRequest`, which a client reads as "this service cannot say".
+    GetComponents,
     ListEndpoints,
     ListProfiles,
     ListRules,
@@ -293,8 +297,10 @@ impl Request {
     pub fn class(&self) -> RequestClass {
         use Request::*;
         match self {
-            GetVersion | GetState | GetSession | GetPaths | GetStats | ListEndpoints
-            | ListProfiles | ListRules | GetDiagnostics | ListPending => RequestClass::ReadOnly,
+            GetVersion | GetState | GetSession | GetPaths | GetStats | GetComponents
+            | ListEndpoints | ListProfiles | ListRules | GetDiagnostics | ListPending => {
+                RequestClass::ReadOnly
+            }
             Subscribe => RequestClass::Stream,
             Connect { .. }
             | Disconnect
@@ -1021,6 +1027,7 @@ pub fn decode_request(wire: &str) -> Result<Request, IpcError> {
         "GetSession" => Request::GetSession,
         "GetPaths" => Request::GetPaths,
         "GetStats" => Request::GetStats,
+        "GetComponents" => Request::GetComponents,
         "ListEndpoints" => Request::ListEndpoints,
         "ListProfiles" => Request::ListProfiles,
         "ListRules" => Request::ListRules,
@@ -1188,6 +1195,7 @@ pub fn encode_request(request: &Request) -> String {
         Request::GetSession => "GetSession",
         Request::GetPaths => "GetPaths",
         Request::GetStats => "GetStats",
+        Request::GetComponents => "GetComponents",
         Request::ListEndpoints => "ListEndpoints",
         Request::ListProfiles => "ListProfiles",
         Request::ListRules => "ListRules",

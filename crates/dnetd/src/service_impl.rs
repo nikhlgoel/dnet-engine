@@ -91,6 +91,8 @@ pub struct DnetService {
     /// Whether such changes are held at all. True for every service built by `new`; only the tests
     /// that exercise the changes themselves turn it off, and nothing outside tests can.
     hold_changes: bool,
+    /// What each part of the connection last reported and when its state changed (T170).
+    components: Mutex<crate::components::Tracker>,
 }
 
 /// Starts a requested check and says which network it will use, or that one is under way.
@@ -247,6 +249,7 @@ impl DnetService {
             pending: Mutex::new(crate::approval::PendingChanges::new()),
             approving: Mutex::new(()),
             hold_changes: true,
+            components: Mutex::new(crate::components::Tracker::new()),
         }
     }
 
@@ -863,6 +866,23 @@ impl DnetService {
             Request::GetStats => Ok(dnet_ipc::netview::encode_stats(
                 orchestrator.as_ref().and_then(|o| o.stats()),
             )),
+            // T170: every part of the connection and how it is doing, from the same snapshots the other
+            // read-only requests use. It holds no label, address or network name (see `components`).
+            Request::GetComponents => {
+                let snapshot = match &orchestrator {
+                    Some(orchestrator) => orchestrator.snapshot(),
+                    None => state.idle_snapshot(),
+                };
+                let paths = orchestrator
+                    .as_ref()
+                    .and_then(|o| o.paths())
+                    .unwrap_or_default();
+                Ok(self
+                    .components
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .reply(&snapshot, &paths, unix_millis()))
+            }
             Request::ListEndpoints => Ok(state.endpoints_json()),
             Request::ListProfiles => Ok(state.profiles_json()),
             Request::ListRules => Ok(state.rules_json()),
@@ -1109,6 +1129,49 @@ mod tests {
         let rules: Value =
             serde_json::from_str(&svc.dispatch(&Request::ListRules).unwrap()).unwrap();
         assert!(!rules["rules"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn get_components_with_nothing_connected_reports_the_connection_and_routing_as_off() {
+        use dnet_core::registry::{ComponentKind, ComponentState};
+        let svc = service();
+
+        let reply = dnet_ipc::componentview::decode_components(
+            &svc.dispatch(&Request::GetComponents).unwrap(),
+        )
+        .expect("the daemon only serves what a client can read");
+
+        assert_eq!(reply.overall, ComponentState::Off);
+        let kinds: Vec<_> = reply.components.iter().map(|c| c.kind).collect();
+        assert_eq!(kinds, [ComponentKind::Session, ComponentKind::Routes]);
+        assert!(reply
+            .components
+            .iter()
+            .all(|c| c.state == ComponentState::Off));
+        assert!(
+            reply.as_of_unix_ms > 1_600_000_000_000,
+            "stamped with the time"
+        );
+    }
+
+    #[test]
+    fn get_components_is_read_only_and_asking_again_changes_no_state() {
+        let svc = service();
+        let ask = |svc: &DnetService| {
+            dnet_ipc::componentview::decode_components(
+                &svc.dispatch(&Request::GetComponents).unwrap(),
+            )
+            .unwrap()
+        };
+        let first = ask(&svc);
+        let second = ask(&svc);
+        let words = |r: &dnet_ipc::componentview::ComponentsReply| {
+            r.components
+                .iter()
+                .map(|c| (c.kind, c.id.clone(), c.state, c.reason.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(words(&first), words(&second));
     }
 
     #[test]

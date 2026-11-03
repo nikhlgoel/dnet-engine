@@ -151,6 +151,7 @@ fn ipc10_every_request_round_trips() {
         Request::GetSession,
         Request::GetPaths,
         Request::GetStats,
+        Request::GetComponents,
         Request::ListEndpoints,
         Request::ListProfiles,
         Request::ListRules,

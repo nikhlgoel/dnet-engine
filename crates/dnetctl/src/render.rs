@@ -40,7 +40,10 @@ fn unsafe_to_print(c: char) -> bool {
             // Bidirectional embeddings, overrides and isolates; marks.
             '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}' | '\u{061C}'
             // Zero-width characters and the byte-order mark.
-            | '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FEFF}'
+            | '\u{200B}'..='\u{200D}' | '\u{FEFF}'
+            // Line and paragraph separators, the soft hyphen, the invisible operators and the tag characters:
+            // the same set `dnet_ipc::netview::is_hostile` removes, so the two ends agree.
+            | '\u{2028}' | '\u{2029}' | '\u{00AD}' | '\u{2060}'..='\u{2064}' | '\u{E0000}'..='\u{E007F}'
         )
 }
 
@@ -280,6 +283,58 @@ fn quality_label(quality: Quality) -> &'static str {
         Quality::Good => "good",
         Quality::Poor => "poor",
         Quality::Unusable => "very poor",
+    }
+}
+
+/// The `GetComponents` answer: every part, its state, how long it has been so, and the part's own words for why.
+///
+/// The reason is shown whole (never cut: it is the part's account), with only what could drive the terminal or
+/// disguise other text replaced.
+pub fn components(reply: &dnet_ipc::componentview::ComponentsReply, now_unix_ms: u64) -> String {
+    use dnet_ipc::componentview::{kind_str, state_str};
+    let seconds = now_unix_ms.saturating_sub(reply.as_of_unix_ms) / 1000;
+    let mut lines = vec![if seconds > STALE_AFTER_SECS {
+        format!(
+            "Overall: {}. Last known {} (not current: the service has not updated this for a while)",
+            state_str(reply.overall),
+            age(seconds)
+        )
+    } else {
+        format!("Overall: {}", state_str(reply.overall))
+    }];
+    if reply.components.is_empty() {
+        lines.push("No part has reported yet.".to_string());
+        return lines.join("\n");
+    }
+    let rows: Vec<Vec<String>> = reply
+        .components
+        .iter()
+        .map(|c| {
+            vec![
+                format!("{} {}", kind_str(c.kind), whole(&c.id)),
+                state_str(c.state).to_string(),
+                for_words(c.changed_ago_ms / 1000),
+                whole(&c.reason),
+            ]
+        })
+        .collect();
+    lines.push(table(&["PART", "STATE", "FOR", "WHY"], &rows));
+    lines.join("\n")
+}
+
+/// `text` with whatever could drive the terminal or disguise other text replaced by `?`, and nothing cut.
+fn whole(text: &str) -> String {
+    text.chars()
+        .map(|c| if unsafe_to_print(c) { '?' } else { c })
+        .collect()
+}
+
+/// How long a state has held, for a table cell.
+fn for_words(seconds: u64) -> String {
+    match seconds {
+        0..=119 => format!("{seconds} s"),
+        120..=7199 => format!("{} min", seconds / 60),
+        _ => format!("{} h", seconds / 3600),
     }
 }
 
@@ -632,6 +687,23 @@ mod tests {
             "event": "EventsLost", "because": "this client read too slowly"
         })));
         assert_eq!(line, "#- EventsLost: this client read too slowly");
+    }
+
+    #[test]
+    fn characters_that_hide_or_break_text_are_replaced_and_a_reason_stays_whole() {
+        for c in [
+            '\u{2028}',
+            '\u{2029}',
+            '\u{00AD}',
+            '\u{2060}',
+            '\u{2064}',
+            '\u{E0041}',
+        ] {
+            assert_eq!(plain(&format!("a{c}b")), "a?b", "U+{:04X}", c as u32);
+            assert_eq!(whole(&format!("a{c}b")), "a?b", "U+{:04X}", c as u32);
+        }
+        let long = "word ".repeat(200);
+        assert_eq!(whole(&long), long, "a part's own words are never cut");
     }
 
     #[test]
