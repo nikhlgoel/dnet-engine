@@ -1,3 +1,9 @@
+# Text is LF in the repository and in every working tree, on every machine. Some tests read files byte for
+# byte (the window's design test searches tokens.css for a newline, the golden fixtures are compared exactly),
+# and CI runs on Windows, where a checkout would otherwise turn every file into CRLF: that is why the window's
+# test job was red in CI from October on. Git detects binary files itself and leaves them alone.
+* text=auto eol=lf
+
 # Files executed inside Linux containers must keep LF line endings. With
 # core.autocrlf=true (the Windows default), a fresh checkout would otherwise rewrite
 # them to CRLF and bash would fail on `$'\r': command not found` inside the harness.
