@@ -1767,6 +1767,20 @@ own, made by DNet Engine's wizard on Oracle Cloud Always Free (or any Linux serv
 - [ ] T166 [US1] IPv6-only networks: a path rule that accepts them (today `paths.rs` needs an IPv4 default route) and NAT64 discovery or an IPv6 server address; lab first
 - [ ] T167 [US1] Metered-aware and network-aware policy (no hot standby or full race on metered links, measured keepalive on shared-address mobile, TCP carrier first when UDP is blocked); each row behind a measurement
 - [ ] T168 [US1] Spike: do the Windows UDP offloads (segmentation since Windows 10 2004, receive coalescing since Windows 11 24H2) help the QUIC path; the pinned QUIC library has offload code for Linux and macOS only
+- [x] T171 [US1] Settle the program's identity before the first release (ADR-0009, accepted): which identifiers are permanent, the application identifier, and one place per layer for the display name
+  > Done 2026-11-03 from the owner's question about an application id (an Electron application on their laptop had installed under a default id). The application identifier is now `io.github.nikhlgoel.dnet-engine`
+  > (no domain; the project lives on GitHub), set in `apps/dnet-tray/src-tauri/tauri.conf.json`; the built shell contains it and not the old `dev.dnet.engine.tray`. The engine's names (service `DNetEngine`, the pipe, the data folder,
+  > the executables, the winget id) stay for good; only what people read changes when the program gets its own name. **Open (cheap, not blocking):** one place per layer for the display name (the window's words are mostly in
+  > `messages.ts`); the installer built and installed once to see the identifier and product name at work (T114/T115).
+- [x] T172 [US1] A one-page website on GitHub Pages: what it is, what it does and does not do, its status (`site/`, `.github/workflows/pages.yml`)
+  > Done 2026-11-03 as far as it can be shown before it is published. Static, no scripts, nothing loaded from another site; it uses the app's own design tokens (the workflow copies `docs/design/tokens.css` in). Checked in the browser pane
+  > at desktop and phone width and in both themes (no horizontal overflow, no console messages, anchors resolve), and by three negative-control checks (a script, an external load and a forbidden third-party name are each refused).
+  > `lint-branding` now also scans `site/`. **Needs the owner (one time):** Settings > Pages > Source "GitHub Actions", and the site is built from `master` only, so it goes live when `wip` is merged there. Address once live: `https://nikhlgoel.github.io/dnet-engine/`.
+- [~] T170 [US1] The Registry and the live map (ADR-0008 §3.6, P1): every part as a component with a state, a reason, the time it changed and its evidence; `GetComponents` (additive); the window's map; the two benign `closed pipe` lines classified (T157)
+  > **Model done 2026-11-03** (`dnet_core::registry`, pure, 15 tests; mutations each caught; the roll-up order was decided the same day: Off < Ok < Starting < Unknown < Degraded < Blocked < Failed, pinned by a table test, the owner may overrule): kinds and states as in §3.6, `changed_at` moves only when the state does,
+  > a full Registry refuses a new part instead of dropping an old one, snapshots are ordered. **Open, in order:** (1) the service fills it
+  > from what it already knows (paths, the supervisor, the tunnel, the guard); (2) `GetComponents` in `dnet-ipc` with a contract test and a golden file (needs the security review: IPC boundary);
+  > (3) `dnetctl components`; (4) `dnet-view` and the window's map; (5) the log classifier for the two benign lines per switch. Unblocks T165's display.
 
 ## Dependencies
 
