@@ -206,6 +206,96 @@ describe('bringing the result back', () => {
     await screen.findByRole('switch');
   });
 
+  /** T160 (a): a new server waits for the person's approval. The guide says so in plain words, shows the button that
+   * approves it, and goes on by itself once the server is there. It never shows the service's command-line hint. */
+  it('a server held for approval is waited for, approved in place, and the guide then goes on', async () => {
+    const mock = await openWizard({ holdChanges: true });
+    await toPaste();
+    await fireEvent.input(screen.getByLabelText(/Name/), { target: { value: 'Frankfurt' } });
+    await fireEvent.input(screen.getByLabelText(/Server address/), { target: { value: '203.0.113.10' } });
+    await fireEvent.input(screen.getByLabelText(/What the server printed/), { target: { value: REPORT } });
+    await click('Check and add the server');
+    expect(await screen.findByText(/Windows asks you to confirm/)).toBeTruthy();
+    expect(alerts()).toEqual([]);
+    expect(document.body.textContent).not.toContain('dnetctl');
+    expect((await mock.endpoints()).map((e) => e.label)).not.toContain('Frankfurt');
+    expect(await violations()).toEqual([]);
+
+    await fireEvent.click(await screen.findByRole('button', { name: /^Approve: Adding the server "Frankfurt"/ }));
+    await screen.findByRole('heading', { level: 2, name: 'Turn it on' }, { timeout: 8000 });
+    expect((await mock.endpoints()).map((e) => e.label)).toContain('Frankfurt');
+  });
+
+  it('a held server that is dropped instead leaves the guide waiting, and says how to start again', async () => {
+    const mock = await openWizard({ holdChanges: true });
+    // Another change waits too, for a server whose name starts with this one's: it is not this server.
+    mock.hold('Adding the server "My server 2" at 203.0.113.11');
+    await toPaste();
+    await fireEvent.input(screen.getByLabelText(/Server address/), { target: { value: '203.0.113.10' } });
+    await fireEvent.input(screen.getByLabelText(/What the server printed/), { target: { value: REPORT } });
+    await click('Check and add the server');
+    await fireEvent.click(await screen.findByRole('button', { name: /^Drop: Adding the server "My server" at/ }));
+    expect(await screen.findByText(/was not added/)).toBeTruthy();
+    expect(screen.queryByRole('heading', { level: 2, name: 'Turn it on' })).toBeNull();
+    expect((await mock.endpoints()).map((e) => e.label)).not.toContain('My server');
+    // The form is back, empty of the pasted text, which held keys.
+    expect((screen.getByLabelText(/What the server printed/) as HTMLTextAreaElement).value).toBe('');
+  });
+
+  it('goes on by itself when the server is approved outside the window, and reads nothing while the window is hidden', async () => {
+    const mock = await openWizard({ holdChanges: true });
+    await toPaste();
+    await fireEvent.input(screen.getByLabelText(/Name/), { target: { value: 'Frankfurt' } });
+    await fireEvent.input(screen.getByLabelText(/Server address/), { target: { value: '203.0.113.10' } });
+    await fireEvent.input(screen.getByLabelText(/What the server printed/), { target: { value: REPORT } });
+    await click('Check and add the server');
+    await screen.findByText(/Windows asks you to confirm/);
+
+    const hidden = vi.spyOn(document, 'hidden', 'get').mockReturnValue(true);
+    document.dispatchEvent(new Event('visibilitychange'));
+    const reads = vi.spyOn(mock, 'endpoints');
+    // Approved with `dnetctl approve`, say: nothing in the window was pressed.
+    const [change] = await mock.pending();
+    expect((await mock.approveChange(change!.id)).ok).toBe(true);
+    reads.mockClear();
+    await new Promise((r) => setTimeout(r, 2500));
+    expect(reads).not.toHaveBeenCalled();
+    expect(screen.queryByRole('heading', { level: 2, name: 'Turn it on' })).toBeNull();
+
+    hidden.mockReturnValue(false);
+    document.dispatchEvent(new Event('visibilitychange'));
+    await screen.findByRole('heading', { level: 2, name: 'Turn it on' }, { timeout: 4000 });
+  }, 15000);
+
+  /** The service adds an approved server before it takes the change off its list, so the guide reads the list
+   * first: read the other way round, an approval landing between the two reads would look like a drop. */
+  it('looks at the waiting list before the list of servers, and never reads the servers while this one still waits', async () => {
+    const mock = await openWizard({ holdChanges: true });
+    mock.hold('Sending traffic to example.com around the tunnel');
+    await toPaste();
+    await fireEvent.input(screen.getByLabelText(/Name/), { target: { value: 'Frankfurt' } });
+    await fireEvent.input(screen.getByLabelText(/Server address/), { target: { value: '203.0.113.10' } });
+    await fireEvent.input(screen.getByLabelText(/What the server printed/), { target: { value: REPORT } });
+    await click('Check and add the server');
+    await screen.findByText(/Windows asks you to confirm/);
+
+    const stillWaiting: boolean[] = [];
+    const read = mock.endpoints.bind(mock);
+    vi.spyOn(mock, 'endpoints').mockImplementation(async () => {
+      stillWaiting.push((await mock.pending()).some((c) => c.what.includes('"Frankfurt"')));
+      return read();
+    });
+    // Dropping the other change makes the guide look again; this server still waits.
+    await fireEvent.click(await screen.findByRole('button', { name: /^Drop: Sending traffic to example\.com/ }));
+    await screen.findByText('Dropped. The change was not applied.');
+    expect(screen.getByText(/Windows asks you to confirm/)).toBeTruthy();
+    expect(screen.queryByText(/was not added/)).toBeNull();
+
+    await fireEvent.click(await screen.findByRole('button', { name: /^Approve: Adding the server "Frankfurt"/ }));
+    await screen.findByRole('heading', { level: 2, name: 'Turn it on' });
+    expect(stillWaiting).not.toContain(true);
+  });
+
   it('is not offered while the connection is on, because servers change only while it is off', async () => {
     await openWizard({ initial: { state: 'ok' } });
     await toPaste();

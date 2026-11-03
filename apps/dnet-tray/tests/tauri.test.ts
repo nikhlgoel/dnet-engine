@@ -86,6 +86,11 @@ describe('commands', () => {
     expect(await b.stabilize(true)).toEqual({ ok: false, reason: 'a method that drops connections needs your consent', code: 'TierConsentRequired' });
   });
 
+  it('a change held for approval keeps its own code, so the window does not show it as a refusal', async () => {
+    const { b } = await bridge(() => ({ ok: false, reason: 'Adding the server "home" waits for approval (change c1)', code: 'ApprovalRequired' }));
+    expect(await b.stabilize(true)).toEqual({ ok: false, reason: 'Adding the server "home" waits for approval (change c1)', code: 'ApprovalRequired' });
+  });
+
   it('a code it does not know is dropped, and the reason stays', async () => {
     const { b } = await bridge(() => ({ ok: false, reason: 'because', code: 'Mystery' }));
     expect(await b.stabilize(true)).toEqual({ ok: false, reason: 'because' });

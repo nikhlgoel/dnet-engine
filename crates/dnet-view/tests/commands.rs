@@ -83,7 +83,7 @@ async fn each_refusal_keeps_its_code_and_the_services_own_words() {
         ("InvalidRequest", "Refused"),
         ("Unauthorized", "Refused"),
         ("InternalError", "Refused"),
-        ("ApprovalRequired", "Refused"),
+        ("ApprovalRequired", "ApprovalRequired"),
     ] {
         let link = FakeLink::new(move |_| refusal(wire, "the reason in the service's words"));
         let out = Bridge::new(link).stabilize(true, false).await;
@@ -106,7 +106,8 @@ async fn a_change_that_waits_for_approval_is_shown_whole() {
     let wording = held.clone();
     let link = FakeLink::new(move |_| refusal("ApprovalRequired", &wording));
     let out = Bridge::new(link).stabilize(true, false).await;
-    assert_eq!(out["code"], json!("Refused"));
+    // Its own code, so the window can say "waiting for your approval" instead of showing a refusal (T160 a).
+    assert_eq!(out["code"], json!("ApprovalRequired"));
     assert_eq!(out["reason"], json!(held));
     assert!(out["reason"]
         .as_str()

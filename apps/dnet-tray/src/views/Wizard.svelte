@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { AppState } from '../lib/app.svelte';
   import type { PreparedServer, ServerKind } from '../lib/bridge';
+  import PendingChanges from '../components/PendingChanges.svelte';
   import { copyText } from '../lib/clipboard';
   import {
     GUIDES,
@@ -40,6 +41,13 @@
   let error = $state<string | null>(null);
   let copied = $state<string | null>(null);
   let copyFailed = $state(false);
+
+  /** How often a held server is looked for while the guide waits: it can be approved elsewhere too (`dnetctl`). */
+  const HELD_CHECK_MS = 2000;
+  /** The name of the server that waits for the person's approval (T160), while it does. */
+  let held = $state<string | null>(null);
+  /** The held server was dropped, or expired, without being added. */
+  let heldDropped = $state(false);
 
   const guide = $derived(guideId ? GUIDES[guideId] : null);
   const step = $derived<Step | null>(guide ? (guide.steps[index] ?? null) : null);
@@ -104,16 +112,66 @@
     event.preventDefault();
     busy = true;
     error = null;
-    const outcome = await app.bridge.finishServer({ label: label.trim(), host: address.trim(), report });
+    heldDropped = false;
+    const name = label.trim();
+    const outcome = await app.bridge.finishServer({ label: name, host: address.trim(), report });
     busy = false;
     if (outcome.ok) {
       // The pasted text holds keys: it is dropped as soon as the service has it.
       report = '';
       forward();
+    } else if (outcome.code === 'ApprovalRequired') {
+      // Not refused: the service holds the server, and the text with it, until the person approves it. The
+      // window's copy is dropped all the same. The service's own words name a command; the guide says it plainly.
+      report = '';
+      held = name;
     } else {
       error = outcome.reason;
     }
   }
+
+  /** How a held change names this server: in quotes, as the service writes it (`shown` in `dnetd`). */
+  function named(name: string): string {
+    return `"${name.replace(/\p{Cc}/gu, '')}"`;
+  }
+
+  /** To the step after the one that adds the server, wherever the person is in the guide now. */
+  function afterAdding(): void {
+    const at = guide ? guide.steps.findIndex((s) => s.action === 'paste') : -1;
+    if (guide && at >= 0 && at < guide.steps.length - 1) {
+      phase = 'steps';
+      index = at + 1;
+    }
+  }
+
+  /**
+   * Where the held server is now. The waiting list is read first: the service adds an approved server before it
+   * takes the change off the list, so a server found in neither place was not added.
+   */
+  async function settle(): Promise<void> {
+    const name = held;
+    if (name === null) return;
+    try {
+      const waiting = await app.bridge.pending();
+      if (held !== name || waiting.some((c) => c.what.includes(named(name)))) return;
+      const servers = await app.bridge.endpoints();
+      if (held !== name) return;
+      held = null;
+      if (servers.some((e) => e.label === name)) afterAdding();
+      else heldDropped = true;
+    } catch {
+      // No answer now: asked again at the next check.
+    }
+  }
+
+  // While a server waits, look for it now and then; nothing is sent while the window is hidden (ADR-0007 R2).
+  $effect(() => {
+    if (held === null) return;
+    const timer = setInterval(() => {
+      if (app.visible) void settle();
+    }, HELD_CHECK_MS);
+    return () => clearInterval(timer);
+  });
 </script>
 
 <section class="view" aria-labelledby="wizard-title">
@@ -243,8 +301,12 @@
       <button type="button" class="btn primary" aria-label={`${t.copy}: ${t.pasteBlock}`} onclick={() => copy('block', block)}>{t.copy}</button>
       {#if copied}<span class="help" role="status">{t.copied}</span>{/if}
       {#if copyFailed}<p class="notice" role="status">{t.copyFailed}</p>{/if}
+    {:else if step.action === 'paste' && held !== null}
+      <p class="notice" role="status">{t.held}</p>
+      <PendingChanges {app} onsettled={() => void settle()} />
     {:else if step.action === 'paste'}
       {#if connected}<p class="notice">{t.disconnectFirst}</p>{/if}
+      {#if heldDropped}<p class="notice" role="status">{t.heldDropped}</p>{/if}
       <form class="form" onsubmit={submit}>
         <div class="field">
           <label for="w-label">{t.nameLabel}</label>

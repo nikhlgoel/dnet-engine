@@ -4,7 +4,17 @@
   import { en, fill } from '../lib/messages';
   import type { PendingView } from '../lib/model';
 
-  let { app }: { app: AppState } = $props();
+  let {
+    app,
+    asked = 0,
+    onsettled,
+  }: {
+    app: AppState;
+    /** Raised by the view each time something it asked for was held, so the list is read again at once. */
+    asked?: number;
+    /** Told after a change is approved or dropped here, so the view can read what that changed. */
+    onsettled?: () => void;
+  } = $props();
 
   const t = en.views.pending;
   /** How often the list is read again: a change can be asked for by another program, such as `dnetctl`. */
@@ -26,8 +36,13 @@
     }
   }
 
-  onMount(() => {
+  // Read when shown, and again each time the view says it asked for something that was held.
+  $effect(() => {
+    void asked;
     void load();
+  });
+
+  onMount(() => {
     const timer = setInterval(() => void load(), REFRESH_MS);
     return () => clearInterval(timer);
   });
@@ -45,6 +60,7 @@
     busy = null;
     message = outcome.ok ? t.approved : outcome.reason;
     await load();
+    onsettled?.();
   }
 
   async function drop(item: PendingView): Promise<void> {
@@ -53,6 +69,7 @@
     busy = null;
     message = outcome.ok ? t.dropped : outcome.reason;
     await load();
+    onsettled?.();
   }
 </script>
 

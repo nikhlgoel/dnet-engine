@@ -1716,7 +1716,6 @@ own, made by DNet Engine's wizard on Oracle Cloud Always Free (or any Linux serv
   > service, no traffic redirected). The already-running network watch keeps its carrier kind until the next connection (the setup is updated for the next).
   > **Not done:** the Registry classifying the two benign "closed pipe" log lines each switch writes (the Registry is ADR-0008 P1); the live move has not
   > been run on Windows with a real tunnel adapter (the composed test `session_e2e.rs` proves the mechanism with real cores on loopback).
-- [ ] T160
 - [~] T160 [US1] Control-surface hardening (audit E3, E4; ADR-0008 F13): changes that redirect traffic are held as pending and approved only by an elevated client; read-only detail limited to the console user and administrators
   > Needs the security review. The elevation prompt runs on the secure desktop (Microsoft, "How User Account Control works").
   > **Approval built 2026-11-01 (F13 approved by the owner), test first, mutation-checked; not committed.** `ClientIdentity.elevated` is read from the
@@ -1730,7 +1729,18 @@ own, made by DNet Engine's wizard on Oracle Cloud Always Free (or any Linux serv
   > `dnetctl approve <id>` beside the window, which asks Windows and applies only on a typed `yes`; only the checked change name is handed over (`dnet_view::approver`, 6 tests). `dnet-view` reads and drops (golden `pending.json`, 4 tests),
   > the shell has `list_pending`, `reject_change`, `approve_change` (permissions generated; the shell builds), the web side has the parser, bridge, mock and component (4 component tests with axe, 3 bridge tests,
   > 1 fixture test; 267 web tests pass, 55.6 KB of 150). **Not run:** the real window with a real held change and the Windows prompt (needs the new service installed; the owner's click).
-  > **Open:** (a) the Approve button in the Wizard's finish (it shows the held message as a refusal; the list appears in Servers); (b) the read-only detail limit (E4,
+  > **(a) done 2026-11-03, test first, hand-mutation-checked.** The installed service holds every new server, so the guide's last step and the Servers form
+  > met this on every real install. The window has a fifth code, `ApprovalRequired` (`dnet_view::outcome::code_for` mapped it to `Refused` before). The guide
+  > says in plain words that the server waits, shows the Approve list in place, drops its copy of the pasted text (the service holds it with the change), and
+  > goes on by itself once the server is listed; a dropped or expired change brings the form back with what to do. It reads the waiting list before the
+  > servers (the service adds an approved server before it takes the change off its list), looks every 2 s while shown (approval can come from `dnetctl`) and
+  > reads nothing while hidden (R2). Servers and Rules say the change "waits for your approval above" instead of showing the service's command hint as an
+  > error. The mock holds as the service does when asked (`holdChanges`; off by default so the rest of the window can be developed) and applies on approval
+  > exactly the change it held. Tests: 1 Rust, 1 bridge, 3 component (a held server, a held bypass rule, a tunnel rule not held), 4 wizard (approved in place,
+  > dropped, the read order, approved outside the window while hidden); 14 hand mutations each failed the suite. 281 web tests pass, 57.9 KB of 150.
+  > **Security review (self):** no new request, wire field or permission; the window shows only what the service listed; the pasted text is dropped as before;
+  > the guide's checks read two read-only lists. **Not run:** the real window with the installed service (the owner's click, `LOCAL-COMMANDS.md` 10.8).
+  > **Open:** (b) the read-only detail limit (E4,
   > solutions 3.3); (c) a record of who proposed and approved; (d) the live Windows prompt, the owner's click (`LOCAL-COMMANDS.md` 10.8); (e) the residual in ADR-0008
   > section 12.1: an administrator at the default prompt level can be bypassed by malware that knows how.
 - [ ] T161 [US1] Guard v2 (ADR-0006 P3; `docs/research/2026-10-31-solutions.md` section 4): persistent filters tied to the service, the five yes/no lab checks

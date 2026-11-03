@@ -167,6 +167,7 @@ export const en = {
         submit: 'Add server',
         cancel: 'Cancel',
       },
+      held: 'The new server waits for your approval above. Nothing is added until you approve it.',
     },
     pending: {
       title: 'Waiting for your approval',
@@ -207,6 +208,7 @@ export const en = {
       remove: 'Remove',
       removeLabel: 'Remove the rule for {value}',
       appliesNext: 'Changes apply from the next connection.',
+      held: 'The new rule waits for your approval above. Nothing changes until you approve it.',
       describe: {
         domain: '{value}',
         domain_suffix: '{value} and its subdomains',
@@ -328,6 +330,8 @@ export const en = {
     reportHelp: 'Paste the long line, or a few lines around it. It holds keys; it is checked and then forgotten.',
     submit: 'Check and add the server',
     adding: 'Checking…',
+    held: 'Your server is checked and waits for your approval below. Press Approve: Windows asks you to confirm, and this guide goes on by itself once the server is added.',
+    heldDropped: 'The server was not added: its change was dropped, or nobody approved it within ten minutes. Paste what the server printed again and press “Check and add the server” to ask once more.',
     disconnectFirst: 'Turn the connection off first. A server can only be added while it is off.',
     doneBody: 'Your server is in the list. Turn the connection on from the Status page.',
     goStatus: 'Go to Status',

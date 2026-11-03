@@ -18,6 +18,9 @@
   let credentials = $state('');
   let busy = $state(false);
   let failedToLoad = $state(false);
+  /** A server this view asked to add waits for the person's approval (T160); how many times it has asked. */
+  let held = $state(false);
+  let asked = $state(0);
 
   // Endpoints change only while disconnected: the engine and what it drives were built from the endpoints of
   // the moment. The buttons say so instead of being refused after the fact.
@@ -63,9 +66,21 @@
     if (outcome.ok) {
       close();
       await load();
+    } else if (outcome.code === 'ApprovalRequired') {
+      // Not refused: the service holds the server, with the details from the file, until the person approves it
+      // in the list above. The form's copy of the file is dropped now, as on success.
+      close();
+      held = true;
+      asked += 1;
     } else {
       error = outcome.reason;
     }
+  }
+
+  /** A waiting change was approved or dropped in the list: the servers are read again. */
+  async function settled(): Promise<void> {
+    held = false;
+    await load();
   }
 
   async function toggle(e: EndpointView): Promise<void> {
@@ -89,8 +104,11 @@
 
   <p class="lede">{t.lede}</p>
 
-  <PendingChanges {app} />
+  <PendingChanges {app} {asked} onsettled={settled} />
 
+  {#if held}
+    <p class="notice" role="status">{t.held}</p>
+  {/if}
   {#if locked}
     <p class="notice">{en.errors.disconnectFirst}</p>
   {/if}
@@ -147,7 +165,15 @@
     </form>
   {:else}
     <div class="actions">
-      <button type="button" class="btn primary" disabled={locked} onclick={() => (adding = true)}>{t.add}</button>
+      <button
+        type="button"
+        class="btn primary"
+        disabled={locked}
+        onclick={() => {
+          adding = true;
+          held = false;
+        }}>{t.add}</button
+      >
       <button type="button" class="btn" disabled={locked} onclick={() => app.go('wizard')}>{t.setup}</button>
     </div>
   {/if}

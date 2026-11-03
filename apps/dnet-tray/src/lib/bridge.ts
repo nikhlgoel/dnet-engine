@@ -32,10 +32,12 @@ export interface Capabilities {
   updates: boolean;
 }
 
+/** Why something asked for did not happen, as far as the window needs to know. `ApprovalRequired` is not a
+ * refusal: the change waits in the service's list until the person approves or drops it (T160). */
+export type OutcomeCode = 'TierConsentRequired' | 'ServiceBusy' | 'NotConnected' | 'ApprovalRequired' | 'Refused';
+
 /** The outcome of something the person asked for. A refusal carries the service's own reason. */
-export type Outcome =
-  | { ok: true }
-  | { ok: false; reason: string; code?: 'TierConsentRequired' | 'ServiceBusy' | 'NotConnected' | 'Refused' };
+export type Outcome = { ok: true } | { ok: false; reason: string; code?: OutcomeCode };
 
 export interface NewEndpointInput {
   label: string;

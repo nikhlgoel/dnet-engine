@@ -8,7 +8,7 @@
  */
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import type { Bridge, Capabilities, NewEndpointInput, Outcome, PreparedServer } from './bridge';
+import type { Bridge, Capabilities, NewEndpointInput, Outcome, OutcomeCode, PreparedServer } from './bridge';
 import { brutalWarning } from './messages';
 import {
   parseActivity,
@@ -22,7 +22,7 @@ import {
   type Snapshot,
 } from './model';
 
-const CODES = new Set(['TierConsentRequired', 'ServiceBusy', 'NotConnected', 'Refused']);
+const CODES: ReadonlySet<string> = new Set<OutcomeCode>(['TierConsentRequired', 'ServiceBusy', 'NotConnected', 'ApprovalRequired', 'Refused']);
 
 /** A command's reply as an `Outcome`. Anything that is not clearly a success is a refusal with a reason. */
 function outcome(value: unknown): Outcome & Record<string, unknown> {
@@ -30,8 +30,8 @@ function outcome(value: unknown): Outcome & Record<string, unknown> {
     const v = value as Record<string, unknown>;
     if (v.ok === true) return v as Outcome & Record<string, unknown>;
     if (v.ok === false && typeof v.reason === 'string') {
-      const code = typeof v.code === 'string' && CODES.has(v.code) ? v.code : undefined;
-      return { ok: false, reason: v.reason, ...(code ? { code: code as 'Refused' } : {}) };
+      const code = typeof v.code === 'string' && CODES.has(v.code) ? (v.code as OutcomeCode) : undefined;
+      return { ok: false, reason: v.reason, ...(code ? { code } : {}) };
     }
   }
   return { ok: false, reason: 'The service gave an answer this window does not understand.', code: 'Refused' };

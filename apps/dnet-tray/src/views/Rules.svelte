@@ -16,6 +16,9 @@
   let value = $state('');
   let action = $state<NewRuleInput['action']>('tunnel');
   let busy = $state(false);
+  /** A rule this view asked for waits for the person's approval (T160); how many times it has asked. */
+  let held = $state(false);
+  let asked = $state(0);
 
   const connected = $derived((app.look?.switch.on ?? false) === true);
 
@@ -39,11 +42,19 @@
     busy = true;
     const outcome = await app.bridge.addRule({ kind, value: value.trim(), action });
     busy = false;
-    changeError = outcome.ok ? null : outcome.reason;
-    if (outcome.ok) {
-      value = '';
-      await load();
-    }
+    // A rule held for approval was not refused: it waits in the list above (T160).
+    const waits = !outcome.ok && outcome.code === 'ApprovalRequired';
+    changeError = outcome.ok || waits ? null : outcome.reason;
+    held = waits;
+    if (waits) asked += 1;
+    if (outcome.ok || waits) value = '';
+    if (outcome.ok) await load();
+  }
+
+  /** A waiting change was approved or dropped in the list: the rules are read again. */
+  async function settled(): Promise<void> {
+    held = false;
+    await load();
   }
 
   async function remove(rule: RuleView): Promise<void> {
@@ -60,8 +71,11 @@
   <h1 id="rules-title">{t.title}</h1>
   <p class="lede">{t.explainer}</p>
 
-  <PendingChanges {app} />
+  <PendingChanges {app} {asked} onsettled={settled} />
 
+  {#if held}
+    <p class="notice" role="status">{t.held}</p>
+  {/if}
   {#if error}
     <p class="notice" role="alert">{error}</p>
   {:else}

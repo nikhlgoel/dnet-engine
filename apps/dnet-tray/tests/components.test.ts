@@ -470,6 +470,58 @@ describe('Changes waiting for approval (T160)', () => {
     expect(await bridge.pending()).toEqual([]);
   });
 
+  it('a server added by hand that is held for approval is said to be waiting, not refused, and shows up in the list', async () => {
+    const bridge = mount({ holdChanges: true });
+    await go('Servers');
+    await fireEvent.click(await screen.findByRole('button', { name: 'Add a server you already have' }));
+    await fireEvent.input(screen.getByLabelText('Name'), { target: { value: 'home' } });
+    await fireEvent.input(screen.getByLabelText('Address'), { target: { value: '203.0.113.9' } });
+    const file = new File(['{"version":1}'], 'home.json', { type: 'application/json' });
+    await fireEvent.change(screen.getByLabelText('Connection details'), { target: { files: [file] } });
+    const send = screen.getByRole('button', { name: 'Add server' }) as HTMLButtonElement;
+    await waitFor(() => expect(send.disabled).toBe(false));
+    // jsdom keeps no chosen file for the form's own required-field check, so the form is sent as the button sends it.
+    await fireEvent.submit(send.closest('form') as HTMLFormElement);
+    // Said as news, in the window's words: the service's own text names a command and is not shown.
+    const notice = await screen.findByText(/waits for your approval above/);
+    expect(notice.getAttribute('role')).toBe('status');
+    const alerts = screen.queryAllByRole('alert').map((a) => a.textContent ?? '');
+    expect(alerts.join(' ')).not.toMatch(/waits for approval|dnetctl/);
+    expect(await bridge.endpoints()).not.toContainEqual(expect.objectContaining({ label: 'home' }));
+
+    // Approved in place: the server is then in the list, and the notice has done its work.
+    await fireEvent.click(await screen.findByRole('button', { name: /^Approve: Adding the server "home"/ }));
+    expect(await screen.findByText('home')).toBeTruthy();
+    expect(screen.queryByText(/waits for your approval above/)).toBeNull();
+    expect(await bridge.endpoints()).toContainEqual(expect.objectContaining({ label: 'home' }));
+  });
+
+  it('a rule that sends traffic around the tunnel is held, said to be waiting, and is in the table once approved', async () => {
+    const bridge = mount({ holdChanges: true });
+    await go('Rules');
+    await fireEvent.input(await screen.findByRole('textbox', { name: /Site or address/ }), { target: { value: 'example.com' } });
+    await fireEvent.change(screen.getByRole('combobox', { name: /Send it/ }), { target: { value: 'bypass' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Add rule' }));
+    const notice = await screen.findByText(/waits for your approval above/);
+    expect(notice.getAttribute('role')).toBe('status');
+    expect(screen.queryAllByRole('alert').map((a) => a.textContent ?? '').join(' ')).not.toMatch(/waits for approval|dnetctl/);
+    expect((await bridge.rules()).rules.map((r) => r.value)).not.toContain('example.com');
+
+    await fireEvent.click(await screen.findByRole('button', { name: /^Approve: Sending traffic to example\.com and its subdomains around the tunnel/ }));
+    expect(await screen.findByText('example.com and its subdomains')).toBeTruthy();
+    expect(screen.queryByText(/waits for your approval above/)).toBeNull();
+  });
+
+  it('a rule that keeps traffic in the tunnel is not held, and nothing says it waits', async () => {
+    const bridge = mount({ holdChanges: true });
+    await go('Rules');
+    await fireEvent.input(await screen.findByRole('textbox', { name: /Site or address/ }), { target: { value: 'example.org' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Add rule' }));
+    expect(await screen.findByText('example.org and its subdomains')).toBeTruthy();
+    expect(screen.queryByText(/waits for your approval/)).toBeNull();
+    expect(await bridge.pending()).toEqual([]);
+  });
+
   it('shows nothing at all when nothing waits', async () => {
     mount();
     await go('Servers');
