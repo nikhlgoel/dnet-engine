@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>DNet Engine</title>
-  <meta name="description" content="A free, open-source, self-hosted network resilience client for Windows. It keeps your connection going on restrictive or unreliable networks, through a server you run. Early software: read what it does not do.">
+  <title>DNet Engine: keeps a connection up. Not a bypass tool.</title>
+  <meta name="description" content="DNet Engine is a free, open-source Windows client that sends your traffic through a server you run and keeps the connection going when the network changes. It is not a bypass tool.">
   <meta name="color-scheme" content="dark light">
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="tokens.css">
@@ -13,154 +13,151 @@
 <body>
   <a class="skip" href="#main">Skip to the content</a>
 
-  <header class="top">
-    <div class="wrap bar">
-      <a class="brand" href="#top" id="top">DNet Engine</a>
-      <nav aria-label="Page sections">
-        <a href="#limits">What it does not do</a>
-        <a href="#status">Status</a>
-        <a href="#try">Try it</a>
-        <a href="https://github.com/nikhlgoel/dnet-engine">Source</a>
-      </nav>
-    </div>
+  <header class="wrap top">
+    <a class="wordmark" href="./">DNet Engine</a>
+    <a class="source" href="https://github.com/nikhlgoel/dnet-engine">Source on GitHub <span aria-hidden="true">&rarr;</span></a>
   </header>
 
   <main id="main">
-    <section class="hero wrap" aria-labelledby="h-what">
-      <p class="kicker">Free and open source &middot; GPL-3.0-or-later &middot; Windows</p>
-      <h1 id="h-what">Keeps your connection going when the network gets in the way.</h1>
-      <p class="lede">DNet Engine sends your traffic through a server <strong>you</strong> run, over whichever of several
-        connection methods works on the network you are on, and keeps going when that network changes. It was made for
-        campus, hostel and caf&eacute; networks, first for its author and friends, and anyone is welcome to use it.</p>
-      <p class="actions">
-        <a class="btn" href="https://github.com/nikhlgoel/dnet-engine">View the source on GitHub</a>
-        <a class="btn ghost" href="#limits">Read the limits first</a>
-      </p>
-      <p class="note" role="note"><strong>Early software.</strong> There is no installer yet, and it has not been used on a
-        real network. This page says what exists, what does not, and what it will never claim.</p>
-    </section>
+    <section class="wrap hero" aria-labelledby="h-top">
+      <p class="kicker">Free and open source</p>
+      <h1 id="h-top">Keeps a connection up on networks that keep dropping it.</h1>
+      <p class="sub">A client for Windows that sends your traffic through a server <strong>you</strong> run, over whichever
+        connection method works on the network you are on, and keeps going when that network changes. Made for campus,
+        hostel and caf&eacute; networks, first for its author and friends. Anyone is welcome to use it.</p>
 
-    <section class="wrap" aria-labelledby="h-does">
-      <h2 id="h-does">What it does</h2>
-      <ul class="cards">
-        <li>
-          <h3>Picks a method by measuring</h3>
-          <p>It tries the connection methods it has against the network you are on, and uses the one that works. It does
-            not guess from names or assume one is best.</p>
-        </li>
-        <li>
-          <h3>Follows the network</h3>
-          <p>When the network under it changes, or a method is blocked, it moves to another path and tells you why, in
-            plain words.</p>
-        </li>
-        <li>
-          <h3>Fails closed</h3>
-          <p>There is no &ldquo;send it direct&rdquo; fallback. If the tunnel is down, traffic is not quietly sent
-            around it. (See the kill-switch note below: this is a decision in the service, not yet a guarantee from the
-            operating system.)</p>
-        </li>
-        <li>
-          <h3>Puts things back</h3>
-          <p>It changes routes and name servers while it runs, writes down every change before making it, and undoes
-            them when it stops or after a crash.</p>
-        </li>
-        <li>
-          <h3>Is yours end to end</h3>
-          <p>Nothing here is run by the project: no servers, no accounts, no shared keys. You bring the endpoint, or let
-            a later version set one up in your own cloud account.</p>
-        </li>
-        <li>
-          <h3>Is plain about itself</h3>
-          <p>Every automatic change carries a reason. Anything best-effort is labelled best-effort. Claims are measured,
-            not hoped for.</p>
-        </li>
-      </ul>
-    </section>
-
-    <section class="wrap" id="limits" aria-labelledby="h-not">
-      <h2 id="h-not">What it does not do</h2>
-      <p class="lede">A tool that overstates what it does is worse than one that does less. These are the limits.</p>
-      <dl class="limits">
-        <div>
-          <dt>It does not hide that you use a tunnel.</dt>
-          <dd>It hides the <em>content</em> of your traffic and the <em>protocol</em> carrying it. It does not hide how
-            much you send or where the tunnel&rsquo;s packets go; whoever runs the network can still see that.</dd>
-        </div>
-        <div>
-          <dt>It does not make you anonymous.</dt>
-          <dd>Your traffic is encrypted to your own server, then leaves it. Whoever runs that server, and the network it
-            sits on, can see what any server operator sees.</dd>
-        </div>
-        <div>
-          <dt>The kill switch is not a guarantee yet.</dt>
-          <dd>The service refuses to send traffic unprotected, but nothing at the operating-system level enforces that
-            yet. A crash or a stopped service is not a promise that nothing leaves the machine.</dd>
-        </div>
-        <div>
-          <dt>Rules by program are best-effort.</dt>
-          <dd>Rules by destination are reliable. Rules by program depend on spotting the program as it connects, which
-            can miss short-lived connections.</dd>
-        </div>
-        <div>
-          <dt>It is not a bypass tool.</dt>
-          <dd>Using a tunnel on a managed network may break that network&rsquo;s rules, and the consequences are yours.
-            It is for staying connected and protecting your traffic on networks you do not control, not for evading
-            restrictions you agreed to. Read the policy of the network you are on.</dd>
-        </div>
-        <div>
-          <dt>It does not come with a server.</dt>
-          <dd>No endpoint, credential or key is built in. Without a server of your own it has nowhere to connect.</dd>
-        </div>
+      <dl class="facts">
+        <div><dt>Licence</dt><dd>GPL-3.0-or-later</dd></div>
+        <div><dt>Platform</dt><dd>Windows 10 or later, 64-bit</dd></div>
+        <div><dt>Server</dt><dd>Yours. None is provided.</dd></div>
+        <div><dt>Status</dt><dd>Early. No installer yet.</dd></div>
       </dl>
     </section>
 
-    <section class="wrap" id="status" aria-labelledby="h-status">
-      <h2 id="h-status">Status</h2>
-      <p>Early. The engine runs; the application around it is not finished. The dated, authoritative list is
-        <a href="https://github.com/nikhlgoel/dnet-engine/blob/master/specs/001-network-resilience-client/tasks.md">tasks.md</a>
-        in the repository. This table is a summary, last checked 2026-11-03.</p>
-      <div class="table-wrap" tabindex="0" role="region" aria-label="Status by part">
-        <table>
-          <thead><tr><th scope="col">Part</th><th scope="col">State</th></tr></thead>
-          <tbody>
-            <tr><td>Background service: connects through three methods, supervises two transport programs, restores network settings</td><td>Working in a simulated hostile network and a Windows lab</td></tr>
-            <tr><td>Choosing a method by measurement; recovery when one is blocked</td><td>Working</td></tr>
-            <tr><td>Following the network as it changes</td><td>Working for one method; not yet proven on two real networks</td></tr>
-            <tr><td>Command-line client</td><td>Working</td></tr>
-            <tr><td>Destination rules; spotting a sign-in page in the way</td><td>Built and tested; not yet met a real network</td></tr>
-            <tr><td>Tray icon and window</td><td>Built, tested, run against a real service on one machine; icons are placeholders</td></tr>
-            <tr><td>Setting up a server in your own cloud account</td><td>Tested against a stand-in; no real provider connected</td></tr>
-            <tr><td>Installer</td><td>Not built</td></tr>
-          </tbody>
-        </table>
+    <section class="not" aria-labelledby="h-not">
+      <div class="wrap not-grid">
+        <div class="not-head">
+          <p class="label">Read this first</p>
+          <h2 id="h-not" class="big">It is not a bypass tool.</h2>
+          <p class="not-lead">It is not built, offered or described as a way around a network&rsquo;s rules. What it is
+            follows from what it leaves out:</p>
+        </div>
+        <ol class="reasons">
+          <li><strong>It comes with nothing to connect to.</strong> No server, no accounts, no shared keys. Without a
+            server you run yourself, it does nothing.</li>
+          <li><strong>It does not hide that you use a tunnel.</strong> The network you are on can still see that a tunnel
+            exists, how much goes through it, and where it ends.</li>
+          <li><strong>It does not make you anonymous.</strong> Your traffic is encrypted to your own server, which sees
+            what any server sees.</li>
+          <li><strong>It does not promise to get you past a block.</strong> It measures what works on a network and says
+            plainly when nothing does.</li>
+          <li><strong>The rules of your network still apply.</strong> A tunnel on a school, work or library network may
+            break them, and what follows is yours to carry. Read the policy first.</li>
+        </ol>
       </div>
     </section>
 
-    <section class="wrap" id="try" aria-labelledby="h-try">
-      <h2 id="h-try">Try it, or help</h2>
-      <p>There is nothing to download yet. If you can build Rust and run Windows, the repository explains how to build and
-        test it, and every test that touches a network runs only against a simulated one.</p>
-      <ul class="plain">
-        <li><a href="https://github.com/nikhlgoel/dnet-engine#building-and-testing">Build and test it</a></li>
-        <li><a href="https://github.com/nikhlgoel/dnet-engine/blob/master/docs/Research-Critique.md">Why it is built this way</a></li>
-        <li><a href="https://github.com/nikhlgoel/dnet-engine/blob/master/docs/design/design-system.md">The interface design system</a></li>
-        <li><a href="https://github.com/nikhlgoel/dnet-engine/issues">Report a problem or ask a question</a></li>
-      </ul>
-      <p>Found a security problem? Please report it privately to the maintainer, not in a public issue. The
-        <a href="https://github.com/nikhlgoel/dnet-engine#security">repository README</a> explains how the service treats
-        the boundary it guards.</p>
+    <section class="wrap path" aria-labelledby="h-path">
+      <h2 id="h-path">The path, and who can see what</h2>
+      <ol class="hops">
+        <li><span class="who">Your computer</span><span class="sees">Runs DNet Engine. Your traffic is encrypted here.</span></li>
+        <li><span class="who">The network you are on</span><span class="sees">Sees a tunnel: that it exists, how much goes through it, where it ends. Not what is inside.</span></li>
+        <li><span class="who">Your server</span><span class="sees">Yours. It decrypts your traffic, so it sees what any server sees.</span></li>
+        <li><span class="who">The internet</span><span class="sees">Sees your server&rsquo;s address, not your computer&rsquo;s.</span></li>
+      </ol>
+    </section>
+
+    <section class="wrap rows" aria-labelledby="h-does">
+      <h2 id="h-does">What it does</h2>
+      <p class="hint">One line each. Open a line for the detail.</p>
+      <details>
+        <summary><span class="t">Chooses by measuring</span><span class="h">Tries what it has; uses what works.</span></summary>
+        <p>It tries the connection methods it has against the network you are on and uses the one that works, instead of
+          assuming one is best. Whether a method counts as dependable is also decided by measurement, never by its name.</p>
+      </details>
+      <details>
+        <summary><span class="t">Follows the network</span><span class="h">Moves when the network changes.</span></summary>
+        <p>When the network under it changes, or a method is blocked, it moves the connection to another path and tells you
+          why, in plain words. When it cannot, it says so.</p>
+      </details>
+      <details>
+        <summary><span class="t">Fails closed</span><span class="h">No quiet &ldquo;send it direct&rdquo;.</span></summary>
+        <p>There is no fallback that sends traffic around a tunnel that is down. (The kill-switch limit below applies: this
+          is a decision made in the service, not yet enforced by the operating system.)</p>
+      </details>
+      <details>
+        <summary><span class="t">Puts everything back</span><span class="h">Undoes its changes, even after a crash.</span></summary>
+        <p>It writes down every change to routes and name servers before making it, and undoes them when it stops or after
+          a crash.</p>
+      </details>
+      <details>
+        <summary><span class="t">Says why</span><span class="h">Every automatic change has a reason.</span></summary>
+        <p>Each change comes with a plain-language reason, so &ldquo;why did it do that?&rdquo; never needs a log.
+          Anything that is best-effort is labelled best-effort.</p>
+      </details>
+    </section>
+
+    <section class="wrap rows" aria-labelledby="h-limits">
+      <h2 id="h-limits">Known limits</h2>
+      <p class="hint">Things it cannot promise yet.</p>
+      <details>
+        <summary><span class="t">The kill switch is not a guarantee</span><span class="h">A stopped service is not a promise.</span></summary>
+        <p>The service refuses to send traffic unprotected, but nothing at the operating-system level enforces that yet. A
+          crash or a stopped service does not guarantee that nothing leaves the machine.</p>
+      </details>
+      <details>
+        <summary><span class="t">Rules by program are best-effort</span><span class="h">Rules by destination are reliable.</span></summary>
+        <p>A rule by destination name or address is reliable. A rule by program depends on spotting the program as it
+          connects, which can miss short-lived connections.</p>
+      </details>
+      <details>
+        <summary><span class="t">Switching networks can drop open connections</span><span class="h">The next ones work.</span></summary>
+        <p>Today every method is treated as one that drops open transfers when it switches. A method is only called better
+          after a recorded measurement says it survives.</p>
+      </details>
+    </section>
+
+    <section class="wrap rows" aria-labelledby="h-status">
+      <h2 id="h-status">Where it stands</h2>
+      <p class="hint">Early. The engine runs in a simulated network and a Windows lab. It has not been used on a real network,
+        and there is no installer yet. Checked 2026-11-03.</p>
+      <details>
+        <summary><span class="t">Part by part</span><span class="h">What works, what is built, what is not.</span></summary>
+        <div class="table-wrap" tabindex="0" role="region" aria-label="Status by part">
+          <table>
+            <thead><tr><th scope="col">Part</th><th scope="col">State</th></tr></thead>
+            <tbody>
+              <tr><td>Background service: three methods, two supervised transport programs, restores network settings</td><td>Works in a simulated network and a Windows lab</td></tr>
+              <tr><td>Choosing a method by measurement; recovery when one is blocked</td><td>Works</td></tr>
+              <tr><td>Following the network as it changes</td><td>Works for one method; not yet proven on two real networks</td></tr>
+              <tr><td>Command-line client</td><td>Works</td></tr>
+              <tr><td>Destination rules; noticing a sign-in page in the way</td><td>Built and tested; not yet met a real network</td></tr>
+              <tr><td>Tray icon and window</td><td>Built and tested; icons are placeholders</td></tr>
+              <tr><td>Setting up a server in your own cloud account</td><td>Tested against a stand-in; no real provider connected</td></tr>
+              <tr><td>Installer</td><td>Not built</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="more">The dated, authoritative list is
+          <a href="https://github.com/nikhlgoel/dnet-engine/blob/master/specs/001-network-resilience-client/tasks.md">tasks.md</a>
+          in the repository.</p>
+      </details>
     </section>
   </main>
 
   <footer class="foot">
-    <div class="wrap">
-      <p>DNet Engine is free software under the
-        <a href="https://github.com/nikhlgoel/dnet-engine/blob/master/LICENSE">GNU GPL, version 3 or later</a>.
-        It runs other open-source programs beside it; their licences and credits are in
-        <a href="https://github.com/nikhlgoel/dnet-engine/blob/master/THIRD-PARTY-NOTICES.md">THIRD-PARTY-NOTICES</a>.</p>
-      <p>&ldquo;DNet Engine&rdquo; names the technology. The finished program may be called something else; that will
-        change what people see, not how the engine works.</p>
-      <p>This page sets no cookies, loads nothing from other sites, and runs no scripts.</p>
+    <div class="wrap foot-grid">
+      <nav aria-label="Project links">
+        <a href="https://github.com/nikhlgoel/dnet-engine">Source</a>
+        <a href="https://github.com/nikhlgoel/dnet-engine#building-and-testing">Build it</a>
+        <a href="https://github.com/nikhlgoel/dnet-engine/blob/master/docs/Research-Critique.md">Why it is built this way</a>
+        <a href="https://github.com/nikhlgoel/dnet-engine/issues">Report a problem</a>
+        <a href="https://github.com/nikhlgoel/dnet-engine/blob/master/LICENSE">Licence</a>
+        <a href="https://github.com/nikhlgoel/dnet-engine/blob/master/THIRD-PARTY-NOTICES.md">Third-party notices</a>
+      </nav>
+      <p>Found a security problem? Please tell the maintainer privately, not in a public issue.
+        &ldquo;DNet Engine&rdquo; names the technology; the finished program may be called something else.
+        This page sets no cookies, loads nothing from other sites and runs no scripts.</p>
     </div>
   </footer>
 </body>
