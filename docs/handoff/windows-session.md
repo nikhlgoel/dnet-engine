@@ -15,8 +15,9 @@ Do this once on your Windows laptop (needs Git, Rust, Node 22 + pnpm, Go, and Po
 > 1. Section 0 and 1 of `LOCAL-COMMANDS.md` (define `run`, fetch the cores, fmt, clippy, tests). Fix any failure test-first.
 > 2. Section 1.5 (the ignored admin tests: routes, file permissions, undo recovery) and section 2.
 > 3. Sections 4 and 5 (service, window, brutal, rules) with a development service.
-> 4. Section 7.1 to 7.2: stage and build the installer, report its size.
-> 5. Only then, on a VM with a snapshot, section 7.3 onwards (install, reboot, crash, uninstall).
+> 4. Section 10, 10.8 to 10.12, with the same development service: a new server waits for approval, the Windows prompt approves it, a change that could not be made is refused with no prompt, and the window says "waits for your approval" instead of an error. I answer the Windows prompt and type `yes`; ask me when it is time.
+> 5. Section 7.1 to 7.2: stage and build the installer, report its size.
+> 6. Only then, on a VM with a snapshot, section 7.3 onwards (install, reboot, crash, uninstall).
 >
 > Read the logs in `.local-logs` yourself; do not ask me to paste them. Do not commit or push unless I say so. Do not touch a live network other than my own home connection and my own server. When something needs a decision or a thing from me (a server address, a key file), stop and tell me exactly what.
 >

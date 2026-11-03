@@ -318,12 +318,19 @@ Then approve it yourself, in the same window: `dnetctl approve <id>` opens a sec
 ```powershell
 run 10.9 ".\target\debug\dnetctl.exe pending; .\target\debug\dnetctl.exe endpoints"
 ```
-The server should now be listed and nothing waiting. Remove it afterwards with `dnetctl remove-endpoint <id>` (removing needs no approval).
+The server should now be listed and nothing waiting. Keep it for 10.11, then remove it with `dnetctl remove-endpoint <id>` (removing needs no approval).
 
 10.10 A made-up id is refused by both commands, and nothing is waiting (nothing to click)
 ```powershell
 run 10.10 ".\target\debug\dnetctl.exe approve zz99; .\target\debug\dnetctl.exe reject zz99; .\target\debug\dnetctl.exe pending"
 ```
+
+10.11 A change that could not be made is refused at once, with no Windows prompt (no admin; nothing to click; needs `uactest` from 10.9 still listed). The same name again must be refused with "an endpoint with that label already exists", and nothing may be waiting
+```powershell
+run 10.11 ".\target\debug\dnetctl.exe add-endpoint uactest --host <ip> --credentials-file <file>; .\target\debug\dnetctl.exe pending"
+```
+
+10.12 The same in the window (no admin; one Windows prompt). Open the window, Servers, "Add a server you already have": a new name, `<ip>`, the file, "Add server". The page must say "The new server waits for your approval above" with no red error, and list it under "Waiting for your approval". Press Approve, answer Windows, type `yes`: the server appears in the list and the notice goes away. Nothing to log: tell me what you saw, and remove the server afterwards.
 
 ## 11. Lab check: does the core match a rule by program on Windows? (not runnable yet)
 
