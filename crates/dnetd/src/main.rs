@@ -24,6 +24,10 @@
 // What a person can safely hand over to explain a failure (T112); reached through the service.
 #[cfg_attr(not(windows), allow(dead_code))]
 mod approval;
+// What the Registry is told about each part (T170 step 2). Built and tested; the service does not call it
+// yet (the next step wires it to GetComponents), so it is unused on every platform until then.
+#[allow(dead_code)]
+mod components;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod configure;
 mod diagnostics;

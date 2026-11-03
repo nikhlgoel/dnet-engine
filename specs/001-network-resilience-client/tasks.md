@@ -1785,8 +1785,12 @@ own, made by DNet Engine's wizard on Oracle Cloud Always Free (or any Linux serv
   > cases, red then green, one mutation caught). Jobs that were skipped behind these two (window shell, coverage, harness) have not run yet; this entry is updated as they do.
 - [~] T170 [US1] The Registry and the live map (ADR-0008 §3.6, P1): every part as a component with a state, a reason, the time it changed and its evidence; `GetComponents` (additive); the window's map; the two benign `closed pipe` lines classified (T157)
   > **Model done 2026-11-03** (`dnet_core::registry`, pure, 15 tests; mutations each caught; the roll-up order was decided the same day: Off < Ok < Starting < Unknown < Degraded < Blocked < Failed, pinned by a table test, the owner may overrule): kinds and states as in §3.6, `changed_at` moves only when the state does,
-  > a full Registry refuses a new part instead of dropping an old one, snapshots are ordered. **Open, in order:** (1) the service fills it
-  > from what it already knows (paths, the supervisor, the tunnel, the guard); (2) `GetComponents` in `dnet-ipc` with a contract test and a golden file (needs the security review: IPC boundary);
+  > a full Registry refuses a new part instead of dropping an old one, snapshots are ordered. **Step 2 built 2026-11-03** (`crates/dnetd/src/components.rs`, pure, test first: 19 tests written and seen failing, then green; four mutations each caught):
+  > `readings(StateSnapshot, PathsSnapshot)` gives one reading per part (each network, the connection, the endpoint carrying it, the routing decision, a sign-in page in the way) and `apply` brings a `Registry` in line, returning only what changed and removing
+  > parts that are gone. Nothing sensitive reaches a reading (no endpoint label, no network name; a test pins it). The routing reading says it is the service's decision, not enforced by the system. A network nobody has measured is `Unknown`, never fine;
+  > a part with no facts (the transport processes, the adapter, name-server handling, the guard, each carrier) is absent, not fabricated. Not wired: the module is `allow(dead_code)` until `GetComponents` calls it.
+  > **Open, in order:** (1) the service keeps one `Registry`, applies `readings` on every state or path change and at start (`service_impl.rs`), with the transport processes, adapter and DNS added where the service has the facts;
+  > (2) `GetComponents` in `dnet-ipc` with a contract test and a golden file (needs the security review: IPC boundary);
   > (3) `dnetctl components`; (4) `dnet-view` and the window's map; (5) the log classifier for the two benign lines per switch. Unblocks T165's display.
 
 ## Dependencies
