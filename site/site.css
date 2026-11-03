@@ -109,7 +109,21 @@ a:hover {
 
 /* ---- the first screen ------------------------------------------------------------------------- */
 .hero {
-  padding-block: var(--s-7) var(--s-7);
+  display: grid;
+  gap: var(--s-6);
+  padding-block: var(--s-7);
+}
+
+@media (min-width: 56rem) {
+  .hero {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    column-gap: var(--s-6);
+    align-items: center;
+  }
+
+  .hero .facts {
+    grid-column: 1 / -1;
+  }
 }
 
 .kicker,
@@ -134,10 +148,11 @@ h2 {
 }
 
 h1 {
-  max-width: 20ch;
-  font-size: clamp(2.25rem, 5.5vw + 0.75rem, 4rem);
+  max-width: 24ch;
+  font-size: clamp(2.25rem, 3.6vw + 1rem, 3.5rem);
   font-weight: 600;
   letter-spacing: -0.01em;
+  text-wrap: balance;
 }
 
 .sub {
@@ -156,7 +171,7 @@ h1 {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
   gap: 0;
-  margin: var(--s-7) 0 0;
+  margin: var(--s-4) 0 0;
   border-block: 1px solid var(--c-line-strong);
 }
 
@@ -253,7 +268,7 @@ h1 {
 /* ---- who sees what ---------------------------------------------------------------------------- */
 .path,
 .rows {
-  padding-block: var(--s-7) 0;
+  padding-block: calc(var(--s-7) * 1.5) 0;
 }
 
 h2 {
@@ -266,28 +281,54 @@ h2 {
   padding: 0;
   list-style: none;
   display: grid;
-  gap: var(--s-5);
+  gap: var(--s-4);
   counter-reset: hop;
 }
 
 @media (min-width: 52rem) {
   .hops {
     grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: var(--s-4);
+    gap: var(--s-5);
   }
 }
 
 .hops li {
   counter-increment: hop;
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: var(--s-2);
-  padding-block-start: var(--s-3);
-  border-block-start: 3px solid var(--c-line-strong);
+  padding: var(--s-4);
+  background: var(--c-card);
+  border: 1px solid var(--c-line);
+  border-radius: var(--r-card);
 }
 
-.hops li:nth-child(2) {
-  border-block-start-color: var(--c-warn);
+/* the one place the network can look: marked, so it is the thing the eye finds */
+.hops li.seen {
+  border-color: var(--c-warn);
+  border-width: 2px;
+}
+
+.tag {
+  font-family: var(--font-num);
+  font-size: var(--fs-sm);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--c-warn);
+}
+
+@media (min-width: 52rem) {
+  .hops li:not(:last-child)::after {
+    content: "\2192";
+    position: absolute;
+    inset-inline-end: calc(var(--s-5) / -2);
+    inset-block-start: 50%;
+    translate: 50% -50%;
+    color: var(--c-text-2);
+    font-size: var(--fs-xl);
+    line-height: 1;
+  }
 }
 
 .who {
@@ -329,8 +370,8 @@ summary {
   grid-template-columns: 1fr auto;
   gap: var(--s-1) var(--s-4);
   align-items: center;
-  min-height: 3.25rem;
-  padding-block: var(--s-3);
+  min-height: 4rem;
+  padding-block: var(--s-4);
   cursor: pointer;
   list-style: none;
 }
@@ -355,7 +396,7 @@ details[open] > summary::after {
 
 @media (min-width: 40rem) {
   summary {
-    grid-template-columns: 22rem 1fr auto;
+    grid-template-columns: 26rem 1fr auto;
   }
 
   summary::after {
@@ -366,11 +407,13 @@ details[open] > summary::after {
 
 .t {
   font-weight: 600;
+  font-size: var(--fs-xl);
+  line-height: var(--lh-tight);
 }
 
 .h {
   color: var(--c-text-2);
-  font-size: var(--fs-md);
+  font-size: var(--fs-lg);
 }
 
 summary:hover .t {
@@ -462,4 +505,116 @@ td:last-child {
 .foot p {
   margin: 0;
   max-width: 56ch;
+}
+
+/* ---- the first screen's picture: a connection that moves between networks ---------------------- */
+.hero-fig {
+  margin: 0;
+}
+
+.hero-fig figcaption {
+  margin-top: var(--s-3);
+  max-width: 44ch;
+  color: var(--c-text-2);
+  font-size: var(--fs-md);
+}
+
+.paths {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+
+.paths .base {
+  stroke: var(--c-line-strong);
+  stroke-width: 2;
+  opacity: 0.55;
+}
+
+.paths .live {
+  stroke: var(--c-ok);
+  stroke-width: 4;
+  opacity: 0;
+}
+
+.paths .flow {
+  stroke: var(--c-text);
+  stroke-width: 2;
+  stroke-dasharray: 1 14;
+  opacity: 0;
+}
+
+.paths .labels text {
+  fill: var(--c-text-2);
+  font-family: var(--font-num);
+  font-size: calc(var(--fs-sm) * 1.3);
+  letter-spacing: 0.04em;
+}
+
+.paths .labels .warn {
+  fill: var(--c-warn);
+  opacity: 0;
+}
+
+.paths .node rect {
+  fill: var(--c-card);
+  stroke: var(--c-line-strong);
+  stroke-width: 1.5;
+}
+
+.paths .node text {
+  fill: var(--c-text);
+  font-family: var(--font-display);
+  font-size: calc(var(--fs-lg) * 1.3);
+  font-weight: 600;
+}
+
+.paths .node .sm {
+  fill: var(--c-text-2);
+  font-family: var(--font-ui);
+  font-size: calc(var(--fs-sm) * 1.2);
+  font-weight: 400;
+}
+
+/* One sixteen-second loop. The first network carries; it is blocked and the second takes over without a gap; the
+   second turns lossy and the third takes over; then it comes round again. */
+@keyframes on-a { 0%, 24% { opacity: 1; } 28%, 92% { opacity: 0; } 96%, 100% { opacity: 1; } }
+@keyframes on-b { 0%, 26% { opacity: 0; } 30%, 58% { opacity: 1; } 62%, 100% { opacity: 0; } }
+@keyframes on-c { 0%, 60% { opacity: 0; } 64%, 90% { opacity: 1; } 94%, 100% { opacity: 0; } }
+@keyframes say-a { 0%, 25% { opacity: 0; } 29%, 50% { opacity: 1; } 55%, 100% { opacity: 0; } }
+@keyframes say-b { 0%, 59% { opacity: 0; } 63%, 82% { opacity: 1; } 87%, 100% { opacity: 0; } }
+@keyframes drift { to { stroke-dashoffset: -30; } }
+
+.paths .live.a { animation: on-a 16s ease-in-out infinite; }
+.paths .live.b { animation: on-b 16s ease-in-out infinite; }
+.paths .live.c { animation: on-c 16s ease-in-out infinite; }
+.paths .flow.a { animation: on-a 16s ease-in-out infinite, drift 1.4s linear infinite; }
+.paths .flow.b { animation: on-b 16s ease-in-out infinite, drift 1.4s linear infinite; }
+.paths .flow.c { animation: on-c 16s ease-in-out infinite, drift 1.4s linear infinite; }
+.paths .warn-a { animation: say-a 16s ease-in-out infinite; }
+.paths .warn-b { animation: say-b 16s ease-in-out infinite; }
+
+/* Without motion the picture is one frame that still says it: the first network blocked, the second carrying. */
+@media (prefers-reduced-motion: reduce) {
+  .paths .live,
+  .paths .flow,
+  .paths .labels .warn {
+    animation: none;
+  }
+
+  .paths .live.b,
+  .paths .flow.b,
+  .paths .labels .warn-a {
+    opacity: 1;
+  }
+}
+
+/* ---- the panel's one-line summary --------------------------------------------------------------- */
+.oneline {
+  margin: var(--s-5) 0 0;
+  padding-block-start: var(--s-4);
+  border-block-start: 1px solid currentColor;
+  max-width: 38ch;
+  font-size: var(--fs-lg);
 }

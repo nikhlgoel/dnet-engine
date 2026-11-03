@@ -20,11 +20,49 @@
 
   <main id="main">
     <section class="wrap hero" aria-labelledby="h-top">
+      <div class="hero-text">
       <p class="kicker">Free and open source</p>
       <h1 id="h-top">Keeps a connection up on networks that keep dropping it.</h1>
       <p class="sub">A client for Windows that sends your traffic through a server <strong>you</strong> run, over whichever
         connection method works on the network you are on, and keeps going when that network changes. Made for campus,
         hostel and caf&eacute; networks, first for its author and friends. Anyone is welcome to use it.</p>
+      </div>
+
+      <figure class="hero-fig">
+        <svg viewBox="0 0 480 290" role="img" aria-labelledby="fig-t fig-d" class="paths">
+          <title id="fig-t">A connection that moves between networks</title>
+          <desc id="fig-d">Three networks run between your computer and your server. The live connection follows the first, then moves to the second when the first is blocked, then to the third when the second turns lossy, and never drops.</desc>
+          <g class="lanes" fill="none" stroke-linecap="round">
+            <path class="base" d="M92 145 C 150 145, 150 55, 210 55 L 270 55 C 330 55, 330 145, 388 145"/>
+            <path class="base" d="M92 145 L 388 145"/>
+            <path class="base" d="M92 145 C 150 145, 150 235, 210 235 L 270 235 C 330 235, 330 145, 388 145"/>
+            <path class="live a" d="M92 145 C 150 145, 150 55, 210 55 L 270 55 C 330 55, 330 145, 388 145"/>
+            <path class="live b" d="M92 145 L 388 145"/>
+            <path class="live c" d="M92 145 C 150 145, 150 235, 210 235 L 270 235 C 330 235, 330 145, 388 145"/>
+            <path class="flow a" d="M92 145 C 150 145, 150 55, 210 55 L 270 55 C 330 55, 330 145, 388 145"/>
+            <path class="flow b" d="M92 145 L 388 145"/>
+            <path class="flow c" d="M92 145 C 150 145, 150 235, 210 235 L 270 235 C 330 235, 330 145, 388 145"/>
+          </g>
+          <g class="labels" text-anchor="middle">
+            <text x="240" y="40">Wi-Fi</text>
+            <text x="240" y="132">Ethernet</text>
+            <text x="240" y="262">Hotspot</text>
+            <text x="240" y="78" class="warn warn-a">blocked</text>
+            <text x="240" y="170" class="warn warn-b">lossy</text>
+          </g>
+          <g class="node">
+            <rect x="6" y="105" width="86" height="80" rx="12"/>
+            <text x="49" y="140" text-anchor="middle">You</text>
+            <text x="49" y="162" text-anchor="middle" class="sm">computer</text>
+          </g>
+          <g class="node">
+            <rect x="388" y="105" width="86" height="80" rx="12"/>
+            <text x="431" y="140" text-anchor="middle">Your</text>
+            <text x="431" y="164" text-anchor="middle">server</text>
+          </g>
+        </svg>
+        <figcaption>When a network drops or blocks a method, the connection moves to another one and says why.</figcaption>
+      </figure>
 
       <dl class="facts">
         <div><dt>Licence</dt><dd>GPL-3.0-or-later</dd></div>
@@ -41,6 +79,8 @@
           <h2 id="h-not" class="big">It is not a bypass tool.</h2>
           <p class="not-lead">It is not built, offered or described as a way around a network&rsquo;s rules. What it is
             follows from what it leaves out:</p>
+          <p class="oneline"><strong>In one line:</strong> it carries your traffic to a server you run, and keeps doing
+            so when the network changes. Nothing more.</p>
         </div>
         <ol class="reasons">
           <li><strong>It comes with nothing to connect to.</strong> No server, no accounts, no shared keys. Without a
@@ -61,7 +101,7 @@
       <h2 id="h-path">The path, and who can see what</h2>
       <ol class="hops">
         <li><span class="who">Your computer</span><span class="sees">Runs DNet Engine. Your traffic is encrypted here.</span></li>
-        <li><span class="who">The network you are on</span><span class="sees">Sees a tunnel: that it exists, how much goes through it, where it ends. Not what is inside.</span></li>
+        <li class="seen"><span class="tag">Where it can be seen</span><span class="who">The network you are on</span><span class="sees">Sees a tunnel: that it exists, how much goes through it, where it ends. Not what is inside.</span></li>
         <li><span class="who">Your server</span><span class="sees">Yours. It decrypts your traffic, so it sees what any server sees.</span></li>
         <li><span class="who">The internet</span><span class="sees">Sees your server&rsquo;s address, not your computer&rsquo;s.</span></li>
       </ol>
