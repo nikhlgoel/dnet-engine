@@ -14,6 +14,8 @@
 
 pub mod child;
 pub mod error;
+#[cfg(windows)]
+pub mod job;
 pub mod orphans;
 pub mod process;
 pub mod reap;

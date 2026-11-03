@@ -51,6 +51,7 @@ fn console_client() -> ClientIdentity {
         sid: CONSOLE_USER.to_string(),
         session_id: 1,
         authenticated: true,
+        elevated: false,
     }
 }
 
@@ -60,6 +61,7 @@ fn other_session_client() -> ClientIdentity {
         sid: "S-1-5-21-1000-1000-1000-2002".to_string(),
         session_id: 2,
         authenticated: true,
+        elevated: false,
     }
 }
 
@@ -104,10 +106,23 @@ fn ipc01_request_classes_match_the_contract_table() {
             endpoint: EndpointId::new(),
             enabled: false,
         },
-        AddRule,
-        RemoveRule,
+        AddRule {
+            matcher: dnet_core::rule::RuleMatcher::Domain("example.com".into()),
+            action: dnet_core::rule::RuleAction::Bypass,
+        },
+        RemoveRule {
+            rule: dnet_core::ids::RuleId::new(),
+        },
         SetProfileParams,
-        EnableBrutal,
+        EnableBrutal {
+            profile: dnet_core::ids::ProfileId::new("hy2-default"),
+            up_mbps: 50,
+            down_mbps: 200,
+            warning_revision: dnet_core::profile::BRUTAL_WARNING_REVISION,
+        },
+        DisableBrutal {
+            profile: dnet_core::ids::ProfileId::new("hy2-default"),
+        },
         SetEncryptedDnsHandling { block: true },
         StartProvisioning,
         CancelProvisioning,
@@ -137,6 +152,7 @@ fn ipc01_same_session_with_a_different_user_is_refused_a_mutating_request() {
         sid: "S-1-5-21-9999-9999-9999-3003".to_string(),
         session_id: 1,
         authenticated: true,
+        elevated: false,
     };
     let result = authorize(RequestClass::Mutating, &impostor, Some(&console()));
     assert!(
@@ -717,4 +733,167 @@ fn ipc15_the_version_reply_is_within_the_contract_shape() {
             "service_version"
         ])
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// IPC-27 — changes held for approval by an elevated client (T160, ADR-0008 F13)
+// ---------------------------------------------------------------------------------------------
+
+/// A service that records what it was asked, so a refusal can be shown to have stopped before it.
+struct Recording(std::sync::Mutex<Vec<String>>);
+
+impl Recording {
+    fn new() -> Self {
+        Self(std::sync::Mutex::new(Vec::new()))
+    }
+    fn asked(&self) -> Vec<String> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+impl dnet_ipc::service::Service for Recording {
+    fn console_session(&self) -> Option<ConsoleSession> {
+        Some(console())
+    }
+    fn dispatch(
+        &self,
+        request: &dnet_ipc::protocol::Request,
+    ) -> Result<String, dnet_ipc::protocol::IpcError> {
+        self.0.lock().unwrap().push(format!("{request:?}"));
+        Ok(r#"{"ok":true}"#.to_string())
+    }
+}
+
+fn approve(id: &str) -> String {
+    dnet_ipc::protocol::encode_request(&Request::ApproveChange { id: id.to_string() })
+}
+
+#[test]
+fn ipc27_the_three_new_requests_have_the_classes_the_design_gives_them() {
+    assert_eq!(Request::ListPending.class(), RequestClass::ReadOnly);
+    assert_eq!(
+        Request::RejectChange { id: "a1".into() }.class(),
+        RequestClass::Mutating
+    );
+    assert_eq!(
+        Request::ApproveChange { id: "a1".into() }.class(),
+        RequestClass::Approval
+    );
+}
+
+/// The point of the feature. The console user's own program, however it asks, cannot approve.
+#[test]
+fn ipc27_the_console_user_without_elevation_cannot_approve_and_the_service_is_never_asked() {
+    let service = Recording::new();
+    let reply = dnet_ipc::server::dispatch_frame(
+        &approve("a1b2c3"),
+        &console_client(),
+        Some(&console()),
+        &service,
+    );
+    let value: serde_json::Value = serde_json::from_str(&reply).unwrap();
+    assert_eq!(value["error"], "Unauthorized", "{reply}");
+    assert!(value["detail"].as_str().unwrap().contains("elevated"));
+    assert!(service.asked().is_empty(), "the service was reached");
+}
+
+#[test]
+fn ipc27_an_elevated_client_in_the_console_session_reaches_the_service() {
+    let service = Recording::new();
+    let admin = ClientIdentity {
+        elevated: true,
+        // A standard user who typed an administrator's credentials: another SID, same session.
+        sid: "S-1-5-21-1000-1000-1000-500".to_string(),
+        ..console_client()
+    };
+    let reply =
+        dnet_ipc::server::dispatch_frame(&approve("a1b2c3"), &admin, Some(&console()), &service);
+    assert_eq!(reply, r#"{"ok":true}"#);
+    assert_eq!(service.asked().len(), 1);
+    assert!(service.asked()[0].contains("ApproveChange"));
+}
+
+#[test]
+fn ipc27_an_elevated_client_in_another_session_cannot_approve() {
+    let service = Recording::new();
+    let remote = ClientIdentity {
+        elevated: true,
+        ..other_session_client()
+    };
+    let reply =
+        dnet_ipc::server::dispatch_frame(&approve("a1b2c3"), &remote, Some(&console()), &service);
+    assert!(reply.contains("Unauthorized"), "{reply}");
+    assert!(service.asked().is_empty());
+}
+
+/// The control for the two refusals above: withdrawing a held change needs no elevation, so the
+/// refusal was about approval and not about the request being unusual.
+#[test]
+fn ipc27_the_console_user_may_withdraw_a_held_change_and_list_them_without_elevation() {
+    let service = Recording::new();
+    for request in [
+        Request::RejectChange {
+            id: "a1b2c3".into(),
+        },
+        Request::ListPending,
+    ] {
+        let reply = dnet_ipc::server::dispatch_frame(
+            &dnet_ipc::protocol::encode_request(&request),
+            &console_client(),
+            Some(&console()),
+            &service,
+        );
+        assert_eq!(reply, r#"{"ok":true}"#, "{request:?}");
+    }
+    assert_eq!(service.asked().len(), 2);
+}
+
+#[test]
+fn ipc27_the_new_requests_round_trip() {
+    for request in [
+        Request::ListPending,
+        Request::ApproveChange {
+            id: "a1b2c3d4".into(),
+        },
+        Request::RejectChange { id: "z9".into() },
+    ] {
+        let wire = dnet_ipc::protocol::encode_request(&request);
+        assert_eq!(dnet_ipc::protocol::decode_request(&wire), Ok(request));
+    }
+}
+
+#[test]
+fn ipc27_an_id_that_is_not_a_plain_short_name_is_refused() {
+    let too_long = "a".repeat(dnet_ipc::protocol::CHANGE_ID_MAX + 1);
+    for bad in ["", "A1", "a b", "../x", "a\u{0}b", "é", too_long.as_str()] {
+        let wire = serde_json::json!({"request": "ApproveChange", "id": bad}).to_string();
+        let result = dnet_ipc::protocol::decode_request(&wire);
+        assert!(
+            matches!(result, Err(IpcError::InvalidRequest { .. })),
+            "{bad:?}: {result:?}"
+        );
+    }
+    // An extra field is refused too: the request carries nothing but the id.
+    let extra = r#"{"request":"ApproveChange","id":"a1","host":"203.0.113.9"}"#;
+    assert!(dnet_ipc::protocol::decode_request(extra).is_err());
+}
+
+#[test]
+fn ipc27_the_held_reply_tells_the_person_what_waits_and_how_to_approve_it() {
+    let reply = dnet_ipc::protocol::encode_ipc_error(&IpcError::ApprovalRequired {
+        id: "a1b2c3".into(),
+        what: "adding the server \"Home\" at 203.0.113.9".into(),
+    });
+    let value: serde_json::Value = serde_json::from_str(&reply).unwrap();
+    assert_eq!(value["error"], "ApprovalRequired");
+    assert_eq!(value["retryable"], false);
+    let detail = value["detail"].as_str().unwrap();
+    for part in [
+        "Home",
+        "203.0.113.9",
+        "dnetctl approve a1b2c3",
+        "ten minutes",
+    ] {
+        assert!(detail.contains(part), "{part} missing from {detail}");
+    }
 }

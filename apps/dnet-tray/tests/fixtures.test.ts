@@ -7,7 +7,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ACTION_FOR_CAUSE, ACTION_LABEL, chips, look, strip } from '../src/lib/describe';
-import { FAILURE_CAUSES, parseEndpoints, parseRulesReply, parseSnapshot } from '../src/lib/model';
+import { FAILURE_CAUSES, parseEndpoints, parsePending, parseRulesReply, parseSnapshot } from '../src/lib/model';
 
 const DIR = join(__dirname, '..', '..', '..', 'crates', 'dnet-view', 'tests', 'fixtures');
 const read = (name: string): unknown => JSON.parse(readFileSync(join(DIR, `${name}.json`), 'utf8'));
@@ -95,10 +95,23 @@ describe('what the Rust side sends', () => {
 
   it('the rules parse, with the encrypted-name setting in the window’s own names', () => {
     const view = parseRulesReply(read('rules'));
-    expect(view.rules.map((r) => [r.precedence, r.reliability, r.builtin])).toEqual([
-      [1, 'Deterministic', true],
-      [200, 'BestEffort', false],
+    expect(view.rules.map((r) => [r.precedence, r.reliability, r.builtin, r.kind, r.value])).toEqual([
+      [1, 'Deterministic', true, 'ip_cidr', '10.0.0.0/8'],
+      [200, 'BestEffort', false, 'application', 'C:\\Apps\\app.exe?'],
     ]);
+    expect(view.rules[1]?.id).toBe('21111111-2222-4333-8444-555555555555');
     expect(view.encryptedDns).toEqual({ block: true, needsDisclosure: false });
+  });
+});
+
+describe('the waiting changes', () => {
+  it('parse, with an extra field dropped and the text cleaned on the Rust side', () => {
+    const raw = read('pending') as { pending: Array<Record<string, unknown>> };
+    const view = parsePending(raw);
+    expect(view.map((p) => [p.id, p.what, p.expiresUnixMs])).toEqual([
+      ['a1b2c3d4', 'Adding the server "home" at 203.0.113.9', 601000],
+      ['0f9e8d7c', 'Sending example.com? around the tunnel', 602000],
+    ]);
+    for (const item of raw.pending) expect(Object.keys(item).sort()).toEqual(['expiresUnixMs', 'id', 'what']);
   });
 });

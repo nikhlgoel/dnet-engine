@@ -52,11 +52,101 @@ pub fn connected_networks() -> HashMap<InterfaceId, String> {
     }
 }
 
+/// T165 — what the radio link itself is like, by adapter: the generation, the rates the system
+/// reports and the signal. Facts about the link, kept apart from the quality measured on it: a fast
+/// link is not a good path, and the product never says it is (a measurement decides, never a label).
+/// Empty when there is no Wi-Fi, or when the system would not say.
+pub fn connected_links() -> HashMap<InterfaceId, LinkFacts> {
+    #[cfg(windows)]
+    {
+        windows_impl::connected_links()
+    }
+    #[cfg(not(windows))]
+    {
+        HashMap::new()
+    }
+}
+
+/// The 802.11 amendment a connection uses, as the system names its physical layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Generation {
+    /// 802.11b, g or a: the older generations, one name for what a person need not tell apart.
+    Legacy,
+    /// 802.11n.
+    Wifi4,
+    /// 802.11ac.
+    Wifi5,
+    /// 802.11ax, in 2.4, 5 and 6 GHz alike (the system's name does not say which band).
+    Wifi6,
+    /// 802.11be.
+    Wifi7,
+    /// 802.11ad, the 60 GHz short-range kind.
+    Wigig,
+    /// Something this program has no name for. Never guessed at.
+    Unknown,
+}
+
+impl Generation {
+    /// The name a person knows it by.
+    pub fn label(self) -> &'static str {
+        match self {
+            Generation::Legacy => "Wi-Fi (older generation)",
+            Generation::Wifi4 => "Wi-Fi 4",
+            Generation::Wifi5 => "Wi-Fi 5",
+            Generation::Wifi6 => "Wi-Fi 6",
+            Generation::Wifi7 => "Wi-Fi 7",
+            Generation::Wigig => "WiGig (60 GHz)",
+            Generation::Unknown => "Wi-Fi",
+        }
+    }
+
+    /// From the system's `DOT11_PHY_TYPE` number.
+    pub fn from_phy_type(phy: i32) -> Self {
+        match phy {
+            // fhss, dsss, infrared, ofdm (a), hrdsss (b), erp (g)
+            1..=6 => Generation::Legacy,
+            7 => Generation::Wifi4,
+            8 => Generation::Wifi5,
+            9 => Generation::Wigig,
+            10 => Generation::Wifi6,
+            11 => Generation::Wifi7,
+            _ => Generation::Unknown,
+        }
+    }
+}
+
+/// What the system says about one adapter's radio link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinkFacts {
+    pub generation: Generation,
+    /// The receive and transmit rates the link negotiated, in Mbit/s. A rate is a ceiling the radio
+    /// agreed on, not the speed anyone gets. `None` when the system gave zero.
+    pub receive_mbps: Option<u32>,
+    pub transmit_mbps: Option<u32>,
+    /// The system's own 0 to 100 reading of the signal. `None` when it gave nothing usable.
+    pub signal_percent: Option<u8>,
+}
+
+impl LinkFacts {
+    /// From the numbers the system reports: the PHY type, the rates in kbit/s, the signal quality.
+    pub fn from_system(phy_type: i32, receive_kbps: u32, transmit_kbps: u32, signal: u32) -> Self {
+        let mbps = |kbps: u32| (kbps > 0).then_some(kbps / 1000);
+        Self {
+            generation: Generation::from_phy_type(phy_type),
+            receive_mbps: mbps(receive_kbps),
+            transmit_mbps: mbps(transmit_kbps),
+            // A quality above 100 is not a percentage; it is not shown as one.
+            signal_percent: (signal <= 100).then_some(signal as u8),
+        }
+    }
+}
+
 #[cfg(windows)]
 mod windows_impl {
     use std::collections::HashMap;
     use std::ffi::c_void;
 
+    use super::LinkFacts;
     use dnet_core::ids::InterfaceId;
     use windows::Win32::Foundation::{HANDLE, NO_ERROR, WIN32_ERROR};
     use windows::Win32::NetworkManagement::IpHelper::ConvertInterfaceGuidToLuid;
@@ -97,10 +187,19 @@ mod windows_impl {
     }
 
     pub fn connected_networks() -> HashMap<InterfaceId, String> {
-        read().unwrap_or_default()
+        read().unwrap_or_default().0
     }
 
-    fn read() -> Option<HashMap<InterfaceId, String>> {
+    pub fn connected_links() -> HashMap<InterfaceId, LinkFacts> {
+        read().unwrap_or_default().1
+    }
+
+    /// Both answers come from the one query of each connected adapter.
+    #[allow(clippy::type_complexity)]
+    fn read() -> Option<(
+        HashMap<InterfaceId, String>,
+        HashMap<InterfaceId, LinkFacts>,
+    )> {
         let mut negotiated = 0u32;
         let mut raw = HANDLE::default();
         // SAFETY: both out-pointers are valid for the call; the handle is closed by `Handle`.
@@ -119,6 +218,7 @@ mod windows_impl {
         }
 
         let mut names = HashMap::new();
+        let mut links = HashMap::new();
         // SAFETY: the list is valid until `list_guard` drops, and `dwNumberOfItems` entries follow
         // its header; the slice is built from exactly that.
         let interfaces = unsafe {
@@ -160,11 +260,15 @@ mod windows_impl {
             // SAFETY: the service returned at least the size of the attributes, and it stays valid
             // until `data_guard` drops.
             let attributes = unsafe { &*(data as *const WLAN_CONNECTION_ATTRIBUTES) };
-            let ssid = &attributes.wlanAssociationAttributes.dot11Ssid;
-            let Some(name) = ssid_text(&ssid.ucSSID, ssid.uSSIDLength as usize) else {
-                drop(data_guard);
-                continue;
-            };
+            let association = &attributes.wlanAssociationAttributes;
+            let facts = LinkFacts::from_system(
+                association.dot11PhyType.0,
+                association.ulRxRate,
+                association.ulTxRate,
+                association.wlanSignalQuality,
+            );
+            let ssid = &association.dot11Ssid;
+            let name = ssid_text(&ssid.ucSSID, ssid.uSSIDLength as usize);
             drop(data_guard);
 
             let mut luid = NET_LUID_LH::default();
@@ -175,10 +279,14 @@ mod windows_impl {
             }
             // SAFETY: reading the `Value` view of the LUID union, which every view shares.
             let value = unsafe { luid.Value };
-            names.insert(InterfaceId::new(value), name);
+            // A hidden network has facts about its link and no name to show.
+            if let Some(name) = name {
+                names.insert(InterfaceId::new(value), name);
+            }
+            links.insert(InterfaceId::new(value), facts);
         }
         drop(list_guard);
-        Some(names)
+        Some((names, links))
     }
 }
 
@@ -250,5 +358,95 @@ mod tests {
             assert!(id.luid() != 0);
             assert!(name.chars().count() <= MAX_SSID_BYTES);
         }
+    }
+
+    #[test]
+    fn the_generation_is_named_the_way_a_person_knows_it() {
+        for (phy, label) in [
+            (7, "Wi-Fi 4"),
+            (8, "Wi-Fi 5"),
+            (10, "Wi-Fi 6"),
+            (11, "Wi-Fi 7"),
+            (9, "WiGig (60 GHz)"),
+            (4, "Wi-Fi (older generation)"),
+            (6, "Wi-Fi (older generation)"),
+        ] {
+            assert_eq!(Generation::from_phy_type(phy).label(), label, "{phy}");
+        }
+    }
+
+    /// A number this program does not know is not guessed into a generation.
+    #[test]
+    fn an_unknown_physical_layer_is_not_given_a_generation() {
+        for phy in [0, 12, 99, -1, i32::MAX] {
+            assert_eq!(Generation::from_phy_type(phy), Generation::Unknown, "{phy}");
+        }
+        assert_eq!(Generation::Unknown.label(), "Wi-Fi");
+    }
+
+    #[test]
+    fn rates_are_in_megabits_and_zero_means_not_said() {
+        let facts = LinkFacts::from_system(10, 1_201_000, 864_000, 87);
+        assert_eq!(facts.generation, Generation::Wifi6);
+        assert_eq!(facts.receive_mbps, Some(1201));
+        assert_eq!(facts.transmit_mbps, Some(864));
+        assert_eq!(facts.signal_percent, Some(87));
+
+        let silent = LinkFacts::from_system(10, 0, 0, 0);
+        assert_eq!((silent.receive_mbps, silent.transmit_mbps), (None, None));
+        // A signal of zero is a reading (the worst), not "nothing".
+        assert_eq!(silent.signal_percent, Some(0));
+    }
+
+    #[test]
+    fn a_signal_above_a_hundred_is_not_shown_as_a_percentage() {
+        assert_eq!(
+            LinkFacts::from_system(7, 1, 1, 100).signal_percent,
+            Some(100)
+        );
+        assert_eq!(LinkFacts::from_system(7, 1, 1, 101).signal_percent, None);
+        assert_eq!(
+            LinkFacts::from_system(7, 1, 1, u32::MAX).signal_percent,
+            None
+        );
+    }
+
+    #[test]
+    fn a_rate_below_a_megabit_is_not_rounded_into_one() {
+        assert_eq!(
+            LinkFacts::from_system(7, 999, 999, 50).receive_mbps,
+            Some(0)
+        );
+    }
+
+    /// The numbers in `from_phy_type` are written from memory; the system's own constants are the
+    /// authority, so this fails if they are not what the code says.
+    #[cfg(windows)]
+    #[test]
+    fn the_physical_layer_numbers_are_the_systems_own() {
+        use windows::Win32::NetworkManagement::WiFi::{
+            dot11_phy_type_erp, dot11_phy_type_he, dot11_phy_type_ht, dot11_phy_type_vht,
+        };
+        assert_eq!(
+            Generation::from_phy_type(dot11_phy_type_erp.0),
+            Generation::Legacy
+        );
+        assert_eq!(
+            Generation::from_phy_type(dot11_phy_type_ht.0),
+            Generation::Wifi4
+        );
+        assert_eq!(
+            Generation::from_phy_type(dot11_phy_type_vht.0),
+            Generation::Wifi5
+        );
+        assert_eq!(
+            Generation::from_phy_type(dot11_phy_type_he.0),
+            Generation::Wifi6
+        );
+    }
+
+    #[test]
+    fn asking_for_links_never_fails_the_caller() {
+        let _ = connected_links();
     }
 }

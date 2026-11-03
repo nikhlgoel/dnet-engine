@@ -82,6 +82,10 @@ impl WindowsCoreRuntime {
 }
 
 impl CoreRuntime for WindowsCoreRuntime {
+    async fn core_pid(&self, core: CoreBinding) -> Option<u32> {
+        self.pid(core).await
+    }
+
     async fn reap_orphans(&self) -> Result<(), SupervisorError> {
         let images = [self.primary.program.clone(), self.amneziawg.program.clone()];
         let reaped = orphans::reap(&images)?;

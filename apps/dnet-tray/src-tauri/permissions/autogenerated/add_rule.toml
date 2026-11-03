@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-add-rule"
+description = "Enables the add_rule command without any pre-configured scope."
+commands.allow = ["add_rule"]
+
+[[permission]]
+identifier = "deny-add-rule"
+description = "Denies the add_rule command without any pre-configured scope."
+commands.deny = ["add_rule"]

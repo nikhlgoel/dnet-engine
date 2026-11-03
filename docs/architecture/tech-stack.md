@@ -84,13 +84,14 @@ Fetched at build time, never committed. Licence texts and `BUILD-PROVENANCE.md` 
 
 | Artifact | Source | Size |
 |---|---|---|
-| Primary core | Built from pinned commit, tags `with_quic,with_utls,with_clash_api,with_gvisor,with_external_windivert`, DLL loader patched (ADR-0004 Finding 4) | 41.63 MB (measured before that remediation; re-measure at T115) |
+| Primary core | Built from pinned commit, tags `with_quic,with_utls,with_clash_api,with_gvisor,with_wireguard,with_external_windivert`, DLL loader patched (ADR-0004 Finding 4; `with_wireguard` added by ADR-0008) | see `vendor/primary-core/BUILD-PROVENANCE.md` (43.10 MB before `with_wireguard`; re-measure at T115) |
 | `amneziawg-go` | Built from pinned commit, default tags | 3.36 MB |
 | Wintun | Signed prebuilt DLL, SHA-256 verified | 0.41 MB |
 
 Sources are pinned by **commit SHA, not tag** — a tag can be moved, a commit cannot — and the fetched
-tree is re-checked against the pin before building. `with_wireguard` is deliberately excluded from
-the primary core; a unit test asserts it stays out. See [ADR-0004](../adr/0004-vendored-binary-pins.md).
+tree is re-checked against the pin before building. `with_wireguard` was excluded from the primary
+core by ADR-0004 and added by ADR-0008 (the session endpoint); a unit test asserts it is present.
+See [ADR-0004](../adr/0004-vendored-binary-pins.md).
 
 ---
 

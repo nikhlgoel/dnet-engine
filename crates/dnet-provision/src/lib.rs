@@ -21,5 +21,6 @@ pub mod provider;
 pub mod revoke;
 pub mod sanitize;
 pub mod secret;
+pub mod server_pins;
 pub mod stages;
 pub mod verify;

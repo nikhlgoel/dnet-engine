@@ -21,6 +21,8 @@ use dnet_core::credential::CredentialRef;
 use dnet_core::doh_block::Policy;
 use dnet_core::endpoint::{Endpoint, EndpointAddress, EndpointOrigin};
 use dnet_core::ids::EndpointId;
+use dnet_core::profile::{BandwidthPair, BrutalAcknowledgement, BRUTAL_WARNING_REVISION};
+use dnet_core::rule::{RuleAction, RuleMatcher};
 use dnet_ipc::protocol::NewEndpoint;
 
 use super::{Configurator, ConfigureError};
@@ -60,6 +62,7 @@ pub(crate) fn credentials() -> EndpointCredentials {
             },
         }),
         measure_origin: None,
+        session: None,
     }
 }
 
@@ -87,6 +90,7 @@ fn amneziawg_only() -> EndpointCredentials {
         hysteria2: None,
         reality: None,
         measure_origin: None,
+        session: None,
     }
 }
 
@@ -110,6 +114,12 @@ impl StateFile for Flaky {
             return Err("disk full".into());
         }
         self.inner.write(bytes)
+    }
+    fn remove(&self) -> Result<(), String> {
+        if self.fail_writes.load(Ordering::SeqCst) {
+            return Err("access denied".into());
+        }
+        self.inner.remove()
     }
 }
 
@@ -506,6 +516,193 @@ fn enabling_an_unknown_endpoint_is_refused() {
         .unwrap_err();
     assert!(refused(&error).contains("no endpoint"));
     assert!(rig.file_bytes().is_none());
+}
+
+// ------------------------------------------------------------------ Brutal (T105)
+
+const NOW: u64 = 1_790_000_000;
+
+fn hy2() -> dnet_core::ids::ProfileId {
+    dnet_core::ids::ProfileId::new("hy2-default")
+}
+
+fn saved_brutal(rig: &Rig) -> Option<(BandwidthPair, BrutalAcknowledgement)> {
+    rig.saved()
+        .unwrap()
+        .profiles
+        .into_iter()
+        .find(|p| p.id == hy2())
+        .and_then(|p| p.brutal)
+}
+
+const PAIR: BandwidthPair = BandwidthPair {
+    up_mbps: 50,
+    down_mbps: 200,
+};
+
+#[test]
+fn turning_brutal_on_is_saved_with_the_warning_and_the_time_it_was_accepted() {
+    let mut rig = Rig::new();
+    rig.configurator
+        .set_brutal(&mut rig.state, &hy2(), Some(PAIR), NOW)
+        .unwrap();
+
+    let (bandwidth, ack) = saved_brutal(&rig).expect("saved");
+    assert_eq!(bandwidth, PAIR);
+    assert_eq!(ack.warning_revision, BRUTAL_WARNING_REVISION);
+    assert_eq!(ack.acknowledged_at_unix, NOW);
+    let profile = rig
+        .state
+        .profiles()
+        .iter()
+        .find(|p| p.id() == &hy2())
+        .unwrap();
+    assert_eq!(profile.brutal().map(|b| *b.bandwidth()), Some(PAIR));
+}
+
+#[test]
+fn turning_brutal_off_is_saved() {
+    let mut rig = Rig::new();
+    rig.configurator
+        .set_brutal(&mut rig.state, &hy2(), Some(PAIR), NOW)
+        .unwrap();
+    rig.configurator
+        .set_brutal(&mut rig.state, &hy2(), None, NOW)
+        .unwrap();
+    assert_eq!(saved_brutal(&rig), None);
+    assert!(rig.state.profiles().iter().all(|p| p.brutal().is_none()));
+}
+
+#[test]
+fn brutal_on_a_profile_that_is_not_hysteria_2_or_does_not_exist_is_refused() {
+    let mut rig = Rig::new();
+    for id in ["awg-default", "reality-default", "no-such-profile"] {
+        let error = rig
+            .configurator
+            .set_brutal(
+                &mut rig.state,
+                &dnet_core::ids::ProfileId::new(id),
+                Some(PAIR),
+                NOW,
+            )
+            .unwrap_err();
+        assert!(!refused(&error).is_empty(), "{id}");
+        assert!(!refused(&error).contains(id), "repeated {id}: {error:?}");
+    }
+    assert!(rig.file_bytes().is_none(), "nothing was saved");
+}
+
+#[test]
+fn a_brutal_change_that_cannot_be_saved_changes_nothing() {
+    let mut rig = Rig::new();
+    rig.fail_writes(true);
+    assert!(matches!(
+        rig.configurator
+            .set_brutal(&mut rig.state, &hy2(), Some(PAIR), NOW),
+        Err(ConfigureError::Storage(_))
+    ));
+    assert!(rig.state.profiles().iter().all(|p| p.brutal().is_none()));
+}
+
+// ------------------------------------------------------------------ a person's rules (T108)
+
+fn rule_count(rig: &Rig) -> usize {
+    rig.state.rules().iter().filter(|r| !r.is_builtin()).count()
+}
+
+#[test]
+fn a_rule_is_added_saved_and_removed() {
+    let mut rig = Rig::new();
+    let id = rig
+        .configurator
+        .add_rule(
+            &mut rig.state,
+            RuleMatcher::DomainSuffix("example.com".into()),
+            RuleAction::Bypass,
+        )
+        .unwrap();
+    assert_eq!(rule_count(&rig), 1);
+    assert_eq!(rig.saved().unwrap().rules.len(), 1);
+    assert_eq!(rig.saved().unwrap().rules[0].id(), id);
+
+    rig.configurator.remove_rule(&mut rig.state, id).unwrap();
+    assert_eq!(rule_count(&rig), 0);
+    assert!(rig.saved().unwrap().rules.is_empty());
+}
+
+/// Program rules need connect-time attribution, which this build does not run. One added now would
+/// do nothing at all, so it is refused with that reason rather than accepted as "best effort".
+#[test]
+fn a_program_rule_is_refused_while_programs_are_not_attributed() {
+    let mut rig = Rig::new();
+    let error = rig
+        .configurator
+        .add_rule(
+            &mut rig.state,
+            RuleMatcher::Application(r"C:pp.exe".into()),
+            RuleAction::Tunnel,
+        )
+        .unwrap_err();
+    assert!(refused(&error).contains("program"), "{error:?}");
+    assert!(rig.file_bytes().is_none());
+}
+
+#[test]
+fn removing_a_built_in_or_an_unknown_rule_is_refused() {
+    let mut rig = Rig::new();
+    let builtin = rig.state.rules()[0].id();
+    assert!(!refused(
+        &rig.configurator
+            .remove_rule(&mut rig.state, builtin)
+            .unwrap_err()
+    )
+    .is_empty());
+    let unknown = dnet_core::ids::RuleId::new();
+    assert!(refused(
+        &rig.configurator
+            .remove_rule(&mut rig.state, unknown)
+            .unwrap_err()
+    )
+    .contains("no rule"));
+    assert!(rig.file_bytes().is_none());
+}
+
+#[test]
+fn a_rule_that_cannot_be_saved_is_not_kept() {
+    let mut rig = Rig::new();
+    rig.fail_writes(true);
+    assert!(matches!(
+        rig.configurator.add_rule(
+            &mut rig.state,
+            RuleMatcher::Domain("example.com".into()),
+            RuleAction::Tunnel
+        ),
+        Err(ConfigureError::Storage(_))
+    ));
+    assert_eq!(rule_count(&rig), 0);
+}
+
+#[test]
+fn there_is_a_limit_to_how_many_rules_a_person_adds() {
+    let mut rig = Rig::new();
+    for i in 0..dnet_config::persist::MAX_USER_RULES {
+        rig.configurator
+            .add_rule(
+                &mut rig.state,
+                RuleMatcher::Domain(format!("host{i}.example.com")),
+                RuleAction::Tunnel,
+            )
+            .unwrap();
+    }
+    let error = rig
+        .configurator
+        .add_rule(
+            &mut rig.state,
+            RuleMatcher::Domain("one-more.example.com".into()),
+            RuleAction::Tunnel,
+        )
+        .unwrap_err();
+    assert!(refused(&error).contains("at most"), "{error:?}");
 }
 
 // ------------------------------------------------------------------ encrypted DNS

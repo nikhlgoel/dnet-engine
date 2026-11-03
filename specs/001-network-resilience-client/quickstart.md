@@ -12,7 +12,7 @@ How to build, run, and prove the feature works. Validation only — implementati
 | Requirement | Notes |
 |---|---|
 | Windows 10 1809+ or Windows 11, x64/ARM64 | The only supported v1 platform |
-| Rust 1.83+ with `x86_64-pc-windows-msvc` | `rustup default stable-msvc` |
+| Rust 1.88+ with `x86_64-pc-windows-msvc` | `rustup default stable-msvc` |
 | Node 20+ and pnpm | Tray application only |
 | Docker Desktop with Linux containers | **Required** — the harness gates every network test |
 | Administrator rights | `dnetd` installs as a Windows Service |

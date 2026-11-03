@@ -14,6 +14,8 @@
 <section class="view" aria-labelledby="about-title">
   <h1 id="about-title">{t.title}</h1>
   <p class="lede">{t.body}</p>
+  <h2>{t.limitsTitle}</h2>
+  <p class="lede">{t.limits}</p>
   <p class="lede">{t.attribution}</p>
 
   <ul class="parts">

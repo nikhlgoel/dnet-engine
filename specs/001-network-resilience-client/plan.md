@@ -25,7 +25,7 @@ failure mode are documented in [research.md](./research.md) §R4 and gated by a 
 
 ## Technical Context
 
-**Language/Version**: Rust 1.83+ (2021 edition) for `dnetd` and all supporting crates; TypeScript 5.6
+**Language/Version**: Rust 1.88+ (2021 edition; the floor set by T143) for `dnetd` and all supporting crates; TypeScript 5.6
 with Svelte 5 for the tray UI.
 
 **Primary Dependencies**:

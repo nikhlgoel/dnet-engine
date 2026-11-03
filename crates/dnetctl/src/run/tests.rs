@@ -84,6 +84,10 @@ struct Stub {
     /// What `GetPaths` and `GetStats` answer.
     paths: Mutex<Result<String, IpcError>>,
     stats: Mutex<Result<String, IpcError>>,
+    /// What `ListPending` answers.
+    pending: Mutex<String>,
+    /// Whether the client of the in-memory connection holds an elevated token, as the server sees it.
+    client_elevated: Mutex<bool>,
     bus: EventBus,
 }
 
@@ -103,6 +107,8 @@ impl Stub {
                 0,
             ))),
             stats: Mutex::new(Ok(dnet_ipc::netview::encode_stats(None))),
+            pending: Mutex::new(r#"{"pending":[]}"#.to_string()),
+            client_elevated: Mutex::new(false),
             bus: EventBus::new(),
         })
     }
@@ -168,7 +174,11 @@ impl Service for Stub {
                 .unwrap()
                 .clone()
                 .map(|()| r#"{"imported":true,"changes":["Updated"]}"#.to_string()),
-            Request::RemoveEndpoint { .. } | Request::SetEndpointEnabled { .. } => self
+            Request::RemoveEndpoint { .. }
+            | Request::SetEndpointEnabled { .. }
+            | Request::EnableBrutal { .. }
+            | Request::DisableBrutal { .. }
+            | Request::RemoveRule { .. } => self
                 .change
                 .lock()
                 .unwrap()
@@ -186,6 +196,20 @@ impl Service for Stub {
             }
             Request::ListProfiles => Ok(r#"{"profiles":[{"id":"hy2-default","kind":"Hysteria2","tier":"Tier2","carrier":"Udp","brutal":false}]}"#.to_string()),
             Request::ListEndpoints => Ok(r#"{"endpoints":[]}"#.to_string()),
+            Request::ListRules => Ok(r#"{"rules":[
+                {"id":"11111111-2222-4333-8444-555555555555","kind":"dns_port","value":"53","precedence":0,"action":"Capture","reliability":"Deterministic","builtin":true},
+                {"id":"21111111-2222-4333-8444-555555555555","kind":"domain_suffix","value":"example.com","precedence":200,"action":"Bypass","reliability":"Deterministic","builtin":false}
+            ],"encrypted_dns":{"block":true,"needs_disclosure":false}}"#.to_string()),
+            Request::AddRule { .. } => self.change.lock().unwrap().clone().map(|()| {
+                r#"{"rule":"31111111-2222-4333-8444-555555555555"}"#.to_string()
+            }),
+            Request::ListPending => Ok(self.pending.lock().unwrap().clone()),
+            Request::ApproveChange { .. } | Request::RejectChange { .. } => self
+                .change
+                .lock()
+                .unwrap()
+                .clone()
+                .map(|()| r#"{"applied":true}"#.to_string()),
             Request::GetPaths => self.paths.lock().unwrap().clone(),
             Request::GetStats => self.stats.lock().unwrap().clone(),
             _ => Ok("{}".to_string()),
@@ -203,6 +227,7 @@ async fn serve(stub: Arc<Stub>, mut stream: DuplexStream, silent: bool) {
         sid: "S-1-5-21-1".into(),
         session_id: 1,
         authenticated: true,
+        elevated: *stub.client_elevated.lock().unwrap(),
     };
     let mut buf = Vec::new();
     let mut chunk = [0u8; 1024];
@@ -1580,4 +1605,479 @@ async fn a_reply_that_does_not_say_how_the_check_goes_is_not_success() {
         assert_eq!(code, exit::UNEXPECTED, "{reply}");
         assert!(shown.out().is_empty());
     }
+}
+
+// ------------------------------------------------------------------ Brutal (T105)
+
+#[tokio::test(start_paused = true)]
+async fn brutal_on_without_accepting_shows_the_warning_and_sends_nothing() {
+    let stub = Stub::new(vec![]);
+    let (code, shown) = go(
+        &["brutal-on", "hy2-default", "--up", "50", "--down", "200"],
+        &stub,
+    )
+    .await;
+    assert_eq!(code, exit::REFUSED, "{}", shown.err());
+    let warning = dnet_core::profile::brutal_warning();
+    for part in [warning.title, warning.body, warning.consequence] {
+        assert!(
+            shown.err().contains(part),
+            "missing {part:?}: {}",
+            shown.err()
+        );
+    }
+    assert!(shown.err().contains("--accept-warning"), "{}", shown.err());
+    assert_eq!(stub.requests_named("EnableBrutal"), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn brutal_on_with_the_warning_accepted_sends_both_speeds_and_the_revision() {
+    let stub = Stub::new(vec![]);
+    let (code, shown) = go(
+        &[
+            "brutal-on",
+            "hy2-default",
+            "--up",
+            "50",
+            "--down",
+            "200",
+            "--accept-warning",
+        ],
+        &stub,
+    )
+    .await;
+    assert_eq!(code, exit::OK, "{}", shown.err());
+    assert!(shown.out().contains("on"), "{}", shown.out());
+    let sent: Vec<String> = stub
+        .log()
+        .into_iter()
+        .filter(|r| r.contains("EnableBrutal"))
+        .collect();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    for part in [
+        r#""up_mbps":50"#,
+        r#""down_mbps":200"#,
+        r#""profile":"hy2-default""#,
+    ] {
+        assert!(sent[0].contains(part), "{}", sent[0]);
+    }
+    assert!(sent[0].contains(&format!(
+        r#""warning_revision":{}"#,
+        dnet_core::profile::BRUTAL_WARNING_REVISION
+    )));
+
+    let (code, shown) = go(&["brutal-off", "hy2-default"], &stub).await;
+    assert_eq!(code, exit::OK, "{}", shown.err());
+    assert_eq!(stub.requests_named("DisableBrutal"), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn brutal_speeds_the_service_would_refuse_are_a_usage_error_and_send_nothing() {
+    let stub = Stub::new(vec![]);
+    for args in [
+        vec![
+            "brutal-on",
+            "hy2-default",
+            "--up",
+            "0",
+            "--down",
+            "200",
+            "--accept-warning",
+        ],
+        vec![
+            "brutal-on",
+            "hy2-default",
+            "--up",
+            "fast",
+            "--down",
+            "200",
+            "--accept-warning",
+        ],
+        vec![
+            "brutal-on",
+            "SENTINEL Bad",
+            "--up",
+            "5",
+            "--down",
+            "5",
+            "--accept-warning",
+        ],
+    ] {
+        let (code, shown) = go(&args, &stub).await;
+        assert_eq!(code, exit::USAGE, "{args:?}: {}", shown.err());
+        assert!(!shown.err().contains("SENTINEL"), "{}", shown.err());
+    }
+    assert!(stub.log().is_empty(), "{:?}", stub.log());
+}
+
+// ------------------------------------------------------------------ rules (T108)
+
+#[tokio::test(start_paused = true)]
+async fn rules_are_listed_with_what_they_match_and_whether_they_are_built_in() {
+    let stub = Stub::new(vec![]);
+    let (code, shown) = go(&["rules"], &stub).await;
+    assert_eq!(code, exit::OK, "{}", shown.err());
+    for part in [
+        "*.example.com",
+        "Bypass",
+        "port 53",
+        "built-in",
+        "21111111-2222-4333-8444-555555555555",
+    ] {
+        assert!(
+            shown.out().contains(part),
+            "missing {part:?}: {}",
+            shown.out()
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_rule_is_added_by_what_it_matches_and_removed_by_id() {
+    let stub = Stub::new(vec![]);
+    let (code, shown) = go(&["add-rule", "--suffix", "example.com", "--bypass"], &stub).await;
+    assert_eq!(code, exit::OK, "{}", shown.err());
+    assert!(
+        shown.out().contains("31111111-2222-4333-8444-555555555555"),
+        "{}",
+        shown.out()
+    );
+    let sent: Vec<String> = stub
+        .log()
+        .into_iter()
+        .filter(|r| r.contains("AddRule"))
+        .collect();
+    assert_eq!(sent.len(), 1);
+    for part in [
+        r#""kind":"domain_suffix""#,
+        r#""value":"example.com""#,
+        r#""action":"bypass""#,
+    ] {
+        assert!(sent[0].contains(part), "{}", sent[0]);
+    }
+
+    let (code, shown) = go(
+        &["remove-rule", "21111111-2222-4333-8444-555555555555"],
+        &stub,
+    )
+    .await;
+    assert_eq!(code, exit::OK, "{}", shown.err());
+    assert_eq!(stub.requests_named("RemoveRule"), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_rule_the_service_would_refuse_is_a_usage_error_and_is_not_repeated() {
+    let stub = Stub::new(vec![]);
+    for args in [
+        vec!["add-rule", "--domain", "SENTINEL bad", "--tunnel"],
+        vec!["add-rule", "--cidr", "SENTINEL/99", "--tunnel"],
+        vec!["add-rule", "--cidr", "198.18.0.0/16", "--bypass"],
+        vec!["remove-rule", "SENTINEL-not-an-id"],
+    ] {
+        let (code, shown) = go(&args, &stub).await;
+        assert_eq!(code, exit::USAGE, "{args:?}");
+        assert!(!shown.err().contains("SENTINEL"), "{}", shown.err());
+    }
+    assert!(stub.log().is_empty(), "{:?}", stub.log());
+}
+
+// ------------------------------------------------------------------ T160: approving held changes
+
+const A_CHANGE: &str = "a1b2c3d4";
+const WHAT: &str = "Adding the server \"home\" at 203.0.113.9";
+
+fn one_change_waiting() -> String {
+    serde_json::json!({"pending": [{
+        "id": A_CHANGE,
+        "what": WHAT,
+        "proposed_unix_ms": 0,
+        "expires_unix_ms": 600_000,
+    }]})
+    .to_string()
+}
+
+/// A connector that can say whether this program is elevated, what happens when it asks Windows for
+/// elevation, and what the person types.
+struct Approver {
+    inner: Fake,
+    elevated: bool,
+    /// What asking Windows for an elevated window comes to.
+    relaunch_result: Result<i32, String>,
+    relaunched: Mutex<Vec<Vec<String>>>,
+    typed: Mutex<VecDeque<String>>,
+    prompts: Mutex<Vec<String>>,
+}
+
+impl Approver {
+    fn new(stub: &Arc<Stub>, elevated: bool) -> Self {
+        Self {
+            inner: Fake {
+                stub: Arc::clone(stub),
+                silent: false,
+                trusted: Mutex::new(Vec::new()),
+            },
+            elevated,
+            relaunch_result: Ok(0),
+            relaunched: Mutex::new(Vec::new()),
+            typed: Mutex::new(VecDeque::new()),
+            prompts: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn types(self, line: &str) -> Self {
+        self.typed.lock().unwrap().push_back(line.to_string());
+        self
+    }
+}
+
+impl Connector for Approver {
+    type Stream = DuplexStream;
+    fn connect(
+        &self,
+        trust_any_service: bool,
+    ) -> impl Future<Output = Result<Connection<DuplexStream>, ClientError>> {
+        self.inner.connect(trust_any_service)
+    }
+    fn is_elevated(&self) -> bool {
+        self.elevated
+    }
+    fn relaunch_elevated(&self, args: &[String]) -> Result<i32, String> {
+        self.relaunched.lock().unwrap().push(args.to_vec());
+        self.relaunch_result.clone()
+    }
+    fn ask_line(&self, prompt: &str) -> String {
+        self.prompts.lock().unwrap().push(prompt.to_string());
+        self.typed.lock().unwrap().pop_front().unwrap_or_default()
+    }
+}
+
+async fn go_approving(args: &[&str], approver: &Approver) -> (i32, Capture) {
+    go_with(args, approver, pending()).await
+}
+
+#[tokio::test(start_paused = true)]
+async fn waiting_changes_are_listed_with_what_they_do_and_how_to_deal_with_them() {
+    let stub = Stub::new(vec![]);
+    *stub.pending.lock().unwrap() = one_change_waiting();
+
+    let (code, shown) = go(&["pending"], &stub).await;
+
+    assert_eq!(code, exit::OK, "{}", shown.err());
+    for part in [
+        A_CHANGE,
+        WHAT,
+        "dropped in",
+        "dnetctl approve",
+        "dnetctl reject",
+    ] {
+        assert!(
+            shown.out().contains(part),
+            "{part} missing from {}",
+            shown.out()
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn with_nothing_waiting_it_says_so() {
+    let stub = Stub::new(vec![]);
+    let (code, shown) = go(&["pending"], &stub).await;
+    assert_eq!(code, exit::OK);
+    assert!(
+        shown.out().contains("Nothing is waiting"),
+        "{}",
+        shown.out()
+    );
+}
+
+/// The ordinary half: it checks the change exists, shows it, and hands over to an elevated window.
+/// It sends no approval itself, because the service would refuse it, and because it must not try.
+#[tokio::test(start_paused = true)]
+async fn an_unelevated_approve_shows_the_change_and_opens_the_elevated_window() {
+    let stub = Stub::new(vec![]);
+    *stub.pending.lock().unwrap() = one_change_waiting();
+    let approver = Approver::new(&stub, false);
+
+    let (code, shown) = go_approving(&["approve", A_CHANGE], &approver).await;
+
+    assert_eq!(code, exit::OK, "{}", shown.err());
+    assert!(shown.out().contains(WHAT), "{}", shown.out());
+    assert_eq!(
+        *approver.relaunched.lock().unwrap(),
+        [vec![
+            "approve".to_string(),
+            A_CHANGE.to_string(),
+            "--pause".to_string()
+        ]]
+    );
+    assert_eq!(stub.requests_named("ApproveChange"), 0, "{:?}", stub.log());
+    assert!(
+        approver.prompts.lock().unwrap().is_empty(),
+        "it must not ask in the ordinary window"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_exit_code_of_the_elevated_window_is_the_commands_exit_code() {
+    let stub = Stub::new(vec![]);
+    *stub.pending.lock().unwrap() = one_change_waiting();
+    let mut approver = Approver::new(&stub, false);
+    approver.relaunch_result = Ok(1);
+    let (code, _) = go_approving(&["approve", A_CHANGE], &approver).await;
+    assert_eq!(code, 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn declining_the_windows_prompt_changes_nothing_and_says_so() {
+    let stub = Stub::new(vec![]);
+    *stub.pending.lock().unwrap() = one_change_waiting();
+    let mut approver = Approver::new(&stub, false);
+    approver.relaunch_result = Err("you declined the Windows prompt".to_string());
+
+    let (code, shown) = go_approving(&["approve", A_CHANGE], &approver).await;
+
+    assert_eq!(code, exit::REFUSED);
+    assert!(
+        shown.err().contains("you declined the Windows prompt"),
+        "{}",
+        shown.err()
+    );
+    assert!(
+        shown.err().contains("Nothing was changed"),
+        "{}",
+        shown.err()
+    );
+    assert_eq!(stub.requests_named("ApproveChange"), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_change_nobody_holds_is_said_before_the_person_is_asked_anything() {
+    let stub = Stub::new(vec![]);
+    let approver = Approver::new(&stub, false);
+
+    let (code, shown) = go_approving(&["approve", "zz9"], &approver).await;
+
+    assert_eq!(code, exit::REFUSED);
+    assert!(
+        shown.err().contains("no change is waiting"),
+        "{}",
+        shown.err()
+    );
+    assert!(
+        approver.relaunched.lock().unwrap().is_empty(),
+        "no prompt for nothing"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_elevated_half_applies_the_change_only_after_the_person_types_yes() {
+    let stub = Stub::new(vec![]);
+    *stub.pending.lock().unwrap() = one_change_waiting();
+    *stub.client_elevated.lock().unwrap() = true;
+    let approver = Approver::new(&stub, true).types("yes").types("");
+
+    let (code, shown) = go_approving(&["approve", A_CHANGE, "--pause"], &approver).await;
+
+    assert_eq!(code, exit::OK, "{}", shown.err());
+    assert!(
+        shown.out().contains("Approved and applied"),
+        "{}",
+        shown.out()
+    );
+    assert_eq!(stub.requests_named("ApproveChange"), 1);
+    // The question names the change, because the Windows prompt did not.
+    let prompts = approver.prompts.lock().unwrap().clone();
+    assert!(prompts[0].contains(WHAT), "{prompts:?}");
+    // And with --pause the window is held open for the person to read the result.
+    assert!(prompts[1].contains("Press Enter"), "{prompts:?}");
+    // It never opened another window.
+    assert!(approver.relaunched.lock().unwrap().is_empty());
+}
+
+/// Anything but the word is a no: a stray Enter, a "y", a different case. The service is not asked.
+#[tokio::test(start_paused = true)]
+async fn anything_but_yes_leaves_the_change_waiting() {
+    for answer in ["", "y", "YES", "yes please", "no", "ye s"] {
+        let stub = Stub::new(vec![]);
+        *stub.pending.lock().unwrap() = one_change_waiting();
+        *stub.client_elevated.lock().unwrap() = true;
+        let approver = Approver::new(&stub, true).types(answer);
+
+        let (code, shown) = go_approving(&["approve", A_CHANGE], &approver).await;
+
+        assert_eq!(code, exit::REFUSED, "{answer:?}");
+        assert!(
+            shown.err().contains("Nothing was changed"),
+            "{answer:?}: {}",
+            shown.err()
+        );
+        assert_eq!(stub.requests_named("ApproveChange"), 0, "{answer:?}");
+    }
+}
+
+/// The client's claim to be elevated counts for nothing: the service reads the token. Here the
+/// program believes it is elevated but the connection is not, and the service refuses.
+#[tokio::test(start_paused = true)]
+async fn the_service_not_this_program_decides_who_is_elevated() {
+    let stub = Stub::new(vec![]);
+    *stub.pending.lock().unwrap() = one_change_waiting();
+    *stub.client_elevated.lock().unwrap() = false;
+    let approver = Approver::new(&stub, true).types("yes");
+
+    let (code, shown) = go_approving(&["approve", A_CHANGE], &approver).await;
+
+    assert_eq!(code, exit::REFUSED);
+    assert!(shown.err().contains("elevated"), "{}", shown.err());
+    assert_eq!(
+        stub.requests_named("ApproveChange"),
+        0,
+        "the stub was reached: {:?}",
+        stub.log()
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_change_can_be_dropped_without_elevation() {
+    let stub = Stub::new(vec![]);
+    let (code, shown) = go(&["reject", A_CHANGE], &stub).await;
+    assert_eq!(code, exit::OK, "{}", shown.err());
+    assert!(shown.out().contains("Dropped"), "{}", shown.out());
+    assert_eq!(stub.requests_named("RejectChange"), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_change_the_service_holds_back_is_reported_with_how_to_approve_it() {
+    // What `add-endpoint` now says: the service held it.
+    let refusal = IpcError::ApprovalRequired {
+        id: A_CHANGE.to_string(),
+        what: WHAT.to_string(),
+    };
+    let stub = Stub::new(vec![]);
+    *stub.change.lock().unwrap() = Err(refusal);
+    let (_dir, path) = credentials_file();
+
+    let (code, shown) = go(
+        &[
+            "add-endpoint",
+            "home",
+            "--host",
+            "203.0.113.9",
+            "--credentials-file",
+            &path,
+        ],
+        &stub,
+    )
+    .await;
+
+    assert_eq!(code, exit::REFUSED);
+    assert!(
+        shown.err().contains("dnetctl approve a1b2c3d4"),
+        "{}",
+        shown.err()
+    );
+    assert!(
+        shown.err().contains("waits for approval"),
+        "{}",
+        shown.err()
+    );
 }

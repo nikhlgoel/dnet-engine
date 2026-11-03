@@ -959,6 +959,9 @@ mod tests {
             fn write(&self, _: &[u8]) -> Result<(), String> {
                 Err("disk full".into())
             }
+            fn remove(&self) -> Result<(), String> {
+                Err("disk full".into())
+            }
         }
         let config = ConfigStore::new(Box::new(FailingWrites));
         let secrets = MemorySecretStore::new();

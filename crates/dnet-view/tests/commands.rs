@@ -83,12 +83,35 @@ async fn each_refusal_keeps_its_code_and_the_services_own_words() {
         ("InvalidRequest", "Refused"),
         ("Unauthorized", "Refused"),
         ("InternalError", "Refused"),
+        ("ApprovalRequired", "Refused"),
     ] {
         let link = FakeLink::new(move |_| refusal(wire, "the reason in the service's words"));
         let out = Bridge::new(link).stabilize(true, false).await;
         assert_eq!(out["code"], json!(window), "{wire}");
         assert_eq!(out["reason"], json!("the reason in the service's words"));
     }
+}
+
+/// A change that waits for approval is shown to the person whole, with the command that approves it:
+/// even with the longest label and address the service lets through, nothing is cut.
+#[tokio::test]
+async fn a_change_that_waits_for_approval_is_shown_whole() {
+    let longest = "a".repeat(67);
+    let held = dnet_ipc::protocol::IpcError::ApprovalRequired {
+        id: "a1b2c3d4".into(),
+        what: format!("Adding the server \"{longest}\" at {longest} made by the setup guide"),
+    }
+    .to_string();
+    assert!(held.chars().count() <= 400, "{}", held.chars().count());
+    let wording = held.clone();
+    let link = FakeLink::new(move |_| refusal("ApprovalRequired", &wording));
+    let out = Bridge::new(link).stabilize(true, false).await;
+    assert_eq!(out["code"], json!("Refused"));
+    assert_eq!(out["reason"], json!(held));
+    assert!(out["reason"]
+        .as_str()
+        .unwrap()
+        .contains("dnetctl approve a1b2c3d4"));
 }
 
 #[tokio::test]
@@ -450,4 +473,305 @@ async fn the_login_page_is_not_faked() {
         .as_str()
         .unwrap()
         .contains("Open any web page"));
+}
+
+// ---------------------------------------------------------------------- Brutal (T105)
+
+const REVISION: u32 = dnet_core::profile::BRUTAL_WARNING_REVISION;
+
+#[tokio::test]
+async fn brutal_is_turned_on_with_both_directions_and_the_warning_that_was_shown() {
+    let link = echo_ok(json!({ "applied": true }));
+    let seen = link.seen.clone();
+    let bridge = Bridge::new(link);
+    assert_eq!(
+        bridge
+            .set_brutal("hy2-default", Some((50, 200)), REVISION)
+            .await,
+        json!({ "ok": true })
+    );
+    assert_eq!(
+        bridge.set_brutal("hy2-default", None, REVISION).await,
+        json!({ "ok": true })
+    );
+    let requests = seen.lock().unwrap();
+    assert_eq!(
+        requests[0],
+        Request::EnableBrutal {
+            profile: dnet_core::ids::ProfileId::new("hy2-default"),
+            up_mbps: 50,
+            down_mbps: 200,
+            warning_revision: REVISION,
+        }
+    );
+    assert!(matches!(requests[1], Request::DisableBrutal { .. }));
+}
+
+/// A zero, a figure no link has, an old warning or a bad id is the window's mistake: nothing is sent.
+#[tokio::test]
+async fn a_brutal_request_the_service_would_refuse_is_not_sent() {
+    for (profile, pair, revision) in [
+        ("hy2-default", Some((0, 200)), REVISION),
+        ("hy2-default", Some((50, 0)), REVISION),
+        ("hy2-default", Some((2_000_000, 1)), REVISION),
+        ("hy2-default", Some((50, 200)), REVISION + 1),
+        ("HY2 default", Some((50, 200)), REVISION),
+        ("", None, REVISION),
+    ] {
+        let link = FakeLink::new(|_| panic!("nothing may be sent"));
+        let out = Bridge::new(link).set_brutal(profile, pair, revision).await;
+        assert_eq!(out["ok"], json!(false), "{profile:?} {pair:?} {revision}");
+    }
+}
+
+#[tokio::test]
+async fn a_brutal_change_the_service_did_not_confirm_is_not_reported_as_made() {
+    let link = echo_ok(json!({}));
+    let out = Bridge::new(link)
+        .set_brutal("hy2-default", Some((50, 200)), REVISION)
+        .await;
+    assert_eq!(out["ok"], json!(false));
+}
+
+#[tokio::test]
+async fn the_profile_list_carries_only_what_the_window_draws() {
+    let link = FakeLink::new(|_| {
+        Ok(dnet_ipc::client::Reply::Done(json!({ "profiles": [
+            { "id": "hy2-default", "kind": "Hysteria2", "tier": "Tier2", "carrier": "Udp",
+              "brutal": true, "surprise": "x" },
+            { "id": "reality-default", "kind": "VlessReality", "tier": "Tier2", "carrier": "Tcp",
+              "brutal": false },
+        ]})))
+    });
+    let profiles = Bridge::new(link).profiles().await.unwrap();
+    assert_eq!(
+        profiles,
+        json!({ "profiles": [
+            { "id": "hy2-default", "kind": "Hysteria2", "tier": "Tier2", "brutal": true },
+            { "id": "reality-default", "kind": "VlessReality", "tier": "Tier2", "brutal": false },
+        ]})
+    );
+}
+
+#[tokio::test]
+async fn a_profile_list_this_program_cannot_read_is_an_error_not_an_empty_list() {
+    for reply in [
+        json!({}),
+        json!({ "profiles": [ { "id": "x", "kind": "Telepathy", "tier": "Tier2", "brutal": false } ] }),
+        json!({ "profiles": [ { "id": "x", "kind": "Hysteria2", "tier": "Tier9", "brutal": false } ] }),
+        json!({ "profiles": [ { "kind": "Hysteria2", "tier": "Tier2", "brutal": false } ] }),
+    ] {
+        let link = FakeLink::new(move |_| Ok(dnet_ipc::client::Reply::Done(reply.clone())));
+        assert!(Bridge::new(link).profiles().await.is_err());
+    }
+}
+
+// ---------------------------------------------------------------------- rules (T108)
+
+#[tokio::test]
+async fn a_rule_is_added_by_what_it_matches_and_removed_by_id() {
+    let link = FakeLink::new(|request| match request {
+        Request::AddRule { .. } => done(json!({ "rule": "31111111-2222-4333-8444-555555555555" })),
+        Request::RemoveRule { .. } => done(json!({ "applied": true })),
+        other => panic!("unexpected {other:?}"),
+    });
+    let seen = link.seen.clone();
+    let bridge = Bridge::new(link);
+    assert_eq!(
+        bridge
+            .add_rule("domain_suffix", "example.com", "bypass")
+            .await,
+        json!({ "ok": true, "id": "31111111-2222-4333-8444-555555555555" })
+    );
+    assert_eq!(
+        bridge
+            .remove_rule("31111111-2222-4333-8444-555555555555")
+            .await,
+        json!({ "ok": true })
+    );
+    let requests = seen.lock().unwrap();
+    assert!(matches!(
+        &requests[0],
+        Request::AddRule {
+            matcher: dnet_core::rule::RuleMatcher::DomainSuffix(d),
+            action: dnet_core::rule::RuleAction::Bypass
+        } if d == "example.com"
+    ));
+    assert!(matches!(requests[1], Request::RemoveRule { .. }));
+}
+
+#[tokio::test]
+async fn a_rule_the_service_would_refuse_is_not_sent_and_not_repeated() {
+    for (kind, value, action) in [
+        ("domain", "SENTINEL bad", "tunnel"),
+        ("ip_cidr", "198.18.0.0/16", "bypass"),
+        ("dns_port", "53", "bypass"),
+        ("domain", "example.com", "reject"),
+    ] {
+        let link = FakeLink::new(|_| panic!("nothing may be sent"));
+        let out = Bridge::new(link).add_rule(kind, value, action).await;
+        assert_eq!(out["ok"], json!(false), "{kind} {value} {action}");
+        assert!(!out.to_string().contains("SENTINEL"), "{out}");
+    }
+    let link = FakeLink::new(|_| panic!("nothing may be sent"));
+    assert_eq!(
+        Bridge::new(link).remove_rule("not-an-id").await["ok"],
+        json!(false)
+    );
+}
+
+// ---------------------------------------------------------------------- the person's own server (T150)
+
+fn prepared_reply() -> Value {
+    json!({
+        "arch": "arm64",
+        "script": "#!/bin/sh\necho hi\n",
+        "ports": [
+            { "protocol": "udp", "port": 51820 },
+            { "protocol": "udp", "port": 44443 },
+            { "protocol": "tcp", "port": 8443 },
+        ],
+        "valid_for_s": 3600,
+    })
+}
+
+#[tokio::test]
+async fn setting_up_a_server_asks_for_a_script_for_the_kind_of_server() {
+    let link = FakeLink::new(|request| match request {
+        Request::PrepareServer { .. } => done(prepared_reply()),
+        other => panic!("unexpected {other:?}"),
+    });
+    let seen = link.seen.clone();
+    let out = Bridge::new(link).prepare_server("arm64").await;
+    assert_eq!(out["ok"], json!(true), "{out}");
+    assert_eq!(out["script"], json!("#!/bin/sh\necho hi\n"));
+    assert_eq!(out["arch"], json!("arm64"));
+    assert_eq!(
+        out["ports"],
+        json!([
+            { "protocol": "udp", "port": 51820 },
+            { "protocol": "udp", "port": 44443 },
+            { "protocol": "tcp", "port": 8443 },
+        ])
+    );
+    assert_eq!(out["validForMinutes"], json!(60));
+    assert!(matches!(
+        seen.lock().unwrap()[0],
+        Request::PrepareServer {
+            arch: dnet_ipc::server_setup::ServerKind::Arm64
+        }
+    ));
+}
+
+#[tokio::test]
+async fn a_kind_of_server_the_service_would_refuse_is_not_sent() {
+    for bad in ["", "x86_64", "AMD64", "SENTINEL"] {
+        let link = FakeLink::new(|_| panic!("nothing may be sent"));
+        let out = Bridge::new(link).prepare_server(bad).await;
+        assert_eq!(out["ok"], json!(false), "{bad}");
+        assert!(!out.to_string().contains("SENTINEL"), "{out}");
+    }
+}
+
+/// The window shows the script and offers it for copying; a reply that is not what was promised is an
+/// error the person can read, not a script that might be anything.
+#[tokio::test]
+async fn a_script_reply_that_is_not_what_was_promised_is_never_shown() {
+    for reply in [
+        json!({}),
+        json!({ "arch": "arm64", "script": "", "ports": [], "valid_for_s": 1 }),
+        json!({ "arch": "sparc", "script": "x", "ports": [{"protocol":"udp","port":1}], "valid_for_s": 1 }),
+        json!({ "arch": "arm64", "script": "x", "ports": [{"protocol":"icmp","port":1}], "valid_for_s": 1 }),
+    ] {
+        let link = FakeLink::new(move |_| done(reply.clone()));
+        let out = Bridge::new(link).prepare_server("arm64").await;
+        assert_eq!(out["ok"], json!(false));
+        assert!(out.get("script").is_none(), "{out}");
+    }
+}
+
+#[tokio::test]
+async fn the_pasted_result_finishes_it_and_names_the_new_server() {
+    let link = FakeLink::new(|request| match request {
+        Request::FinishServer {
+            label,
+            host,
+            report,
+        } => {
+            assert_eq!(label, "my server");
+            assert_eq!(host, "203.0.113.10");
+            assert!(report.contains("DNET-BOOTSTRAP-REPORT"));
+            done(json!({ "endpoint": "31111111-2222-4333-8444-555555555555" }))
+        }
+        other => panic!("unexpected {other:?}"),
+    });
+    let out = Bridge::new(link)
+        .finish_server("my server", "203.0.113.10", "x\nDNET-BOOTSTRAP-REPORT {}\n")
+        .await;
+    assert_eq!(
+        out,
+        json!({ "ok": true, "id": "31111111-2222-4333-8444-555555555555" })
+    );
+}
+
+#[tokio::test]
+async fn a_result_or_address_the_service_would_refuse_is_not_sent_and_not_repeated() {
+    for (label, host, report) in [
+        ("", "203.0.113.10", "r"),
+        ("a", "http://x", "r"),
+        ("a", "203.0.113.10", ""),
+        ("a", "203.0.113.10", "SENTINEL\u{0}"),
+        ("SENTINEL\u{202e}", "203.0.113.10", "r"),
+    ] {
+        let link = FakeLink::new(|_| panic!("nothing may be sent"));
+        let out = Bridge::new(link).finish_server(label, host, report).await;
+        assert_eq!(out["ok"], json!(false));
+        assert!(!out.to_string().contains("SENTINEL"), "{out}");
+    }
+}
+
+// ---------------------------------------------------------------------- held changes (T160)
+
+#[tokio::test]
+async fn dropping_a_waiting_change_sends_exactly_that_and_nothing_else() {
+    let link = echo_ok(json!({ "applied": true }));
+    let seen = link.seen.clone();
+    let out = Bridge::new(link).reject_change("a1b2c3d4").await;
+    assert_eq!(out, json!({ "ok": true }));
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![Request::RejectChange {
+            id: "a1b2c3d4".to_string()
+        }]
+    );
+}
+
+/// A name that is not a plain short name is refused here, before anything is sent.
+#[tokio::test]
+async fn a_change_name_the_service_would_refuse_is_not_sent() {
+    for bad in ["", "A1", "a b", "../x", &"a".repeat(33)] {
+        let link = echo_ok(json!({ "applied": true }));
+        let seen = link.seen.clone();
+        let out = Bridge::new(link).reject_change(bad).await;
+        assert_eq!(out["ok"], json!(false), "{bad:?}");
+        assert!(seen.lock().unwrap().is_empty(), "{bad:?} was sent");
+    }
+}
+
+#[tokio::test]
+async fn a_drop_the_service_does_not_confirm_is_not_reported_as_done() {
+    let link = echo_ok(json!({}));
+    let out = Bridge::new(link).reject_change("a1b2c3d4").await;
+    assert_eq!(out["ok"], json!(false));
+}
+
+#[tokio::test]
+async fn the_waiting_list_refuses_what_is_not_a_list() {
+    let link = echo_ok(json!({ "pending": "none" }));
+    assert!(Bridge::new(link).pending().await.is_err());
+    let link = echo_ok(json!({ "pending": [{ "id": "a1", "what": "x" }] }));
+    assert!(
+        Bridge::new(link).pending().await.is_err(),
+        "a change with no deadline is not one this program draws"
+    );
 }

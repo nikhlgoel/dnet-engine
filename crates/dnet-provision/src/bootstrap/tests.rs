@@ -15,11 +15,19 @@ fn pin(name: &str, tag: char) -> CorePin {
     }
 }
 
+/// A device key: 32 bytes of `fill`, in standard base64, as the core's key generator prints them.
+fn device_key(fill: u8) -> String {
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine as _;
+    STANDARD.encode([fill; 32])
+}
+
 fn plan() -> BootstrapPlan {
     BootstrapPlan {
         cores: ServerCores {
             primary_core: pin("primary-core", 'a'),
             amneziawg: pin("amneziawg-go", 'b'),
+            arch: ServerArch::Amd64,
         },
         ports: Ports::default(),
         awg_client_public_hex: "c".repeat(64),
@@ -36,6 +44,9 @@ fn plan() -> BootstrapPlan {
         },
         hysteria2_server_name: "edge.example.net".to_owned(),
         reality_target: TargetDomain::parse("www.example.com").unwrap(),
+        session: SessionPlan {
+            device_public_keys: vec![device_key(1), device_key(2)],
+        },
     }
 }
 
@@ -159,6 +170,10 @@ fn every_key_and_secret_is_made_only_when_its_file_is_missing() {
             "generate reality-keypair",
             "[ ! -s \"$STATE/primary/reality.private\" ]",
         ),
+        (
+            "generate wg-keypair",
+            "[ ! -s \"$STATE/primary/session.private\" ]",
+        ),
         ("generate uuid", "[ -s \"$STATE/primary/uuid\" ]"),
         (
             "generate rand --hex 8",
@@ -173,8 +188,15 @@ fn every_key_and_secret_is_made_only_when_its_file_is_missing() {
             .unwrap_or_else(|| panic!("{generator} is not guarded by {guard}"));
         assert!(at - guard_at < 400, "{generator} is too far from its guard");
     }
-    // The server configuration is written only if absent, so a re-run cannot change a running server.
-    assert!(text.contains("if [ ! -s \"$STATE/primary/server.json\" ]; then"));
+    // The server configuration is **derived** from those keys and the devices in the script (ADR-0008: a
+    // device is added or removed by running the script again), so it is rewritten every time, replaced only
+    // when the core accepts it and it differs, and the service is restarted only when it changed.
+    assert!(
+        text.contains("cmp -s \"$STATE/primary/server.json.new\" \"$STATE/primary/server.json\"")
+    );
+    assert!(text.contains(
+        "if [ \"$CONFIG_CHANGED\" = 1 ]; then systemctl restart dnet-primary.service; fi"
+    ));
     // Nothing deletes state.
     assert!(!text.contains("rm -rf"));
     assert!(!text.contains("rm -r "));
@@ -216,6 +238,26 @@ fn exactly_the_three_ports_are_opened_on_the_machine() {
     assert_eq!(text.matches("\n  allow ").count(), 3);
 }
 
+/// Runs `shell` with `args`, the script given on stdin. Not as a path or a `-c` argument: on Windows the
+/// first `bash` can be WSL's launcher, which reads `C:\...` as escapes and drops `$(...)` from arguments.
+fn run_on_stdin(shell: &str, args: &[&str], script: &str) -> std::process::Output {
+    use std::io::Write;
+    let mut child = std::process::Command::new(shell)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(script.as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
 #[test]
 fn the_script_parses_as_posix_shell() {
     // `sh -n` reads the script and runs none of it. Skipped, loudly, where there is no shell.
@@ -229,14 +271,7 @@ fn the_script_parses_as_posix_shell() {
         eprintln!("SKIPPED: no shell on this machine to check the script's syntax");
         return;
     };
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("bootstrap.sh");
-    std::fs::write(&path, script(&plan()).unwrap()).unwrap();
-    let output = std::process::Command::new(shell)
-        .arg("-n")
-        .arg(&path)
-        .output()
-        .unwrap();
+    let output = run_on_stdin(shell, &["-n"], &script(&plan()).unwrap());
     assert!(
         output.status.success(),
         "{shell} -n rejected the script:\n{}",
@@ -364,12 +399,13 @@ fn the_firewall_rules_follow_the_ports() {
 
 fn report_json() -> serde_json::Value {
     serde_json::json!({
-        "version": 1,
+        "version": 2,
         "amneziawg": {
             "server_public_key_hex": "d".repeat(64),
             "listen_port": 51820,
             "client_address": "10.66.0.2",
-            "prefix_len": 24
+            "prefix_len": 24,
+            "client_public_key_hex": "c".repeat(64)
         },
         "hysteria2": {
             "server_port": 44443,
@@ -386,6 +422,15 @@ fn report_json() -> serde_json::Value {
             "short_id": "0123456789abcdef",
             "uuid": "bf000d23-0752-40b4-affe-68f7707a9661",
             "flow": "xtls-rprx-vision"
+        },
+        "session": {
+            "server_public_key": device_key(3),
+            "port": 25182,
+            "server_address": "10.9.0.1",
+            "devices": [
+                { "address": "10.9.0.2", "public_key": device_key(1) },
+                { "address": "10.9.0.3", "public_key": device_key(2) }
+            ]
         },
         "cores": {
             "primary_core": { "version": "v1.14.0", "sha256": "a".repeat(64) },
@@ -451,8 +496,14 @@ fn a_report_in_the_wrong_shape_is_refused_without_quoting_it() {
 #[test]
 fn an_unknown_report_version_is_refused() {
     assert_eq!(
-        parse(|j| j["version"] = serde_json::json!(2)),
-        Err(ReportError::Version(2))
+        parse(|j| j["version"] = serde_json::json!(3)),
+        Err(ReportError::Version(3))
+    );
+    // A server set up by the previous script reports 1: refused with the version, so the person runs the
+    // new script (the old report has no session in it).
+    assert_eq!(
+        parse(|j| j["version"] = serde_json::json!(1)),
+        Err(ReportError::Version(1))
     );
 }
 
@@ -616,9 +667,29 @@ fn a_server_running_other_versions_than_were_pinned_is_refused() {
 #[test]
 fn the_credentials_carry_what_the_server_reported_and_the_clients_own_key() {
     let keys = ClientKeys::from_private([7u8; 32]);
+    let session_keys = SessionKeys::from_private([9u8; 32]);
     let report = parse(|_| {}).unwrap();
     let origin = Origin::parse("http://203.0.113.80:8080").ok();
-    let creds = report.credentials(&keys, plan().obfuscation, origin.clone());
+    let creds = report.credentials(&keys, &session_keys, plan().obfuscation, origin.clone());
+
+    // The session: this device's own key (not the AmneziaWG one), the server's session key, the address the
+    // server gave the first device, and the port.
+    let session = creds.session.as_ref().expect("a session");
+    assert_eq!(
+        session.device_private_key,
+        Secret::new(session_keys.private_b64())
+    );
+    // One person's two protocols never share a key.
+    assert_ne!(session.device_private_key, Secret::new(keys.private_hex()));
+    assert_eq!(session.server_public_key, device_key(3));
+    assert_eq!(session.device_address.to_string(), "10.9.0.2");
+    assert_eq!(session.session_port, 25182);
+    // What is stored can be read back, and is something a generator will accept.
+    let stored = creds.to_plaintext_json().unwrap();
+    assert_eq!(
+        EndpointCredentials::from_plaintext_json(&stored).unwrap(),
+        creds
+    );
 
     let awg = creds.amneziawg.as_ref().unwrap();
     assert_eq!(awg.client_private_key.expose_wire(), keys.private_hex());
@@ -647,8 +718,9 @@ fn the_credentials_carry_what_the_server_reported_and_the_clients_own_key() {
 #[test]
 fn nothing_that_is_printed_shows_a_secret() {
     let keys = ClientKeys::from_private([7u8; 32]);
+    let session_keys = SessionKeys::from_private([9u8; 32]);
     let report = parse(|_| {}).unwrap();
-    let creds = report.credentials(&keys, plan().obfuscation, None);
+    let creds = report.credentials(&keys, &session_keys, plan().obfuscation, None);
     for shown in [
         format!("{report:?}"),
         format!("{creds:?}"),
@@ -663,4 +735,938 @@ fn nothing_that_is_printed_shows_a_secret() {
         );
         assert!(!shown.contains("0123456789abcdef"), "{shown}");
     }
+}
+
+// ------------------------------------------------------------------ the machine's processor
+
+/// A script for the wrong processor would download a program that cannot run and fail in a way nobody
+/// can read. It says so first, in words, before anything is installed.
+#[test]
+fn the_script_stops_at_once_on_a_machine_of_the_other_kind() {
+    for (arch, own, other) in [
+        (ServerArch::Amd64, "x86_64", "aarch64"),
+        (ServerArch::Arm64, "aarch64", "x86_64"),
+    ] {
+        let mut p = plan();
+        p.cores.arch = arch;
+        let text = script(&p).unwrap();
+        let check = text
+            .lines()
+            .position(|l| l.contains("uname -m"))
+            .expect("the script never asks what kind of machine it is on");
+        let first_install = text
+            .lines()
+            .position(|l| l.contains("ensure curl"))
+            .unwrap();
+        assert!(
+            check < first_install,
+            "the check must come before any install"
+        );
+        assert!(
+            text.contains(&format!("\"$MACHINE\" != \"{own}\"")),
+            "{arch:?}"
+        );
+        assert!(text.contains(own), "{arch:?} script does not know {own}");
+        assert!(
+            text.contains("exit 3"),
+            "{arch:?}: a wrong machine has its own exit code"
+        );
+        assert!(!text.contains(&format!("!= \"{other}\"")), "{arch:?}");
+    }
+}
+
+#[test]
+fn the_processor_names_are_the_ones_the_release_files_use() {
+    assert_eq!(ServerArch::Amd64.as_str(), "amd64");
+    assert_eq!(ServerArch::Arm64.as_str(), "arm64");
+}
+
+// ------------------------------------------------------------------ keeping a small free server small
+
+/// A free server has about 47 GB of disk and no one watching it. Nothing it does may grow without bound.
+#[test]
+fn the_script_keeps_the_servers_logs_and_disk_bounded() {
+    let text = script(&plan()).unwrap();
+    // The core logs warnings and worse, not every connection.
+    assert!(text.contains("\"level\": \"warn\""));
+    assert!(!text.contains("\"level\": \"info\""));
+    assert!(!text.contains("\"level\": \"debug\"") && !text.contains("\"level\": \"trace\""));
+    // The system journal is capped, by size and by age.
+    assert!(text.contains("journald.conf.d/dnet.conf"));
+    assert!(text.contains("SystemMaxUse=100M"));
+    assert!(text.contains("MaxRetentionSec=14day"));
+    // Package downloads are not kept.
+    assert!(text.contains("apt-get clean") && text.contains("dnf clean all"));
+    // A weekly job trims what is left, and runs without anyone logging in.
+    assert!(text.contains("dnet-housekeeping.timer"));
+    assert!(text.contains("OnCalendar=weekly"));
+    assert!(text.contains("Persistent=true"));
+    assert!(text.contains("journalctl --vacuum-size=100M"));
+    assert!(text.contains("systemctl enable --now dnet-housekeeping.timer"));
+}
+
+/// The housekeeping never touches keys, certificates or the configuration.
+#[test]
+fn housekeeping_cannot_remove_anything_the_server_needs() {
+    let text = script(&plan()).unwrap();
+    let job = text
+        .split("# ---- housekeeping")
+        .nth(1)
+        .and_then(|rest| rest.split("# ---- the measurement origin").next())
+        .expect("the script has no housekeeping section");
+    for forbidden in ["rm ", "/var/lib/dnet", "find ", "dd ", "truncate"] {
+        assert!(
+            !job.contains(forbidden),
+            "housekeeping contains {forbidden}"
+        );
+    }
+    // The only path of ours it names is its own script.
+    assert_eq!(job.matches("/opt/dnet").count(), 1, "{job}");
+    assert!(job.contains("ExecStart=/opt/dnet/bin/dnet-housekeeping"));
+}
+
+/// The guard is run, not just read: with `uname` answering as each kind of machine, a script for the other
+/// kind exits 3 with a sentence, and one for the same kind gets past it.
+#[test]
+fn the_guard_behaves_when_run_with_each_kind_of_machine() {
+    let Some(shell) = ["sh", "bash"].into_iter().find(|s| {
+        std::process::Command::new(s)
+            .arg("-c")
+            .arg("exit 0")
+            .output()
+            .is_ok_and(|o| o.status.success())
+    }) else {
+        eprintln!("SKIPPED: no shell on this machine");
+        return;
+    };
+    for (script_arch, reported, expect_ok) in [
+        (ServerArch::Amd64, "x86_64", true),
+        (ServerArch::Amd64, "aarch64", false),
+        (ServerArch::Arm64, "aarch64", true),
+        (ServerArch::Arm64, "arm64", true),
+        (ServerArch::Arm64, "x86_64", false),
+        (ServerArch::Amd64, "riscv64", false),
+    ] {
+        let mut p = plan();
+        p.cores.arch = script_arch;
+        let text = script(&p).unwrap();
+        let start = text.find("MACHINE=$(uname -m)").unwrap();
+        let end = text[start..].find("\nneed() ").unwrap() + start;
+        let guard = format!(
+            "uname() {{ echo {reported}; }}\n{}\necho PAST",
+            &text[start..end]
+        );
+        let out = run_on_stdin(shell, &["-s"], &guard);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if expect_ok {
+            assert!(
+                out.status.success() && stdout.contains("PAST"),
+                "{script_arch:?}/{reported}: {stderr}"
+            );
+        } else {
+            assert_eq!(out.status.code(), Some(3), "{script_arch:?}/{reported}");
+            assert!(!stdout.contains("PAST"));
+            assert!(
+                stderr.contains("choose the other kind of server"),
+                "{stderr}"
+            );
+        }
+    }
+}
+
+/// A report is for one script. One printed by a server set up from an earlier script carries another
+/// client key, and used with this script's keys it would give a server that silently does not work.
+#[test]
+fn a_report_from_another_scripts_server_is_refused() {
+    let ours = BootstrapReport::parse(&format!("{REPORT_PREFIX}{}", report_json())).unwrap();
+    assert_eq!(ours.check_against(&plan()), Ok(()));
+
+    let mut other = report_json();
+    other["amneziawg"]["client_public_key_hex"] = serde_json::json!("9".repeat(64));
+    let other = BootstrapReport::parse(&format!("{REPORT_PREFIX}{other}")).unwrap();
+    assert_eq!(
+        other.check_against(&plan()),
+        Err(ReportError::Mismatch("the client key"))
+    );
+}
+
+#[test]
+fn the_script_reports_the_client_key_it_was_given() {
+    let text = script(&plan()).unwrap();
+    assert!(text.contains(&format!(
+        "\"client_public_key_hex\": \"{}\"",
+        "c".repeat(64)
+    )));
+}
+
+#[test]
+fn a_report_without_the_client_key_or_with_a_malformed_one_is_refused() {
+    let mut missing = report_json();
+    missing["amneziawg"]
+        .as_object_mut()
+        .unwrap()
+        .remove("client_public_key_hex");
+    assert!(BootstrapReport::parse(&format!("{REPORT_PREFIX}{missing}")).is_err());
+    for bad in ["", "abc", &"C".repeat(64), &"g".repeat(64), &"c".repeat(65)] {
+        let mut j = report_json();
+        j["amneziawg"]["client_public_key_hex"] = serde_json::json!(bad);
+        assert!(
+            BootstrapReport::parse(&format!("{REPORT_PREFIX}{j}")).is_err(),
+            "{bad:?}"
+        );
+    }
+}
+
+// ------------------------------------------------------------------ not being reclaimed for being idle
+
+/// A free server that does nothing is taken back, with its address. The setup installs the keepalive
+/// itself, and fails if it is not running, because an endpoint that disappears in a week is worse than one
+/// that was never made. It comes before the report, so a report is only ever printed for a server that
+/// will stay.
+#[test]
+fn the_script_installs_the_keepalive_and_checks_it_before_it_reports() {
+    let text = script(&plan()).unwrap();
+    let report = text.find("DNET-BOOTSTRAP-REPORT").unwrap();
+    for needed in [
+        "/opt/dnet/bin/dnet-keepalive",
+        "dnet-keepalive.timer",
+        "systemctl enable --now dnet-keepalive.timer",
+        crate::keepalive::CHECK_COMMAND,
+    ] {
+        let at = text
+            .find(needed)
+            .unwrap_or_else(|| panic!("the script lacks {needed}"));
+        assert!(at < report, "{needed} must come before the report");
+    }
+    assert!(text.starts_with("#!/bin/sh\n# DNet Engine endpoint bootstrap."));
+    assert_eq!(
+        text.matches("# DNet Engine endpoint keepalive.").count(),
+        1,
+        "the keepalive's header appears once, as part of this script"
+    );
+    assert!(!text.contains("@@"));
+}
+
+#[test]
+fn the_keepalive_in_the_script_is_the_standalone_one() {
+    let text = script(&plan()).unwrap();
+    let standalone = crate::keepalive::script(&crate::keepalive::KeepalivePlan::default());
+    let body: String = standalone.lines().skip(1).collect::<Vec<_>>().join("\n");
+    assert!(
+        text.contains(&body),
+        "the keepalive section differs from the one that is tested by itself"
+    );
+}
+
+// ------------------------------------------------------------------ the measurement origin
+
+/// A connection is judged by fetching bytes through the tunnel from a known origin. A person's own server
+/// has to carry one, or every endpoint made by the guide would be refused as "no measurement origin".
+/// It must be reachable only through the tunnel (its address is private), or a fetch to it would prove
+/// nothing about the tunnel, and it must give out a bounded amount.
+#[test]
+fn the_server_carries_the_origin_the_client_measures_against() {
+    let text = script(&plan()).unwrap();
+    assert_eq!(measurement_origin().host(), "10.66.0.1");
+    assert_eq!(measurement_origin().port(), ORIGIN_PORT);
+    assert!(text.contains("/opt/dnet/bin/dnet-origin"));
+    assert!(text.contains("dnet-origin.service"));
+    assert!(text.contains("systemctl enable --now dnet-net.service dnet-primary.service dnet-awg.service dnet-origin.service dnet-origin-session.service"));
+    // One program, told its address by its unit: the tunnel's own address for the AmneziaWG tunnel, and the
+    // machine's loopback for the session. Nothing else is accepted (see the test that runs it).
+    assert!(text.contains(
+        "dnet-origin 10.66.0.1
+"
+    ));
+    assert!(text.contains(
+        "dnet-origin 127.0.0.1
+"
+    ));
+    assert!(text.contains(&format!(
+        "ThreadingHTTPServer((BIND, {ORIGIN_PORT}), Handler)"
+    )));
+    assert!(text.contains("if BIND not in (\"10.66.0.1\", \"127.0.0.1\"):"));
+    for wildcard in ["\"0.0.0.0\"", "\"::\"", "('', ", "(\"\", "] {
+        let section = text
+            .split("# ---- the measurement origin")
+            .nth(1)
+            .unwrap()
+            .split("# ---- services")
+            .next()
+            .unwrap();
+        assert!(
+            !section.contains(wildcard),
+            "the origin must not listen on {wildcard}"
+        );
+    }
+    // It starts after the tunnel's address exists.
+    let unit = text
+        .split("dnet-origin.service <<'UNIT_EOF'")
+        .nth(1)
+        .unwrap()
+        .split("UNIT_EOF")
+        .next()
+        .unwrap();
+    assert!(unit.contains("After=network-online.target dnet-awg.service"));
+    assert!(unit.contains("Requires=dnet-awg.service"));
+    assert!(unit.contains("Restart=always"));
+    // And it is opened by no firewall rule: the machine's own firewall still allows exactly three ports.
+    assert_eq!(text.matches("\n  allow ").count(), 3);
+}
+
+/// The origin is run, not just read: on a loopback address, it answers `/bytes/n` with exactly n bytes up to
+/// its cap, refuses more, and refuses everything else, as the harness origin the client was proven against.
+#[test]
+fn the_origin_serves_exactly_the_bytes_asked_for_up_to_its_cap() {
+    use std::io::{Read, Write};
+    let Some(python) = ["python3", "python"].into_iter().find(|p| {
+        std::process::Command::new(p)
+            .arg("-c")
+            .arg("pass")
+            .output()
+            .is_ok_and(|o| o.status.success())
+    }) else {
+        eprintln!("SKIPPED: no python on this machine");
+        return;
+    };
+    let text = script(&plan()).unwrap();
+    let source = text
+        .split("cat > \"$BIN/dnet-origin\" <<'ORIGIN_EOF'\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\nORIGIN_EOF").next())
+        .expect("the script has no origin program");
+    let port = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let program = source.replace(&ORIGIN_PORT.to_string(), &port.to_string());
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("origin.py");
+    std::fs::write(&path, program).unwrap();
+    struct Kill(std::process::Child);
+    impl Drop for Kill {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let _guard = Kill(
+        std::process::Command::new(python)
+            .arg(&path)
+            .arg("127.0.0.1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let get = |target: &str| -> (String, Vec<u8>) {
+        for _ in 0..50 {
+            if let Ok(mut s) = std::net::TcpStream::connect(("127.0.0.1", port)) {
+                s.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                write!(s, "GET {target} HTTP/1.0\r\nHost: x\r\n\r\n").unwrap();
+                let mut raw = Vec::new();
+                let _ = s.read_to_end(&mut raw);
+                let split = raw
+                    .windows(4)
+                    .position(|w| w == b"\r\n\r\n")
+                    .map_or(raw.len(), |i| i + 4);
+                return (
+                    String::from_utf8_lossy(&raw[..split]).into_owned(),
+                    raw[split..].to_vec(),
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        panic!("the origin never came up");
+    };
+    for n in [1usize, 1024, 65_536, 200_000] {
+        let (head, body) = get(&format!("/bytes/{n}"));
+        assert!(
+            head.starts_with("HTTP/1.") && head.contains(" 200 "),
+            "{n}: {head}"
+        );
+        assert_eq!(body.len(), n, "exactly {n} bytes");
+    }
+    // The cap: asking for more than the most it gives out is refused, not served.
+    let (head, body) = get(&format!("/bytes/{}", ORIGIN_MAX_BYTES + 1));
+    assert!(head.contains(" 400 "), "{head}");
+    assert!(body.len() < 1024);
+    let (head, body) = get(&format!("/bytes/{ORIGIN_MAX_BYTES}"));
+    assert!(head.contains(" 200 "));
+    assert_eq!(body.len(), ORIGIN_MAX_BYTES);
+    for bad in [
+        "/bytes/0",
+        "/bytes/-5",
+        "/bytes/abc",
+        "/bytes/",
+        "/bytes/1/2",
+        "/etc/passwd",
+        "/..",
+        "/bytes/99999999999999999999",
+    ] {
+        let (head, _) = get(bad);
+        assert!(
+            head.contains(" 400 ") || head.contains(" 404 "),
+            "{bad}: {head}"
+        );
+    }
+}
+
+// ------------------------------------------------------------------ the session (ADR-0008)
+
+#[test]
+fn the_plan_needs_between_one_and_eight_distinct_well_formed_device_keys() {
+    let with = |keys: Vec<String>| BootstrapPlan {
+        session: SessionPlan {
+            device_public_keys: keys,
+        },
+        ..plan()
+    };
+    assert!(with(vec![device_key(1)]).validate().is_ok());
+    assert!(with((1..=8).map(device_key).collect()).validate().is_ok());
+    for (label, keys) in [
+        ("none", vec![]),
+        ("nine", (1..=9).map(device_key).collect()),
+        ("a repeat", vec![device_key(1), device_key(1)]),
+        ("too short", vec!["AAAA".to_owned()]),
+        ("not base64", vec!["!".repeat(44)]),
+        (
+            "31 bytes",
+            vec![{
+                use base64::engine::general_purpose::STANDARD;
+                use base64::Engine as _;
+                // 31 bytes encode to 44 characters with padding, the length of a real key.
+                STANDARD.encode([1u8; 31]) + "="
+            }],
+        ),
+    ] {
+        assert!(with(keys).validate().is_err(), "{label} was accepted");
+    }
+}
+
+#[test]
+fn a_device_key_with_shell_syntax_is_refused_before_any_text_is_made() {
+    for hostile in [
+        format!("{};id;", "A".repeat(30)),
+        format!("$(id){}", "A".repeat(38)),
+        format!("`id`{}", "A".repeat(40)),
+        format!("{}\nrm -rf /", "A".repeat(35)),
+    ] {
+        let hostile_plan = BootstrapPlan {
+            session: SessionPlan {
+                device_public_keys: vec![hostile.clone()],
+            },
+            ..plan()
+        };
+        let error = script(&hostile_plan).unwrap_err().to_string();
+        assert!(!error.contains(&hostile), "the error repeats the value");
+    }
+}
+
+#[test]
+fn each_device_is_a_peer_with_an_address_of_its_own_and_nothing_else() {
+    let text = script(&plan()).unwrap();
+    for (address, key) in [("10.9.0.2", device_key(1)), ("10.9.0.3", device_key(2))] {
+        assert!(
+            text.contains(&format!(
+                "{{ \"public_key\": \"{key}\", \"allowed_ips\": [ \"{address}/32\" ] }}"
+            )),
+            "no peer for {address}"
+        );
+    }
+    // No device is a router: a peer's allowed address is its own single address.
+    assert!(!text.contains("\"allowed_ips\": [ \"0.0.0.0/0\""));
+    assert_eq!(session_device_address(0).to_string(), "10.9.0.2");
+    assert_eq!(session_device_address(7).to_string(), "10.9.0.9");
+}
+
+#[test]
+fn the_carriers_may_reach_only_the_session_and_the_session_may_not_reach_the_machine() {
+    let text = script(&plan()).unwrap();
+    let config = text
+        .split("<<CONFIG_EOF\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\nCONFIG_EOF").next())
+        .expect("a configuration block");
+    // The carriers: UDP to the session port on loopback, then everything else refused.
+    let allow = config
+        .find("\"ip_cidr\": [ \"127.0.0.1/32\" ], \"port\": [ 25182 ], \"network\": [ \"udp\" ]");
+    let refuse_rest =
+        config.find("{ \"inbound\": [ \"hy2-in\", \"reality-in\" ], \"action\": \"reject\" }");
+    assert!(allow.is_some() && refuse_rest.is_some());
+    assert!(
+        allow < refuse_rest,
+        "the refusal comes before the allowance"
+    );
+    // The session: the origin's address maps to the loopback origin, names are resolved, and anything
+    // private (loopback, link-local such as a cloud metadata address, 10/8 and the rest) is refused.
+    let origin = config.find("\"override_address\": \"127.0.0.1\"").unwrap();
+    let resolve = config.find("\"action\": \"resolve\"").unwrap();
+    let private = config
+        .find("\"ip_is_private\": true, \"action\": \"reject\"")
+        .unwrap();
+    assert!(origin < resolve && resolve < private, "rules out of order");
+    // And no rule lets a carrier reach anything but the session.
+    assert_eq!(
+        config
+            .matches("\"inbound\": [ \"hy2-in\", \"reality-in\" ]")
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn the_endpoint_runs_in_user_space_and_listens_on_nothing_the_firewall_opens() {
+    let text = script(&plan()).unwrap();
+    assert!(text.contains("\"system\": false"));
+    assert!(text.contains("\"listen_port\": 25182"));
+    // The session port is opened by no rule: the machine's firewall still allows exactly three.
+    assert!(!text.contains("allow udp 25182"));
+    assert_eq!(text.matches("\n  allow ").count(), 3);
+}
+
+#[test]
+fn the_core_that_faces_the_internet_runs_as_an_account_with_no_privilege() {
+    let text = script(&plan()).unwrap();
+    let unit = text
+        .split("dnet-primary.service <<'UNIT_EOF'\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\nUNIT_EOF").next())
+        .expect("the primary unit");
+    for needed in [
+        "User=dnet",
+        "Group=dnet",
+        "NoNewPrivileges=yes",
+        "ProtectSystem=strict",
+        "ProtectHome=yes",
+        "PrivateTmp=yes",
+        "PrivateDevices=yes",
+        "CapabilityBoundingSet=\n",
+        "AmbientCapabilities=\n",
+        "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX",
+        "RestrictNamespaces=yes",
+        "UMask=0077",
+    ] {
+        assert!(unit.contains(needed), "the unit lacks {needed}");
+    }
+    // The account exists before anything uses it, and can **read** what the core needs and create nothing:
+    // root keeps owning the directory and every file in it (group `dnet`, read only). If the account owned the
+    // directory, a flaw in the core could plant a symlink there for the next run of this script, which is
+    // root and writes `server.json.new` with `cat >`, to follow.
+    let made = text.find("useradd --system").unwrap();
+    let used = text.find("chown -R root:dnet \"$STATE/primary\"").unwrap();
+    let started = text.find("systemctl enable --now").unwrap();
+    assert!(made < used && used < started);
+    assert!(text.contains("chmod 750 \"$STATE/primary\""));
+    assert!(text.contains("find \"$STATE/primary\" -type f -exec chmod 640 {} +"));
+    assert!(
+        !text.contains("dnet:dnet \"$STATE"),
+        "the account must not own anything under the state directory"
+    );
+    // The state directory can be walked through (so the account reaches its own), not read or listed.
+    assert!(text.contains("chmod 711 \"$STATE\""));
+    assert!(text.contains(
+        "chmod 700 \"$STATE/awg\"
+"
+    ));
+    assert!(
+        !text.contains("chmod 700 \"$STATE/primary\""),
+        "a re-run would cut a running core off"
+    );
+    // The AmneziaWG keys stay out of the account's reach.
+    assert!(!text.contains("chown -R dnet:dnet \"$STATE\""));
+    assert!(!text.contains("chown -R dnet:dnet \"$STATE/awg\""));
+}
+
+#[test]
+fn the_session_has_an_origin_of_its_own_that_does_not_wait_for_the_other_tunnel() {
+    let text = script(&plan()).unwrap();
+    let unit = text
+        .split("dnet-origin-session.service <<'UNIT_EOF'\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\nUNIT_EOF").next())
+        .expect("the session origin unit");
+    assert!(unit.contains("ExecStart=/usr/bin/python3 /opt/dnet/bin/dnet-origin 127.0.0.1"));
+    assert!(unit.contains("User=dnet"));
+    assert!(
+        !unit.contains("dnet-awg"),
+        "it must not depend on the other tunnel"
+    );
+    assert!(unit.contains("CapabilityBoundingSet=\n"));
+    assert_eq!(session_measurement_origin().host(), "10.9.0.254");
+}
+
+/// Found by running the composed session: an origin at the server's own session address was answered by the
+/// server's network stack ("connection refused" from inside the session) and never reached the exit's rules.
+#[test]
+fn the_session_origin_is_not_an_address_the_servers_session_stack_owns() {
+    assert_ne!(SESSION_ORIGIN, SESSION_SERVER);
+    for index in 0..MAX_DEVICES {
+        assert_ne!(
+            SESSION_ORIGIN,
+            session_device_address(index),
+            "device {index}"
+        );
+    }
+    // One value in two crates: the client's rules tunnel exactly this address.
+    assert_eq!(
+        dnet_core::origin::SESSION_ORIGIN_HOST,
+        SESSION_ORIGIN.to_string()
+    );
+    assert_eq!(
+        session_measurement_origin().host(),
+        SESSION_ORIGIN.to_string()
+    );
+    // And the exit maps the origin's address, not the server's.
+    let text = script(&plan()).unwrap();
+    assert!(text.contains("\"ip_cidr\": [ \"10.9.0.254/32\" ], \"port\": [ 8080 ]"));
+    assert!(!text.contains("\"ip_cidr\": [ \"10.9.0.1/32\" ]"));
+}
+
+#[test]
+fn security_updates_are_installed_and_applied_without_anyone_logging_in() {
+    let text = script(&plan()).unwrap();
+    for needed in [
+        "unattended-upgrades",
+        "APT::Periodic::Unattended-Upgrade \"1\";",
+        "Unattended-Upgrade::Automatic-Reboot \"true\";",
+        "dnf-automatic",
+        "upgrade_type = security",
+        "apply_updates = yes",
+    ] {
+        assert!(text.contains(needed), "missing {needed}");
+    }
+    // Best effort: a failure here must not stop a server that otherwise works.
+    let block = text.split("# ---- security updates").nth(1).unwrap();
+    assert!(block.contains("|| true"));
+}
+
+#[test]
+fn the_firewall_step_claims_only_what_it_does() {
+    let text = script(&plan()).unwrap();
+    assert!(!text.contains("exactly the three ports, and the tunnel's exit"));
+    assert!(text.contains("sets no default of its own"));
+}
+
+#[test]
+fn the_origin_refuses_to_listen_anywhere_but_its_two_addresses() {
+    let Some(python) = ["python3", "python"].into_iter().find(|p| {
+        std::process::Command::new(p)
+            .arg("-c")
+            .arg("pass")
+            .output()
+            .is_ok_and(|o| o.status.success())
+    }) else {
+        eprintln!("SKIPPED: no python on this machine");
+        return;
+    };
+    let text = script(&plan()).unwrap();
+    let source = text
+        .split("cat > \"$BIN/dnet-origin\" <<'ORIGIN_EOF'\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\nORIGIN_EOF").next())
+        .expect("the script has no origin program");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("origin.py");
+    std::fs::write(&path, source).unwrap();
+    for wildcard in ["0.0.0.0", "::", "", "192.0.2.1", "127.0.0.2"] {
+        let out = std::process::Command::new(python)
+            .arg(&path)
+            .arg(wildcard)
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "it started on {wildcard:?}");
+    }
+    let out = std::process::Command::new(python)
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "it started with no address");
+}
+
+// ---- the report
+
+#[test]
+fn the_session_in_the_report_agrees_with_what_was_asked() {
+    let report = parse(|_| {}).unwrap();
+    assert_eq!(report.session_server_public_key(), device_key(3));
+    assert_eq!(
+        report.session_device_address(0).unwrap().to_string(),
+        "10.9.0.2"
+    );
+    assert_eq!(
+        report.session_device_address(1).unwrap().to_string(),
+        "10.9.0.3"
+    );
+    assert_eq!(report.session_device_address(2), None);
+    assert_eq!(report.check_against(&plan()), Ok(()));
+}
+
+#[test]
+fn a_report_that_lists_other_devices_than_were_asked_for_is_refused() {
+    let wrong = |edit: fn(&mut serde_json::Value)| parse(edit).unwrap().check_against(&plan());
+    let mismatch = Err(ReportError::Mismatch("the session devices"));
+    // An extra device nobody asked for.
+    assert_eq!(
+        wrong(|j| j["session"]["devices"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"address": "10.9.0.4", "public_key": device_key(9)}))),
+        mismatch
+    );
+    // A missing device.
+    assert_eq!(
+        wrong(|j| {
+            j["session"]["devices"].as_array_mut().unwrap().pop();
+        }),
+        mismatch
+    );
+    // The right keys on the wrong addresses, and the right addresses with another key.
+    assert_eq!(
+        wrong(|j| j["session"]["devices"][0]["address"] = serde_json::json!("10.9.0.7")),
+        mismatch
+    );
+    assert_eq!(
+        wrong(|j| j["session"]["devices"][1]["public_key"] = serde_json::json!(device_key(9))),
+        mismatch
+    );
+    // The same devices in another order.
+    assert_eq!(
+        wrong(|j| j["session"]["devices"].as_array_mut().unwrap().reverse()),
+        mismatch
+    );
+}
+
+#[test]
+fn the_session_address_and_port_in_the_report_must_be_the_ones_the_script_sets() {
+    // A well-formed report on another port is read, then refused as not what was asked.
+    let other_port = parse(|j| j["session"]["port"] = serde_json::json!(25183)).unwrap();
+    assert_eq!(
+        other_port.check_against(&plan()),
+        Err(ReportError::Mismatch("the session address"))
+    );
+    // An address that is not the server's, and a zero port, cannot be what they claim.
+    assert_eq!(
+        parse(|j| j["session"]["server_address"] = serde_json::json!("10.9.0.9")),
+        Err(ReportError::Invalid("session address or port"))
+    );
+    assert_eq!(
+        parse(|j| j["session"]["port"] = serde_json::json!(0)),
+        Err(ReportError::Invalid("session address or port"))
+    );
+}
+
+#[test]
+fn values_in_the_session_part_that_cannot_be_what_they_claim_are_refused() {
+    let too_many = |j: &mut serde_json::Value| {
+        j["session"]["devices"] = serde_json::Value::Array(
+            (0..9u8)
+                .map(|i| {
+                    serde_json::json!({
+                        "address": format!("10.9.0.{}", i + 2),
+                        "public_key": device_key(i + 1)
+                    })
+                })
+                .collect(),
+        )
+    };
+    for (label, edit, what) in [
+        (
+            "server key too short",
+            (|j: &mut serde_json::Value| {
+                j["session"]["server_public_key"] = serde_json::json!("AAAA")
+            }) as fn(&mut serde_json::Value),
+            "session public key",
+        ),
+        (
+            "server key not base64",
+            |j| j["session"]["server_public_key"] = serde_json::json!("!".repeat(44)),
+            "session public key",
+        ),
+        (
+            "no devices",
+            |j| j["session"]["devices"] = serde_json::json!([]),
+            "session devices",
+        ),
+        ("too many devices", too_many, "session devices"),
+        (
+            "device key not base64",
+            |j| j["session"]["devices"][0]["public_key"] = serde_json::json!("x"),
+            "session device key",
+        ),
+    ] {
+        assert_eq!(parse(edit), Err(ReportError::Invalid(what)), "{label}");
+    }
+    // An unknown field, or a missing section, is the wrong shape and is refused without quoting.
+    let unknown = parse(|j| j["session"]["extra"] = serde_json::json!(1)).unwrap_err();
+    assert!(matches!(unknown, ReportError::Malformed(_)));
+    let missing = parse(|j| {
+        j.as_object_mut().unwrap().remove("session");
+    })
+    .unwrap_err();
+    assert!(matches!(missing, ReportError::Malformed(_)));
+}
+
+#[test]
+fn the_script_reports_the_session_with_every_device_it_was_given() {
+    let text = script(&plan()).unwrap();
+    assert!(text.contains("\"session\": {\"server_public_key\": e[\"SESSION_PUBLIC\"]"));
+    assert!(text.contains("\"version\": 2,"));
+    for (address, key) in [("10.9.0.2", device_key(1)), ("10.9.0.3", device_key(2))] {
+        assert!(text.contains(&format!(
+            "{{\"address\": \"{address}\", \"public_key\": \"{key}\"}}"
+        )));
+    }
+    // Only the public half of the server's session key is reported; the private half never leaves.
+    let report = text.split("REPORT_EOF").nth(1).unwrap();
+    assert!(!report.contains("SESSION_PRIVATE"));
+}
+
+// ---- the configuration, checked by the real core
+
+/// The vendored core, if it has been fetched (and this is Windows, where it runs).
+fn vendored_core() -> Option<std::path::PathBuf> {
+    let exe = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../vendor/primary-core/primary-core.exe");
+    (cfg!(windows) && exe.is_file()).then_some(exe)
+}
+
+fn core_output(core: &std::path::Path, args: &[&str]) -> String {
+    let out = std::process::Command::new(core)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// What the core prints for a generated key pair: `(private, public)`.
+fn key_pair(core: &std::path::Path, kind: &str) -> (String, String) {
+    let text = core_output(core, &["generate", kind]);
+    let field = |name: &str| {
+        text.lines()
+            .find_map(|l| l.strip_prefix(name))
+            .map(|v| v.trim().to_owned())
+            .unwrap_or_else(|| panic!("no {name} in the core's output"))
+    };
+    (field("PrivateKey:"), field("PublicKey:"))
+}
+
+/// The configuration the script writes, with the values the script would hold put in. `state` holds a real
+/// certificate and key.
+fn written_configuration(
+    text: &str,
+    state: &std::path::Path,
+    core: &std::path::Path,
+) -> serde_json::Value {
+    let template = text
+        .split("<<CONFIG_EOF\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\nCONFIG_EOF").next())
+        .expect("a configuration block");
+    let (reality_private, _) = key_pair(core, "reality-keypair");
+    let (session_private, _) = key_pair(core, "wg-keypair");
+    let filled = template
+        .replace("$STATE", &state.to_string_lossy().replace('\\', "/"))
+        .replace("$HY2_OBFS", "obfs-secret-0123456789abcdef")
+        .replace("$HY2_AUTH", "auth-secret-0123456789abcdef")
+        .replace("$REALITY_UUID", "bf000d23-0752-40b4-affe-68f7707a9661")
+        .replace("$REALITY_PRIVATE", &reality_private)
+        .replace("$REALITY_SHORT", "0123456789abcdef")
+        .replace("$SESSION_PRIVATE", &session_private);
+    assert!(!filled.contains('$'), "a variable was left in: {filled}");
+    serde_json::from_str(&filled).unwrap_or_else(|e| panic!("not JSON ({e}): {filled}"))
+}
+
+fn state_with_certificate(core: &std::path::Path) -> tempfile::TempDir {
+    let state = tempfile::tempdir().unwrap();
+    // The configuration reads `$STATE/primary/server.crt`, as the script lays it out.
+    std::fs::create_dir(state.path().join("primary")).unwrap();
+    let pem = core_output(core, &["generate", "tls-keypair", "edge.example.net"]);
+    let mut blocks = Vec::new();
+    let mut current = String::new();
+    for line in pem.lines() {
+        current.push_str(line);
+        current.push('\n');
+        if line.starts_with("-----END ") {
+            blocks.push(std::mem::take(&mut current));
+        }
+    }
+    for block in blocks {
+        let name = if block.contains("PRIVATE") {
+            "server.key"
+        } else {
+            "server.crt"
+        };
+        std::fs::write(state.path().join("primary").join(name), block).unwrap();
+    }
+    assert!(
+        state.path().join("primary/server.key").is_file()
+            && state.path().join("primary/server.crt").is_file()
+    );
+    state
+}
+
+#[test]
+fn the_real_core_accepts_the_configuration_the_script_writes() {
+    let Some(core) = vendored_core() else {
+        eprintln!("SKIPPED: vendor/primary-core not fetched (cargo run -p xtask -- fetch-vendor)");
+        return;
+    };
+    let state = state_with_certificate(&core);
+    let config = written_configuration(&script(&plan()).unwrap(), state.path(), &core);
+    // The shape the design depends on, in the parsed document and not in the text.
+    assert_eq!(config["endpoints"][0]["tag"], "session-in");
+    assert_eq!(config["endpoints"][0]["peers"].as_array().unwrap().len(), 2);
+    assert_eq!(config["endpoints"][0]["system"], false);
+    let path = state.path().join("server.json");
+    std::fs::write(&path, config.to_string()).unwrap();
+    let out = std::process::Command::new(&core)
+        .args(["check", "-c"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "the pinned core rejected the server configuration:\n{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn a_misspelled_rule_in_the_configuration_would_be_caught_by_the_core() {
+    // The control for the test above: the same check must fail on a broken document, or it proves nothing.
+    let Some(core) = vendored_core() else {
+        eprintln!("SKIPPED: vendor/primary-core not fetched (cargo run -p xtask -- fetch-vendor)");
+        return;
+    };
+    let state = state_with_certificate(&core);
+    let mut config = written_configuration(&script(&plan()).unwrap(), state.path(), &core);
+    config["route"]["rules"][4]["action"] = serde_json::json!("rejekt");
+    let path = state.path().join("broken.json");
+    std::fs::write(&path, config.to_string()).unwrap();
+    let out = std::process::Command::new(&core)
+        .args(["check", "-c"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "the core accepted a rule action that does not exist"
+    );
+    // And it is the rule it objected to, not something else in the setup (a control that fails for the
+    // wrong reason proves nothing).
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(said.contains("rejekt"), "the core's complaint was: {said}");
 }

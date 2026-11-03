@@ -324,6 +324,7 @@ mod tests {
                 sid: "S-1-5-21-1".into(),
                 session_id: 1,
                 authenticated,
+                elevated: false,
             };
             let mut buf = Vec::new();
             let mut chunk = [0u8; 1024];

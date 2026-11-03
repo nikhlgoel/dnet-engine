@@ -90,6 +90,30 @@ pub struct BandwidthPair {
 /// the new text.
 pub const BRUTAL_WARNING_REVISION: u32 = 1;
 
+/// The shared-capacity warning a person is shown before Brutal is turned on (FR-006, T105), in the
+/// words every client uses. Its substance is what [`BRUTAL_WARNING_REVISION`] counts: change what it
+/// says and the revision goes up with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BrutalWarning {
+    pub revision: u32,
+    pub title: &'static str,
+    pub body: &'static str,
+    pub consequence: &'static str,
+    pub note: &'static str,
+}
+
+/// The warning in force.
+pub fn brutal_warning() -> BrutalWarning {
+    BrutalWarning {
+        revision: BRUTAL_WARNING_REVISION,
+        title: "Turn on aggressive speed mode?",
+        body: "This mode sends as fast as it can instead of backing off when the network is busy.",
+        consequence: "This makes the Wi-Fi worse for everyone around you, including you.",
+        note: "You tell the mode how fast your connection is. If that figure is too high, it will \
+               make things worse.",
+    }
+}
+
 /// A recorded acknowledgement of the Brutal shared-capacity warning (FR-006).
 ///
 /// A record, not a flag: it names the warning revision that was shown and when it was
@@ -487,5 +511,27 @@ mod tests {
             profile(ProfileKind::VlessReality),
         ];
         assert_eq!(validate_profile_set(&with_tcp), Ok(()));
+    }
+
+    /// The window (`apps/dnet-tray`) shows the warning from a file it imports, so the two are pinned to
+    /// each other here: what a person accepts in the window is the warning whose revision the service
+    /// records, and a change to either side alone fails this test.
+    #[test]
+    fn the_window_shows_exactly_the_brutal_warning_in_force() {
+        let shown: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../apps/dnet-tray/src/lib/brutal-warning.json"
+        ))
+        .expect("the window's warning is JSON");
+        let w = brutal_warning();
+        assert_eq!(shown["revision"], w.revision);
+        assert_eq!(shown["title"], w.title);
+        assert_eq!(shown["body"], w.body);
+        assert_eq!(shown["consequence"], w.consequence);
+        assert_eq!(shown["note"], w.note);
+        assert_eq!(
+            shown.as_object().map(|o| o.len()),
+            Some(5),
+            "a field added on one side only"
+        );
     }
 }

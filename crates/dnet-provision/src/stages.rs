@@ -39,10 +39,10 @@ use dnet_core::ids::EndpointId;
 use dnet_core::origin::Origin;
 use dnet_core::profile::ProfileKind;
 
-use crate::bootstrap::{self, BootstrapPlan, BootstrapReport, Ports, ServerCores};
+use crate::bootstrap::{self, BootstrapPlan, BootstrapReport, Ports, ServerCores, SessionPlan};
 use crate::capacity::{self, Alternative, Capacity};
 use crate::cleanup::{cleanup, CleanupReport, Unremovable};
-use crate::client_keys::{self, ClientKeys};
+use crate::client_keys::{self, ClientKeys, SessionKeys};
 use crate::credential::{validate, CredentialProblem};
 use crate::keepalive::{self, KeepalivePlan};
 use crate::ledger::{valid_token, EntryState, Ledger};
@@ -402,6 +402,16 @@ pub fn run(params: &JobParams, s: &mut Services<'_>) -> Outcome {
             )
         }
     };
+    let session_keys = match SessionKeys::generate() {
+        Ok(keys) => keys,
+        Err(_) => {
+            return fail(
+                s,
+                Stage::ServerBootstrap,
+                FailureReason::Bootstrap("no randomness was available for the keys".into()),
+            )
+        }
+    };
     let plan = BootstrapPlan {
         cores: params.cores.clone(),
         ports: params.ports,
@@ -409,6 +419,9 @@ pub fn run(params: &JobParams, s: &mut Services<'_>) -> Outcome {
         obfuscation,
         hysteria2_server_name: params.hysteria2_server_name.clone(),
         reality_target: params.reality_target.clone(),
+        session: SessionPlan {
+            device_public_keys: vec![session_keys.public_b64().to_owned()],
+        },
     };
     let script = match bootstrap::script(&plan) {
         Ok(script) => script,
@@ -437,7 +450,12 @@ pub fn run(params: &JobParams, s: &mut Services<'_>) -> Outcome {
             )
         }
     };
-    let credentials = report.credentials(&keys, obfuscation, params.measure_origin.clone());
+    let credentials = report.credentials(
+        &keys,
+        &session_keys,
+        obfuscation,
+        params.measure_origin.clone(),
+    );
     (s.events)(Event::StageFinished(Stage::ServerBootstrap));
 
     // ---- KeepaliveInstall: not optional.

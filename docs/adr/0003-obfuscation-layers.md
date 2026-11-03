@@ -79,6 +79,23 @@ The two remaining questions were not part of the decision:
 3. Whether the feed's example sizes (512 and 1200) should be the documented starting point or left
    untuned until measured.
 
+### Primary-source check, 2026-10-26 (facts for question 3; nothing decided)
+
+Read at the pinned commit `0b89958` and the `sing-quic` version its `go.mod` pins (`v0.7.0-beta.4`):
+
+| Fact | Source |
+|---|---|
+| `gecko` is a recognised obfs type beside `salamander`, with `min_packet_size` and `max_packet_size` | `constant/hysteria2.go`; `option/hysteria2.go` |
+| The outbound (client) and the inbound (server) both pass the obfs password and both sizes to the protocol layer, so a server the bootstrap set up could serve Gecko (question 2) with the same core | `protocol/hysteria2/outbound.go`, `protocol/hysteria2/inbound.go` |
+| **512 and 1200 are the core's own defaults**, used when a size is omitted (0) | `hysteria2/gecko.go` (`geckoDefaultMinPacketSize`, `geckoDefaultMaxPacketSize`); applied in `hysteria2/client.go` and `hysteria2/service.go` |
+| The core refuses `min <= 0`, `min > max` and `max > 2048` ("gecko: invalid packet size range"). This project's 256 to 1400 bound is narrower | `hysteria2/client.go`, `hysteria2/service.go` |
+| Only QUIC long-header packets (first byte's top bit set) are split, into 2 to 8 chunks, each padded at random up to `max`; short-header (data) packets go out as plain Salamander | `hysteria2/gecko.go` (`WriteTo`, `writeFragmented`, `randomPadLen`) |
+
+So the ADR-0002 example sizes are not a guess of this project's: they are what the core does when told
+nothing. Whether to document them as the starting point (question 3) is still the owner's call; the last
+row also bounds Gecko's cost to handshake and migration packets, which is unmeasured but no longer open
+in kind.
+
 ## Consequences
 
 If C is accepted: no code changes. T067 is closed by this record; tuning stays an open measurement that

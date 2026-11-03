@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import type { AppState } from '../lib/app.svelte';
   import Consent from '../components/Consent.svelte';
+  import PendingChanges from '../components/PendingChanges.svelte';
   import { en } from '../lib/messages';
   import type { EndpointView } from '../lib/model';
 
@@ -86,6 +87,10 @@
 <section class="view" aria-labelledby="endpoints-title">
   <h1 id="endpoints-title">{t.title}</h1>
 
+  <p class="lede">{t.lede}</p>
+
+  <PendingChanges {app} />
+
   {#if locked}
     <p class="notice">{en.errors.disconnectFirst}</p>
   {/if}
@@ -143,13 +148,8 @@
   {:else}
     <div class="actions">
       <button type="button" class="btn primary" disabled={locked} onclick={() => (adding = true)}>{t.add}</button>
-      <button type="button" class="btn" disabled={!app.bridge.capabilities.provisioning} onclick={() => app.go('wizard')}>
-        {t.setup}
-      </button>
+      <button type="button" class="btn" disabled={locked} onclick={() => app.go('wizard')}>{t.setup}</button>
     </div>
-    {#if !app.bridge.capabilities.provisioning}
-      <p class="help-line">{en.wizard.unavailable}</p>
-    {/if}
   {/if}
 </section>
 
@@ -178,8 +178,7 @@
   }
 
   .state,
-  .health,
-  .help-line {
+  .health {
     color: var(--c-text-2);
     font-size: var(--fs-sm);
   }

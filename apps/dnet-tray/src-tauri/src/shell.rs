@@ -319,8 +319,128 @@ async fn set_endpoint_enabled(
 }
 
 #[tauri::command]
+async fn list_profiles(shell: Shared<'_>) -> Result<Value, String> {
+    shell.bridge.profiles().await
+}
+
+/// Brutal on (`up` and `down` in Mbit/s) or off (neither). `warning_revision` is the revision of the
+/// warning the window showed; the service records the acceptance only if it is the one in force.
+#[tauri::command]
+async fn set_brutal(
+    shell: Shared<'_>,
+    profile: String,
+    up: Option<u32>,
+    down: Option<u32>,
+    warning_revision: u32,
+) -> Result<Value, String> {
+    let bandwidth = match (up, down) {
+        (Some(up), Some(down)) => Some((up, down)),
+        (None, None) => None,
+        // One direction alone would half-enable it (CC-04): not a request this window makes.
+        _ => return Err("both directions are needed, or neither".to_owned()),
+    };
+    let outcome = shell
+        .bridge
+        .set_brutal(&profile, bandwidth, warning_revision)
+        .await;
+    shell.wake.notify_one();
+    Ok(outcome)
+}
+
+/// The script to run on the person's own server, and the ports to open (T150).
+#[tauri::command]
+async fn prepare_server(shell: Shared<'_>, arch: String) -> Result<Value, String> {
+    Ok(shell.bridge.prepare_server(&arch).await)
+}
+
+/// What the server printed, pasted back: checked, and the server added (T150).
+#[tauri::command]
+async fn finish_server(
+    shell: Shared<'_>,
+    label: String,
+    host: String,
+    report: String,
+) -> Result<Value, String> {
+    let outcome = shell.bridge.finish_server(&label, &host, &report).await;
+    shell.wake.notify_one();
+    Ok(outcome)
+}
+
+#[tauri::command]
+async fn add_rule(
+    shell: Shared<'_>,
+    kind: String,
+    value: String,
+    action: String,
+) -> Result<Value, String> {
+    let outcome = shell.bridge.add_rule(&kind, &value, &action).await;
+    shell.wake.notify_one();
+    Ok(outcome)
+}
+
+#[tauri::command]
+async fn remove_rule(shell: Shared<'_>, id: String) -> Result<Value, String> {
+    let outcome = shell.bridge.remove_rule(&id).await;
+    shell.wake.notify_one();
+    Ok(outcome)
+}
+
+#[tauri::command]
 async fn list_rules(shell: Shared<'_>) -> Result<Value, String> {
     shell.bridge.rules().await
+}
+
+#[tauri::command]
+async fn list_pending(shell: Shared<'_>) -> Result<Value, String> {
+    shell.bridge.pending().await
+}
+
+#[tauri::command]
+async fn reject_change(shell: Shared<'_>, id: String) -> Result<Value, String> {
+    let outcome = shell.bridge.reject_change(&id).await;
+    shell.wake.notify_one();
+    Ok(outcome)
+}
+
+/// Approve a waiting change (T160b). The window is not an elevated client, so the service would refuse it:
+/// this starts `dnetctl approve <id>` beside the window's own program, which asks Windows for elevation and
+/// applies the change only when the person types `yes` in its own window. Only the change's name is handed
+/// over, checked first (`dnet_view::approver`). Waits for it to end, which is when the person has answered.
+#[tauri::command]
+async fn approve_change(shell: Shared<'_>, id: String) -> Result<Value, String> {
+    let any_service = std::env::args().any(|a| a == "--allow-unprivileged-service");
+    let args = match dnet_view::approver::arguments(&id, any_service) {
+        Ok(args) => args,
+        Err(why) => return Ok(dnet_view::outcome::refused(&why, "Refused")),
+    };
+    let ended = tauri::async_runtime::spawn_blocking(move || run_approver(&args))
+        .await
+        .map_err(|_| "the approval could not be waited for".to_string())?;
+    shell.wake.notify_one();
+    Ok(dnet_view::approver::outcome(ended))
+}
+
+/// Run `dnetctl` beside this program with `args` and say how it ended: its exit code, or `None` when it
+/// could not be started or ended without one. It has no console window of its own (the elevated window it
+/// opens does).
+fn run_approver(args: &[String]) -> Option<i32> {
+    let program = std::env::current_exe()
+        .ok()?
+        .parent()?
+        .join(dnet_view::approver::APPROVER);
+    let mut command = std::process::Command::new(program);
+    command
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command.status().ok()?.code()
 }
 
 #[tauri::command]
@@ -359,8 +479,17 @@ pub fn run() {
             list_endpoints,
             add_endpoint,
             remove_endpoint,
+            prepare_server,
+            finish_server,
             set_endpoint_enabled,
+            list_profiles,
+            set_brutal,
             list_rules,
+            add_rule,
+            remove_rule,
+            list_pending,
+            reject_change,
+            approve_change,
             set_encrypted_dns,
             check_updates,
             open_login_page,

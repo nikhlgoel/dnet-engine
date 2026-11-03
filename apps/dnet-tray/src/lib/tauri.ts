@@ -8,10 +8,13 @@
  */
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import type { Bridge, Capabilities, NewEndpointInput, Outcome } from './bridge';
+import type { Bridge, Capabilities, NewEndpointInput, Outcome, PreparedServer } from './bridge';
+import { brutalWarning } from './messages';
 import {
   parseActivity,
   parseEndpoints,
+  parsePending,
+  parseProfiles,
   parseRulesReply,
   parseSnapshot,
   type ActivityItem,
@@ -44,6 +47,23 @@ async function call(command: string, args?: Record<string, unknown>): Promise<Ou
   } catch (error) {
     return failed(error) as Outcome & Record<string, unknown>;
   }
+}
+
+/** The service's script reply, read as untrusted: anything that is not exactly the promised shape is refused. */
+function parsePrepared(value: Record<string, unknown>): PreparedServer | null {
+  const { arch, script, ports, validForMinutes } = value;
+  if (arch !== 'amd64' && arch !== 'arm64') return null;
+  if (typeof script !== 'string' || script.length === 0 || script.length > 65536) return null;
+  if (!Array.isArray(ports) || ports.length === 0 || ports.length > 8) return null;
+  const checked: { protocol: string; port: number }[] = [];
+  for (const p of ports) {
+    const q = p as { protocol?: unknown; port?: unknown };
+    if (q.protocol !== 'udp' && q.protocol !== 'tcp') return null;
+    if (typeof q.port !== 'number' || !Number.isInteger(q.port) || q.port < 1 || q.port > 65535) return null;
+    checked.push({ protocol: q.protocol, port: q.port });
+  }
+  if (typeof validForMinutes !== 'number' || !Number.isFinite(validForMinutes) || validForMinutes < 1) return null;
+  return { arch, script, ports: checked, validForMinutes: Math.floor(validForMinutes) };
 }
 
 function capabilitiesFrom(value: unknown): Capabilities {
@@ -141,12 +161,47 @@ export async function createTauriBridge(): Promise<Bridge> {
       const reply = await call('add_endpoint', { ...input });
       return reply.ok && typeof reply.id === 'string' ? { ok: true as const, id: reply.id } : reply;
     },
+    async prepareServer(arch) {
+      const reply = await call('prepare_server', { arch });
+      if (!reply.ok) return reply;
+      const prepared = parsePrepared(reply);
+      return prepared
+        ? { ok: true as const, prepared }
+        : { ok: false as const, reason: 'The background service’s answer was not what was expected.' };
+    },
+    async finishServer(input) {
+      const reply = await call('finish_server', { ...input });
+      return reply.ok && typeof reply.id === 'string' ? { ok: true as const, id: reply.id } : reply;
+    },
     removeEndpoint: (id) => call('remove_endpoint', { id }),
     setEndpointEnabled: (id, enabled) => call('set_endpoint_enabled', { id, enabled }),
+
+    async profiles() {
+      return parseProfiles(await invoke('list_profiles'));
+    },
+    setBrutal: (profile, bandwidth) =>
+      call('set_brutal', {
+        profile,
+        up: bandwidth?.up ?? null,
+        down: bandwidth?.down ?? null,
+        warningRevision: brutalWarning.revision,
+      }),
+
+    async addRule(rule) {
+      const reply = await call('add_rule', { ...rule });
+      return reply.ok && typeof reply.id === 'string' ? { ok: true as const, id: reply.id } : reply;
+    },
+    removeRule: (id) => call('remove_rule', { id }),
 
     async rules() {
       return parseRulesReply(await invoke('list_rules'));
     },
+    async pending() {
+      return parsePending(await invoke('list_pending'));
+    },
+    approveChange: (id) => call('approve_change', { id }),
+    rejectChange: (id) => call('reject_change', { id }),
+
     async setEncryptedDns(block) {
       const reply = await call('set_encrypted_dns', { block });
       return reply.ok && typeof reply.consequence === 'string' ? { ok: true as const, consequence: reply.consequence } : reply;

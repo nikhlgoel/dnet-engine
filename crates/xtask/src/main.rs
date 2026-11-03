@@ -12,6 +12,8 @@ mod fetch_vendor;
 mod import_harness;
 mod lint_branding;
 mod pins;
+mod server_cores;
+mod stage_installer;
 mod verify_vendor;
 
 fn main() -> Result<()> {
@@ -22,6 +24,11 @@ fn main() -> Result<()> {
         Some("fetch-vendor") => fetch_vendor::run(&root),
         Some("verify-vendor") => verify_vendor::run(&root),
         Some("lint-branding") => lint_branding::run(&root),
+        Some("stage-installer") => stage_installer::run(&root),
+        Some("build-server-cores") => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            server_cores::run(&root, &rest)
+        }
         Some("import-harness-endpoint") => {
             let rest: Vec<String> = std::env::args().skip(2).collect();
             import_harness::run(&root, &rest)
@@ -52,6 +59,9 @@ fn print_help() {
     eprintln!("  fetch-vendor    download and hash-verify pinned third-party binaries");
     eprintln!("  verify-vendor   assert signed Wintun DLL; reject its source and embedded copies");
     eprintln!("  lint-branding   assert the primary core vendor name stays in attribution files");
+    eprintln!(
+        "  stage-installer verify, build and stage what the installer ships in target/payload"
+    );
     eprintln!("  feed-keygen --out <file>");
     eprintln!(
         "                  make a feed key outside the repository; prints only the public key"

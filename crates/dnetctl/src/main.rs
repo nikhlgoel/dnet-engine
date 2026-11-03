@@ -8,6 +8,8 @@
 //! request against who is asking, and prints what the service says. See `cli::USAGE`.
 
 mod cli;
+#[cfg(windows)]
+mod elevate;
 #[cfg(test)]
 mod fuzz;
 mod input;
@@ -48,6 +50,23 @@ impl run::Connector for Pipe {
         } else {
             Trust::ServiceOwnedOnly
         })
+    }
+
+    fn is_elevated(&self) -> bool {
+        elevate::is_elevated()
+    }
+
+    fn relaunch_elevated(&self, args: &[String]) -> Result<i32, String> {
+        elevate::relaunch_elevated(args)
+    }
+
+    fn ask_line(&self, prompt: &str) -> String {
+        use std::io::BufRead;
+        let _ = write!(std::io::stdout().lock(), "{prompt}");
+        let _ = std::io::stdout().lock().flush();
+        let mut line = String::new();
+        let _ = std::io::stdin().lock().read_line(&mut line);
+        line
     }
 }
 

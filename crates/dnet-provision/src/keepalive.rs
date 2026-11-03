@@ -237,14 +237,23 @@ mod tests {
             eprintln!("SKIPPED: no shell on this machine to check the script's syntax");
             return;
         };
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("keepalive.sh");
-        std::fs::write(&path, script(&KeepalivePlan::default())).unwrap();
-        let output = std::process::Command::new(shell)
+        // On stdin, not as a path: on Windows the first `bash` can be WSL's launcher, which reads
+        // `C:\...` as escapes.
+        use std::io::Write;
+        let mut child = std::process::Command::new(shell)
             .arg("-n")
-            .arg(&path)
-            .output()
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
             .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(script(&KeepalivePlan::default()).as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
         assert!(
             output.status.success(),
             "{}",

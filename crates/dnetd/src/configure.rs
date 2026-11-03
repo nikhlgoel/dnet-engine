@@ -1,5 +1,5 @@
 //! Phase 9a — configuration changes a client asks for: add, remove, enable or disable an endpoint,
-//! and the encrypted-DNS choice (IPC-17 to IPC-21).
+//! the encrypted-DNS choice (IPC-17 to IPC-21), and Brutal congestion control (T105, IPC-24).
 //!
 //! Each change is a transaction over the in-memory store, the sealed credentials and the saved
 //! configuration. The order is chosen so that a failure at any step leaves nothing half-done:
@@ -20,10 +20,12 @@
 
 use std::sync::Arc;
 
-use dnet_config::persist::{ConfigStore, MAX_ENDPOINTS};
+use dnet_config::persist::{ConfigStore, MAX_ENDPOINTS, MAX_USER_RULES};
 use dnet_config::secret_store::{SecretKey, SecretStore};
 use dnet_core::endpoint::{Endpoint, EndpointAddress, EndpointOrigin};
-use dnet_core::ids::EndpointId;
+use dnet_core::ids::{EndpointId, ProfileId, RuleId};
+use dnet_core::profile::{BandwidthPair, BrutalAcknowledgement, BRUTAL_WARNING_REVISION};
+use dnet_core::rule::{RuleAction, RuleMatcher};
 use dnet_ipc::protocol::{IpcError, NewEndpoint};
 use serde_json::json;
 
@@ -204,6 +206,98 @@ impl Configurator {
         Ok(consequence)
     }
 
+    /// Turn Brutal congestion control on for a Hysteria 2 profile with `bandwidth`, or off with `None`
+    /// (T105, FR-006). The person accepted the warning in force when the request was made (the IPC
+    /// layer refuses any other revision), and `now_unix` is when the service recorded that.
+    pub fn set_brutal(
+        &self,
+        state: &mut DomainState,
+        profile: &ProfileId,
+        bandwidth: Option<BandwidthPair>,
+        now_unix: u64,
+    ) -> Result<(), ConfigureError> {
+        let before = state.clone();
+        let outcome = state.set_brutal(
+            profile,
+            bandwidth.map(|pair| {
+                (
+                    pair,
+                    BrutalAcknowledgement {
+                        warning_revision: BRUTAL_WARNING_REVISION,
+                        acknowledged_at_unix: now_unix,
+                    },
+                )
+            }),
+        );
+        if let Err(detail) = outcome {
+            *state = before;
+            return Err(refused(detail));
+        }
+        if let Err(e) = self.save(state) {
+            *state = before;
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Add a person's rule (T108). The store gives it a precedence after every other rule. A program
+    /// rule is refused: programs are not attributed to connections in this build, so it would do
+    /// nothing, and saying it is applied "on a best effort" would not be true (Principle VI).
+    pub fn add_rule(
+        &self,
+        state: &mut DomainState,
+        matcher: RuleMatcher,
+        action: RuleAction,
+    ) -> Result<RuleId, ConfigureError> {
+        if matches!(matcher, RuleMatcher::Application(_)) {
+            return Err(refused(
+                "rules by program are not applied in this build: the service does not yet see which \
+                 program opened a connection. Use a rule for the site or the address instead",
+            ));
+        }
+        let mine = state.rules().iter().filter(|r| !r.is_builtin()).count();
+        if mine >= MAX_USER_RULES {
+            return Err(refused(&format!(
+                "a person may add at most {MAX_USER_RULES} rules; remove one first"
+            )));
+        }
+        let before = state.clone();
+        let id = match state.add_user_rule(matcher, action) {
+            Ok(id) => id,
+            Err(e) => {
+                *state = before;
+                return Err(refused(&e.to_string()));
+            }
+        };
+        if let Err(e) = self.save(state) {
+            *state = before;
+            return Err(e);
+        }
+        Ok(id)
+    }
+
+    /// Remove a person's rule. A built-in rule cannot be removed.
+    pub fn remove_rule(&self, state: &mut DomainState, id: RuleId) -> Result<(), ConfigureError> {
+        match state.rules().iter().find(|r| r.id() == id) {
+            None => return Err(refused("there is no rule with that id")),
+            Some(rule) if rule.is_builtin() => return Err(refused(
+                "a built-in rule cannot be removed: it keeps name lookups, the endpoint and local \
+                     devices working",
+            )),
+            Some(_) => {}
+        }
+        let before = state.clone();
+        if let Err(e) = state.remove_rule(id) {
+            *state = before;
+            return Err(refused(&e.to_string()));
+        }
+        if let Err(e) = self.save(state) {
+            *state = before;
+            return Err(e);
+        }
+        Ok(())
+    }
+
     /// Apply `change`, save, and put the store back if saving fails.
     fn transact(
         &self,
@@ -228,6 +322,11 @@ impl Configurator {
 /// The reply to an add: the new endpoint's id, which is the only thing the client does not know.
 pub fn added_reply(id: EndpointId) -> String {
     json!({ "endpoint": id.to_string() }).to_string()
+}
+
+/// The reply to an added rule: its id, which is the only thing the client does not know.
+pub fn rule_added_reply(id: RuleId) -> String {
+    json!({ "rule": id.to_string() }).to_string()
 }
 
 /// The reply to the encrypted-DNS choice: what is now in force, and when opting out, the consequence

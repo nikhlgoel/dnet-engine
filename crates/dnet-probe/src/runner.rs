@@ -93,6 +93,41 @@ impl ProbeJob {
         })
     }
 
+    /// A job that probes one carrier **through the session** (ADR-0008). A server that serves the session
+    /// forwards its carriers to nothing else, so a probe that used the carrier directly would be refused and
+    /// read as a blocked method. The proxy's random credentials are made here, as in [`Self::new`], so the
+    /// configuration and the credentials cannot disagree. `input.socks_auth` is ignored and replaced.
+    pub fn new_session(
+        profile: ConnectionProfile,
+        input: dnet_config::session::SessionProbeInput<'_>,
+    ) -> Result<Self, ConfigError> {
+        let credentials = Credentials {
+            username: random_token(),
+            password: random_token(),
+        };
+        let auth = SocksAuth {
+            username: credentials.username.clone(),
+            password: Secret::new(credentials.password.clone()),
+        };
+        let config = dnet_config::session::generate_session_probe_config(
+            dnet_config::session::SessionProbeInput {
+                socks_auth: &auth,
+                ..input
+            },
+        )?;
+        Ok(Self {
+            profile,
+            config_json: to_json(&config),
+            socks_port: input.socks_port,
+            credentials,
+        })
+    }
+
+    /// The probe core's configuration, for the file only the service can read. **Contains credentials.**
+    pub fn config_json(&self) -> &str {
+        &self.config_json
+    }
+
     pub fn profile(&self) -> &ConnectionProfile {
         &self.profile
     }
@@ -351,6 +386,95 @@ impl Prober {
 mod tests {
     use super::*;
     use dnet_core::probe::RaceDecision;
+
+    // ---- a probe through the session (ADR-0008)
+
+    fn session_job() -> ProbeJob {
+        use dnet_config::hysteria2::{
+            BbrProfile, Hysteria2ClientParams, Hysteria2Credentials, Hysteria2EndpointParams,
+            Hysteria2Obfs, Hysteria2Settings, Hysteria2Transport,
+        };
+        use dnet_config::primary::PrimaryTransport;
+        use dnet_config::session::{Carrier, SessionProbeInput};
+        use dnet_config::tls::ServerTrust;
+        use dnet_core::endpoint::EndpointAddress;
+        use dnet_core::profile::{ProfileKind, ProfileParams};
+
+        let transport = Hysteria2Transport {
+            settings: Hysteria2Settings {
+                client: Hysteria2ClientParams {
+                    bbr_profile: BbrProfile::Conservative,
+                    chrome_parrot: true,
+                },
+                endpoint: Hysteria2EndpointParams {
+                    obfs: Hysteria2Obfs::Salamander,
+                    trust: ServerTrust::PinnedPublicKey {
+                        server_name: "edge.example.net".into(),
+                        spki_sha256: [7; 32],
+                    },
+                },
+            },
+            credentials: Hysteria2Credentials {
+                auth_password: Secret::new("SESSION-JOB-SECRET-auth"),
+                obfs_password: Secret::new("SESSION-JOB-SECRET-obfs"),
+            },
+        };
+        let address = EndpointAddress::new("203.0.113.9", 44443).unwrap();
+        let bypass = ActiveEndpointBypass::new(&address);
+        let device_key = Secret::new("AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=");
+        // The input's own credentials are ignored: the job makes the proxy's.
+        let ignored = SocksAuth {
+            username: "ignored".into(),
+            password: Secret::new("ignored"),
+        };
+        ProbeJob::new_session(
+            ConnectionProfile::new(
+                ProfileId::new("hy2"),
+                ProfileKind::Hysteria2,
+                ProfileParams::new(),
+            ),
+            SessionProbeInput {
+                socks_auth: &ignored,
+                carrier: Carrier {
+                    transport: PrimaryTransport::Hysteria2(&transport),
+                    endpoint: &bypass,
+                    brutal: None,
+                },
+                device_private_key: &device_key,
+                server_public_key: "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+                device_address: "10.9.0.2/32",
+                session_port: 25182,
+                socks_port: 51777,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_session_job_carries_the_session_and_a_proxy_that_demands_its_own_credentials() {
+        let job = session_job();
+        assert_eq!(job.socks_port(), 51777);
+        assert!(job.config_json.contains("\"endpoints\""));
+        assert!(job.config_json.contains("\"detour\": \"hy2\""));
+        // The proxy demands exactly the credentials the job will present, and not the ones it was handed.
+        assert!(job.config_json.contains(&job.credentials.username));
+        assert!(job.config_json.contains(&job.credentials.password));
+        assert!(!job.config_json.contains("ignored"));
+    }
+
+    #[test]
+    fn two_session_jobs_do_not_share_proxy_credentials_and_neither_shows_a_secret() {
+        let (a, b) = (session_job(), session_job());
+        assert_ne!(a.credentials.password, b.credentials.password);
+        let shown = format!("{a:?} {b:?}");
+        for secret in [
+            "SESSION-JOB-SECRET",
+            "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+            a.credentials.password.as_str(),
+        ] {
+            assert!(!shown.contains(secret), "a secret was shown: {shown}");
+        }
+    }
 
     fn prober(dir: &Path, core: &str) -> Prober {
         Prober {

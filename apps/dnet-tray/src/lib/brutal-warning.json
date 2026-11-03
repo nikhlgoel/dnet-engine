@@ -1,0 +1,7 @@
+{
+  "revision": 1,
+  "title": "Turn on aggressive speed mode?",
+  "body": "This mode sends as fast as it can instead of backing off when the network is busy.",
+  "consequence": "This makes the Wi-Fi worse for everyone around you, including you.",
+  "note": "You tell the mode how fast your connection is. If that figure is too high, it will make things worse."
+}

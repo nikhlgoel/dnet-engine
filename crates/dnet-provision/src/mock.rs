@@ -318,7 +318,24 @@ impl Provider for MockProvider {
     fn bootstrap(&self, _instance: &InstanceInfo, script: &str) -> Result<String, ProviderError> {
         let mut state = self.enter("bootstrap")?;
         state.last_bootstrap_script = Some(script.to_owned());
-        Ok(state.bootstrap_output.clone())
+        // A real server prints the client key it was given. `{CLIENT_PUB}` in the scripted output stands
+        // for it, read from the script as the server would.
+        let client_pub = script
+            .lines()
+            .find_map(|l| l.strip_prefix("public_key="))
+            .unwrap_or_default();
+        // The same for the session: the devices the script was given, as the server's report lists them.
+        // (`"{SESSION_DEVICES}"` in the scripted output is replaced by that array.)
+        let devices = script
+            .split("\"devices\": [")
+            .nth(1)
+            .and_then(|rest| rest.split("]},").next())
+            .map(|list| format!("[{list}]"))
+            .unwrap_or_else(|| "[]".to_owned());
+        Ok(state
+            .bootstrap_output
+            .replace("{CLIENT_PUB}", client_pub)
+            .replace("\"{SESSION_DEVICES}\"", &devices))
     }
 
     fn install_keepalive(

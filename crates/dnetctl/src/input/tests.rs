@@ -32,6 +32,7 @@ pub(crate) fn credentials_json() -> Vec<u8> {
             },
         }),
         measure_origin: None,
+        session: None,
     }
     .to_plaintext_json()
     .unwrap()

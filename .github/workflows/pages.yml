@@ -1,0 +1,69 @@
+# T172 — publish the project's one-page website (site/) to GitHub Pages.
+#
+# Free and static: no scripts, no external loads, no domain. The page uses the application's own design
+# tokens, so they are copied in here from docs/design/tokens.css rather than kept twice. The site is
+# built only from the default branch; a change under site/ or to the tokens publishes it.
+#
+# One-time setting (repository Settings > Pages > Source: "GitHub Actions"). Without it the deploy
+# job stops with a clear message and nothing is published.
+
+name: Website
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "site/**"
+      - "docs/design/tokens.css"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build the page
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add the design tokens the page uses
+        run: cp docs/design/tokens.css site/tokens.css
+
+      - name: The page must run no scripts and load nothing from another site
+        run: |
+          if grep -RInE '<script|<iframe|<object|<embed' site --include='*.html'; then
+            echo "::error::site/ must contain no scripts or embeds"; exit 1
+          fi
+          if grep -RInE '(src|href)="https?://[^"]*"' site --include='*.html' \
+               | grep -E '<(img|link|source|video|audio)\b'; then
+            echo "::error::site/ must not load images, styles or fonts from another site"; exit 1
+          fi
+          if grep -RInE '@import|url\(\s*["'\'']?https?:' site --include='*.css'; then
+            echo "::error::site/ stylesheets must not load anything from another site"; exit 1
+          fi
+          echo "site/ is self-contained"
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    name: Publish
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

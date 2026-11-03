@@ -13,13 +13,15 @@
     "build": "vite build && node scripts/check-budget.mjs",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run",
-    "audit": "pnpm audit --prod"
+    "audit": "pnpm audit --prod",
+    "installer": "pnpm build && tauri build --config ../../installer/tauri.installer.json --bundles nsis"
   },
   "dependencies": {
     "@tauri-apps/api": "^2"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7",
+    "@tauri-apps/cli": "~2.12.2",
     "@testing-library/dom": "^10",
     "@testing-library/svelte": "^5",
     "@types/node": "^22.20.5",

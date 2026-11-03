@@ -119,6 +119,19 @@ $RECYCLE.BIN/
 *.swp
 *~
 
+# ---------- The website ----------
+# Copied from docs/design/tokens.css by .github/workflows/pages.yml (and by hand for a local preview).
+site/tokens.css
+
+# ---------- Crash dumps, traces and merge leftovers ----------
+# A dump or an ETW trace holds process memory and network metadata; none belongs in history.
+*.dmp
+*.etl
+*.pcap
+*.pcapng
+*.orig
+*.rej
+
 # ---------- SPIKE-R4 live-gate output (packet captures, run logs) ----------
 testing/spike-r4/results/
 # The WSL lab's saved routing state and the client parameters it exports (test keys only).
@@ -135,6 +148,14 @@ CLAUDE.md
 CLAUDE.local.md
 .claudeignore
 .mcp.json
+# The assistant's working notes (where the last session stopped, open questions, dead ends).
+.agent/
+# Other assistants' instruction files: the same rule as CLAUDE.md, in case the tool is switched.
+AGENTS.md
+GEMINI.md
+.cursor/
+.cursorrules
+.aider*
 
 # Spec Kit scaffolding (templates, scripts, workflow definitions, tool manifests) is tooling and
 # stays local. The constitution is different: it is the project's governing document, and code,
@@ -148,6 +169,8 @@ CLAUDE.local.md
 graphify-out/
 
 # ---------- Local tool caches and lab artefacts ----------
+# Output of the commands in LOCAL-COMMANDS.md, kept for the assistant on that machine to read.
+.local-logs/
 .ruff_cache/
 .pytest_cache/
 .mypy_cache/

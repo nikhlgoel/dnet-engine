@@ -148,13 +148,22 @@ impl FeedService {
                 self.state = *state;
                 self.reported_out_of_date = false;
                 self.publish_definitions();
-                // The evicted feed's file is left as it is: at the next start `restore` verifies it
-                // against the keys now held and drops it again, for the same reason.
-                Ok(if feed_evicted {
-                    vec![FeedNote::Evicted]
-                } else {
-                    Vec::new()
-                })
+                if !feed_evicted {
+                    return Ok(Vec::new());
+                }
+                let mut notes = vec![FeedNote::Evicted];
+                // Store the eviction, so that a start reads what is in effect now. Left in place, the
+                // feed would be re-checked against whatever keys document is stored at that start, and
+                // one that lists its signer again would bring back what rule R removed. Failing to
+                // remove it is reported, not fatal: the keys are stored, and the next start discards
+                // a feed that does not verify under them.
+                if let Err(error) = self.feed_file.remove() {
+                    notes.push(FeedNote::Discarded {
+                        document: Document::Feed,
+                        reason: format!("the evicted feed's file could not be removed ({error})"),
+                    });
+                }
+                Ok(notes)
             }
         }
     }

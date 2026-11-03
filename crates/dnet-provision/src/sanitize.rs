@@ -4,7 +4,8 @@
 //! A provider's error text is its own words, produced by code this crate does not control and often by a
 //! remote service that echoes the request it was sent. The credential is in the request. So the text is
 //! cleaned of the credential's value (and of parts of it long enough to identify it), of control
-//! characters that could forge a log line, and cut to a length that fits a dialog.
+//! characters that could forge a log line, of characters that reorder or hide text, and cut to a
+//! length that fits a dialog.
 //!
 //! This is the second line of defence. The first is that a [`crate::secret::Secret`] never prints.
 
@@ -48,7 +49,7 @@ impl Sanitizer {
         }
         let printable: String = out
             .chars()
-            .map(|c| if c.is_control() { ' ' } else { c })
+            .map(|c| if hides_or_forges(c) { ' ' } else { c })
             .collect();
         let collapsed = printable.split_whitespace().collect::<Vec<_>>().join(" ");
         if collapsed.chars().count() > MAX_TEXT_CHARS {
@@ -63,6 +64,17 @@ impl Sanitizer {
 /// Replace every stretch of `text` that shares `MIN_FRAGMENT` or more consecutive characters with
 /// `secret` by one `<redacted>`. Linear in the two lengths: every `MIN_FRAGMENT`-character window of the
 /// secret goes into a set, and each window of the text is looked up in it.
+/// Control characters (which can forge a log line), and characters that reorder or hide text (which
+/// can make a dialog read as something it does not say). The same set `dnetctl` keeps off a terminal.
+fn hides_or_forges(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}' | '\u{061C}'
+            | '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FEFF}'
+        )
+}
+
 fn redact_fragments(text: &str, secret: &str) -> String {
     let text: Vec<char> = text.chars().collect();
     let secret: Vec<char> = secret.chars().collect();
@@ -132,6 +144,20 @@ mod tests {
         let cleaned = Sanitizer::new().clean("denied\r\n[INFO] approved\u{1b}[2J\u{7}");
         assert!(!cleaned.chars().any(char::is_control), "{cleaned:?}");
         assert!(cleaned.starts_with("denied "), "{cleaned}");
+    }
+
+    /// A provider's text is shown in a dialog. Characters that reorder or hide text could make it
+    /// read as something it does not say.
+    #[test]
+    fn bidirectional_and_invisible_characters_cannot_disguise_the_text() {
+        let cleaned = Sanitizer::new()
+            .clean("quota\u{202E}deveirter\u{2066}x\u{2069}\u{200B}y\u{FEFF}\u{200F}");
+        for c in [
+            '\u{202E}', '\u{2066}', '\u{2069}', '\u{200B}', '\u{FEFF}', '\u{200F}',
+        ] {
+            assert!(!cleaned.contains(c), "{c:?} survived: {cleaned:?}");
+        }
+        assert_eq!(cleaned, "quota deveirter x y");
     }
 
     #[test]

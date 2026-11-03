@@ -1,0 +1,29 @@
+# T114 — winget default-locale manifest, rendered by .github/workflows/release.yml.
+# Wording follows the constitution's legal posture and FR-033: a self-hosted resilience client, never a
+# bypass tool, and no claim to hide that a tunnel is in use.
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.9.0.schema.json
+PackageIdentifier: DNetEngine.DNetEngine
+PackageVersion: ${VERSION}
+PackageLocale: en-US
+Publisher: DNet Engine contributors
+PublisherUrl: https://github.com/nikhlgoel/dnet-engine
+PublisherSupportUrl: https://github.com/nikhlgoel/dnet-engine/issues
+PackageName: DNet Engine
+PackageUrl: https://github.com/nikhlgoel/dnet-engine
+License: GPL-3.0-or-later
+LicenseUrl: https://github.com/nikhlgoel/dnet-engine/blob/master/LICENSE
+ShortDescription: Keeps your connection working on restrictive and unreliable networks, through an endpoint you own.
+Description: |-
+  DNet Engine is a self-hosted network resilience client for Windows. It connects through an endpoint
+  you own, measures which connection method works on the network you are on, moves to another path
+  when one degrades or drops, and restores your network settings exactly when it stops. It never ships
+  with an endpoint, credential or key of its own.
+Tags:
+  - network
+  - resilience
+  - failover
+  - tunnel
+  - self-hosted
+ReleaseNotesUrl: https://github.com/nikhlgoel/dnet-engine/releases/tag/v${VERSION}
+ManifestType: defaultLocale
+ManifestVersion: 1.9.0

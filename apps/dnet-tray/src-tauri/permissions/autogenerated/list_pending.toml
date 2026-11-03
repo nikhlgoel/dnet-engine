@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-list-pending"
+description = "Enables the list_pending command without any pre-configured scope."
+commands.allow = ["list_pending"]
+
+[[permission]]
+identifier = "deny-list-pending"
+description = "Denies the list_pending command without any pre-configured scope."
+commands.deny = ["list_pending"]

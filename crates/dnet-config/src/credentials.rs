@@ -42,8 +42,13 @@ use crate::reality::{
 use crate::secret::Secret;
 use crate::tls::ServerTrust;
 
-/// The version of the stored form. Bumped on any change a reader of the old form would misread.
-pub const FORMAT_VERSION: u32 = 1;
+/// The newest version of the stored form this version reads and the one it writes when a bundle needs it.
+/// Bumped on any change a reader of the old form would misread. Version 2 added the session (ADR-0008);
+/// a bundle without one is still written as version 1, so a version that predates the session keeps reading
+/// every bundle that does not need it, and says "version 2" about one that does.
+pub const FORMAT_VERSION: u32 = 2;
+/// The oldest version still read.
+const OLDEST_VERSION: u32 = 1;
 
 /// The largest stored form accepted, so a damaged or hostile blob cannot make the service allocate
 /// without bound. A real bundle is about 1 KiB.
@@ -94,12 +99,30 @@ pub struct RealityBundle {
     pub endpoint: RealityEndpointParams,
 }
 
+/// What the session needs from an endpoint (ADR-0008): this device's own key, the server's session key, and where
+/// this device sits in the session. The session runs over the Hysteria 2 and REALITY carriers, so a bundle with a
+/// session also has at least one of them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionBundle {
+    /// This device's private key, 32 bytes in standard base64. Made on this device and never sent anywhere; the
+    /// server holds only the public half.
+    pub device_private_key: Secret,
+    /// The server's session public key, 32 bytes in standard base64.
+    pub server_public_key: String,
+    /// This device's address inside the session (one of the first [`crate::session::MAX_DEVICES`] after the server).
+    pub device_address: Ipv4Addr,
+    /// The UDP port the session listens on, on the server's own loopback, reached through a carrier.
+    pub session_port: u16,
+}
+
 /// Everything secret about one endpoint. A profile the endpoint does not serve is `None`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EndpointCredentials {
     pub amneziawg: Option<AmneziaWgCredentials>,
     pub hysteria2: Option<Hysteria2Bundle>,
     pub reality: Option<RealityBundle>,
+    /// The session over the carriers (ADR-0008). `None` for an endpoint set up before it existed.
+    pub session: Option<SessionBundle>,
     /// Where probes and live checks fetch from. Without it the endpoint can be stored but not
     /// measured, so a connect says so instead of guessing a target.
     pub measure_origin: Option<Origin>,
@@ -118,7 +141,12 @@ impl EndpointCredentials {
     pub fn to_plaintext_json(&self) -> Result<Vec<u8>, CredentialsError> {
         self.validate()?;
         let wire = Wire {
-            version: FORMAT_VERSION,
+            // The lowest version that can hold this bundle.
+            version: if self.session.is_some() {
+                FORMAT_VERSION
+            } else {
+                OLDEST_VERSION
+            },
             measure_origin: self
                 .measure_origin
                 .as_ref()
@@ -177,6 +205,12 @@ impl EndpointCredentials {
                     VlessFlow::Vision => "xtls-rprx-vision".into(),
                 },
             }),
+            session: self.session.as_ref().map(|s| SessionWire {
+                device_private_key: s.device_private_key.expose().to_owned(),
+                server_public_key: s.server_public_key.clone(),
+                device_address: s.device_address,
+                session_port: s.session_port,
+            }),
         };
         serde_json::to_vec(&wire).map_err(|e| CredentialsError::Malformed(e.to_string()))
     }
@@ -189,13 +223,19 @@ impl EndpointCredentials {
         // Checked before the full parse so a future format is named as such, not as "malformed".
         let probe: VersionProbe = serde_json::from_slice(bytes)
             .map_err(|e| CredentialsError::Malformed(serde_error_summary(&e)))?;
-        if probe.version != FORMAT_VERSION {
+        if !(OLDEST_VERSION..=FORMAT_VERSION).contains(&probe.version) {
             return Err(CredentialsError::UnsupportedVersion {
                 found: probe.version,
             });
         }
         let wire: Wire = serde_json::from_slice(bytes)
             .map_err(|e| CredentialsError::Malformed(serde_error_summary(&e)))?;
+        // A form that says it predates the session cannot hold one: it was not written by this code.
+        if wire.version < 2 && wire.session.is_some() {
+            return Err(CredentialsError::Malformed(
+                "a version 1 form holds a session".to_owned(),
+            ));
+        }
 
         let amneziawg = wire.amneziawg.map(|a| AmneziaWgCredentials {
             client_private_key: PrivateKey::new(a.client_private_key),
@@ -270,6 +310,13 @@ impl EndpointCredentials {
             })
             .transpose()?;
 
+        let session = wire.session.map(|s| SessionBundle {
+            device_private_key: Secret::new(s.device_private_key),
+            server_public_key: s.server_public_key,
+            device_address: s.device_address,
+            session_port: s.session_port,
+        });
+
         let measure_origin = wire
             .measure_origin
             .map(|text| Origin::parse(&text))
@@ -280,6 +327,7 @@ impl EndpointCredentials {
             amneziawg,
             hysteria2,
             reality,
+            session,
             measure_origin,
         };
         bundle.validate()?;
@@ -344,6 +392,24 @@ impl EndpointCredentials {
             validate_short_id(&r.credentials.short_id)
                 .map_err(|_| CredentialsError::Invalid("REALITY short id"))?;
         }
+        if let Some(s) = &self.session {
+            // The session rides the carriers; without one of them it has nothing to ride.
+            if self.hysteria2.is_none() && self.reality.is_none() {
+                return Err(CredentialsError::Invalid("session (it has no carrier)"));
+            }
+            if !crate::session::is_key(s.device_private_key.expose()) {
+                return Err(CredentialsError::Invalid("session device key"));
+            }
+            if !crate::session::is_key(&s.server_public_key) {
+                return Err(CredentialsError::Invalid("session server key"));
+            }
+            if !crate::session::is_device_address(s.device_address) {
+                return Err(CredentialsError::Invalid("session device address"));
+            }
+            if s.session_port == 0 {
+                return Err(CredentialsError::Invalid("session port"));
+            }
+        }
         Ok(())
     }
 }
@@ -362,6 +428,17 @@ struct Wire {
     hysteria2: Option<Hy2Wire>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reality: Option<RealityWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    session: Option<SessionWire>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionWire {
+    device_private_key: String,
+    server_public_key: String,
+    device_address: Ipv4Addr,
+    session_port: u16,
 }
 
 /// Reads only the version, ignoring everything else.
@@ -585,7 +662,203 @@ mod tests {
             )),
             reality: Some(reality()),
             measure_origin: Some(Origin::parse("http://203.0.113.80:8080").unwrap()),
+            session: None,
         }
+    }
+
+    // ---- the session (ADR-0008)
+
+    fn session() -> SessionBundle {
+        use base64::engine::general_purpose::STANDARD;
+        use base64::Engine as _;
+        SessionBundle {
+            device_private_key: Secret::new(STANDARD.encode([5u8; 32])),
+            server_public_key: STANDARD.encode([6u8; 32]),
+            device_address: Ipv4Addr::new(10, 9, 0, 2),
+            session_port: 25182,
+        }
+    }
+
+    fn with_session() -> EndpointCredentials {
+        EndpointCredentials {
+            session: Some(session()),
+            ..full()
+        }
+    }
+
+    #[test]
+    fn a_bundle_with_a_session_round_trips_and_is_version_2() {
+        let bundle = with_session();
+        let stored = bundle.to_plaintext_json().unwrap();
+        assert!(String::from_utf8_lossy(&stored).starts_with("{\"version\":2"));
+        assert_eq!(
+            EndpointCredentials::from_plaintext_json(&stored).unwrap(),
+            bundle
+        );
+    }
+
+    #[test]
+    fn a_bundle_without_one_is_still_written_as_version_1_so_older_readers_keep_working() {
+        let stored = full().to_plaintext_json().unwrap();
+        assert!(String::from_utf8_lossy(&stored).starts_with("{\"version\":1"));
+        assert!(!String::from_utf8_lossy(&stored).contains("session"));
+        // And a version 1 form from before the session is read as it always was.
+        let read = EndpointCredentials::from_plaintext_json(&stored).unwrap();
+        assert_eq!(read.session, None);
+    }
+
+    #[test]
+    fn a_form_that_says_version_1_cannot_hold_a_session() {
+        let stored = String::from_utf8(with_session().to_plaintext_json().unwrap()).unwrap();
+        let forged = stored.replacen("\"version\":2", "\"version\":1", 1);
+        assert!(matches!(
+            EndpointCredentials::from_plaintext_json(forged.as_bytes()),
+            Err(CredentialsError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn a_session_needs_a_carrier_to_ride() {
+        let alone = EndpointCredentials {
+            session: Some(session()),
+            ..Default::default()
+        };
+        let amnezia_only = EndpointCredentials {
+            amneziawg: Some(awg()),
+            session: Some(session()),
+            ..Default::default()
+        };
+        for bundle in [alone, amnezia_only] {
+            assert_eq!(
+                bundle.to_plaintext_json(),
+                Err(CredentialsError::Invalid("session (it has no carrier)"))
+            );
+        }
+        // Either carrier is enough.
+        for carriers in [(true, false), (false, true)] {
+            let bundle = EndpointCredentials {
+                hysteria2: carriers.0.then(|| {
+                    hy2(
+                        ServerTrust::PublicCa {
+                            server_name: "vpn.example.com".into(),
+                        },
+                        Hysteria2Obfs::Salamander,
+                    )
+                }),
+                reality: carriers.1.then(reality),
+                session: Some(session()),
+                ..Default::default()
+            };
+            assert!(bundle.to_plaintext_json().is_ok(), "{carriers:?}");
+        }
+    }
+
+    #[test]
+    fn a_session_with_a_value_that_cannot_be_what_it_claims_is_refused_by_field() {
+        use base64::engine::general_purpose::STANDARD;
+        use base64::Engine as _;
+        let broken = |edit: &dyn Fn(&mut SessionBundle)| {
+            let mut bundle = with_session();
+            edit(bundle.session.as_mut().unwrap());
+            bundle.to_plaintext_json().unwrap_err()
+        };
+        let short = Secret::new(STANDARD.encode([1u8; 31]));
+        type Edit = Box<dyn Fn(&mut SessionBundle)>;
+        let cases: Vec<(&str, Edit, &str)> = vec![
+            (
+                "device key not base64",
+                Box::new(|s| s.device_private_key = Secret::new(SENTINEL)),
+                "session device key",
+            ),
+            (
+                "device key too short",
+                Box::new(move |s| s.device_private_key = short.clone()),
+                "session device key",
+            ),
+            (
+                "server key empty",
+                Box::new(|s| s.server_public_key = String::new()),
+                "session server key",
+            ),
+            (
+                "server key not a key",
+                Box::new(|s| s.server_public_key = "AAAA".into()),
+                "session server key",
+            ),
+            (
+                "the server's own address",
+                Box::new(|s| s.device_address = Ipv4Addr::new(10, 9, 0, 1)),
+                "session device address",
+            ),
+            (
+                "the origin's address",
+                Box::new(|s| s.device_address = Ipv4Addr::new(10, 9, 0, 254)),
+                "session device address",
+            ),
+            (
+                "another network",
+                Box::new(|s| s.device_address = Ipv4Addr::new(10, 66, 0, 2)),
+                "session device address",
+            ),
+            (
+                "one past the last device",
+                Box::new(|s| s.device_address = Ipv4Addr::new(10, 9, 0, 10)),
+                "session device address",
+            ),
+            (
+                "port zero",
+                Box::new(|s| s.session_port = 0),
+                "session port",
+            ),
+        ];
+        for (label, edit, field) in &cases {
+            let error = broken(edit.as_ref());
+            assert_eq!(error, CredentialsError::Invalid(field), "{label}");
+            // The refusal names the field and never repeats a value.
+            assert!(!error.to_string().contains(SENTINEL), "{label}: {error}");
+        }
+        // The first and the last device addresses are fine.
+        for last_octet in [2u8, 9] {
+            let mut ok = with_session();
+            ok.session.as_mut().unwrap().device_address = Ipv4Addr::new(10, 9, 0, last_octet);
+            assert!(ok.to_plaintext_json().is_ok(), "10.9.0.{last_octet}");
+        }
+    }
+
+    #[test]
+    fn a_stored_session_with_an_unknown_field_or_a_bad_address_is_refused() {
+        let stored = String::from_utf8(with_session().to_plaintext_json().unwrap()).unwrap();
+        let extra = stored.replacen(
+            "\"session_port\":25182",
+            "\"session_port\":25182,\"extra\":1",
+            1,
+        );
+        assert!(matches!(
+            EndpointCredentials::from_plaintext_json(extra.as_bytes()),
+            Err(CredentialsError::Malformed(_))
+        ));
+        let moved = stored.replacen("10.9.0.2", "10.9.0.200", 1);
+        assert_eq!(
+            EndpointCredentials::from_plaintext_json(moved.as_bytes()),
+            Err(CredentialsError::Invalid("session device address"))
+        );
+    }
+
+    #[test]
+    fn the_session_key_never_shows_in_debug_or_in_an_error() {
+        let bundle = with_session();
+        let key = {
+            use base64::engine::general_purpose::STANDARD;
+            use base64::Engine as _;
+            STANDARD.encode([5u8; 32])
+        };
+        assert!(
+            !format!("{bundle:?}").contains(&key),
+            "Debug leaked the key"
+        );
+        // And the stored form does hold it, so that absence check is not vacuous.
+        let stored = String::from_utf8(bundle.to_plaintext_json().unwrap()).unwrap();
+        assert!(stored.contains(&key));
     }
 
     #[test]
@@ -607,6 +880,7 @@ mod tests {
                 hysteria2: parts.hysteria2.clone().filter(|_| mask & 2 != 0),
                 reality: parts.reality.clone().filter(|_| mask & 4 != 0),
                 measure_origin: parts.measure_origin.clone().filter(|_| mask & 1 != 0),
+                session: None,
             };
             let stored = bundle.to_plaintext_json().unwrap();
             assert_eq!(
@@ -710,7 +984,8 @@ mod tests {
     #[test]
     fn another_format_version_is_named_as_such() {
         let good = String::from_utf8(full().to_plaintext_json().unwrap()).unwrap();
-        for version in [0u32, 2, 99] {
+        // 2 is the session's version and is read now; 3 and beyond are not known yet.
+        for version in [0u32, 3, 99] {
             let other = good.replacen("\"version\":1", &format!("\"version\":{version}"), 1);
             assert_eq!(
                 EndpointCredentials::from_plaintext_json(other.as_bytes()),
@@ -719,8 +994,8 @@ mod tests {
         }
         // A future form is reported as a version problem even if its other fields are unknown.
         assert_eq!(
-            EndpointCredentials::from_plaintext_json(br#"{"version":2,"shiny":true}"#),
-            Err(CredentialsError::UnsupportedVersion { found: 2 })
+            EndpointCredentials::from_plaintext_json(br#"{"version":3,"shiny":true}"#),
+            Err(CredentialsError::UnsupportedVersion { found: 3 })
         );
     }
 

@@ -18,6 +18,7 @@ anyhow = { workspace = true }
 base64 = { workspace = true }
 dnet-config = { workspace = true }
 dnet-core = { workspace = true }
+dnet-provision = { workspace = true }
 ed25519-dalek = { workspace = true }
 getrandom = { workspace = true }
 serde = { workspace = true }

@@ -17,8 +17,13 @@ use dnet_core::health::HealthState;
 use dnet_core::ids::EndpointId;
 use dnet_core::ids::ProfileId;
 use dnet_core::ids::RuleId;
-use dnet_core::profile::{ConnectionProfile, ProfileKind, ProfileParams};
-use dnet_core::rule::{validate_dns_leak_protection, validate_rule_set, RoutingRule};
+use dnet_core::profile::{
+    BandwidthPair, BrutalAcknowledgement, ConnectionProfile, ProfileKind, ProfileParams,
+};
+use dnet_core::rule::{
+    next_user_precedence, validate_dns_leak_protection, validate_rule_set,
+    validate_user_rules_follow_builtins, RoutingRule, RuleAction, RuleMatcher,
+};
 use dnet_ipc::protocol::{encode_state_snapshot, ConnectionStatus, RoutingPosture, StateSnapshot};
 use serde_json::{json, Value};
 
@@ -104,6 +109,15 @@ impl DomainState {
                 .apply_consent(saved)
                 .map_err(|e| PersistError::Invalid(e.to_string()))?;
         }
+        // The person's rules (T108), after the built-ins the seeded store made, through the same checks
+        // a rule set always gets.
+        if !loaded.rules.is_empty() {
+            let mut candidate = state.rules.clone();
+            candidate.extend(loaded.rules);
+            state
+                .replace_rules(candidate)
+                .map_err(|e| PersistError::Invalid(e.to_string()))?;
+        }
         Ok(state)
     }
 
@@ -146,7 +160,13 @@ impl DomainState {
         // Written only once the person has chosen or been told something; otherwise the file is as it
         // always was.
         let chosen = (self.consent != ConsentState::new()).then_some(self.consent);
-        dnet_config::persist::encode_full(&self.endpoints, &self.profiles, chosen)
+        // Built-in rules are left out by the encoder: only the person's are saved.
+        dnet_config::persist::encode_with_rules(
+            &self.endpoints,
+            &self.profiles,
+            chosen,
+            &self.rules,
+        )
     }
 
     // ----------------------------------------------------------- wire responses
@@ -210,7 +230,11 @@ impl DomainState {
             .rules
             .iter()
             .map(|r| {
+                let (kind, value) = dnet_ipc::protocol::rule_wire(r.matcher());
                 json!({
+                    "id": r.id().to_string(),
+                    "kind": kind,
+                    "value": value,
                     "precedence": r.precedence(),
                     "action": rule_action_name(r.action()),
                     "reliability": reliability_name(r.reliability()),
@@ -303,6 +327,48 @@ impl DomainState {
     /// Add a user rule, rejecting a precedence collision across the whole set (FR-022)
     /// and any change that would weaken DNS-leak protection (the DNS-capture rule must
     /// remain present and top-priority).
+    /// Turn Brutal on for a profile (with its acknowledgement) or off. The text of an error names no
+    /// value from the request.
+    pub fn set_brutal(
+        &mut self,
+        id: &ProfileId,
+        setting: Option<(BandwidthPair, BrutalAcknowledgement)>,
+    ) -> Result<(), &'static str> {
+        let profile = self
+            .profiles
+            .iter_mut()
+            .find(|p| p.id() == id)
+            .ok_or("there is no connection method with that id")?;
+        match setting {
+            None => {
+                profile.disable_brutal();
+                Ok(())
+            }
+            Some((bandwidth, acknowledgement)) => profile
+                .enable_brutal(bandwidth, acknowledgement)
+                .map_err(|e| match e {
+                    DomainError::BrutalRequiresHysteria2 => {
+                        "Brutal congestion control applies only to the Hysteria 2 connection method"
+                    }
+                    _ => "the warning about Brutal congestion control has not been accepted",
+                }),
+        }
+    }
+
+    /// Add a person's rule, after every other rule (and so after every built-in), and return its id.
+    pub fn add_user_rule(
+        &mut self,
+        matcher: RuleMatcher,
+        action: RuleAction,
+    ) -> Result<RuleId, DomainError> {
+        let precedence =
+            next_user_precedence(&self.rules).ok_or(DomainError::PrecedenceCollision(u32::MAX))?;
+        let rule = RoutingRule::user(matcher, action, precedence)?;
+        let id = rule.id();
+        self.add_rule(rule)?;
+        Ok(id)
+    }
+
     pub fn add_rule(&mut self, rule: RoutingRule) -> Result<(), DomainError> {
         let mut candidate = self.rules.clone();
         candidate.push(rule);
@@ -340,6 +406,8 @@ impl DomainState {
         validate_rule_set(candidate)?;
         validate_dns_leak_protection(candidate)?;
         validate_block_outranks_user_rules(candidate)?;
+        // Whether or not the block is in force, a person's rule never outranks a built-in (T108).
+        validate_user_rules_follow_builtins(candidate)?;
         Ok(())
     }
 
@@ -642,7 +710,10 @@ mod tests {
     }
 
     #[test]
-    fn a_user_rule_cannot_outrank_the_block_but_may_once_the_person_has_opted_out() {
+    /// A person's rule may not sit between the built-ins and the user range, whether or not the block
+    /// is in force (T108; before T108 the opt-out let one move up to just after the built-ins). The
+    /// range is kept free so the built-ins can make room for the endpoint bypass at connect time.
+    fn a_user_rule_cannot_outrank_the_block_nor_move_up_once_the_person_has_opted_out() {
         let mut state = DomainState::seeded();
         let low = || {
             RoutingRule::user(
@@ -657,19 +728,12 @@ mod tests {
             Err(DomainError::OutranksEncryptedDnsBlock(50, _))
         ));
         state.opt_out_of_encrypted_dns_block().unwrap();
-        assert_eq!(state.add_rule(low()), Ok(()));
-        // And turning the block back on is refused while that rule would undo it: nothing changes.
-        let before = state.rules().len();
         assert!(matches!(
-            state.restore_encrypted_dns_block(),
-            Err(DomainError::OutranksEncryptedDnsBlock(50, _))
+            state.add_rule(low()),
+            Err(DomainError::UserRuleOutranksBuiltins(50, _))
         ));
-        assert_eq!(state.rules().len(), before);
-        assert_eq!(blocks(&state), 0);
-        assert_eq!(
-            state.consent().policy(),
-            dnet_core::doh_block::Policy::Allow
-        );
+        // Restoring the block is then never blocked by a person's rule.
+        assert_eq!(state.restore_encrypted_dns_block(), Ok(()));
     }
 
     #[test]
@@ -924,5 +988,106 @@ mod tests {
         for forbidden in ["password", "private", "secret", "token", "health", "rtt"] {
             assert!(!text.contains(forbidden), "{forbidden}");
         }
+    }
+
+    // ---------------------------------------------------------------- a person's rules (T108)
+
+    fn suffix(name: &str) -> RuleMatcher {
+        RuleMatcher::DomainSuffix(name.into())
+    }
+
+    #[test]
+    fn a_persons_rule_goes_after_every_built_in_and_after_the_last_rule() {
+        let mut state = DomainState::seeded();
+        let first = state
+            .add_user_rule(suffix("example.com"), RuleAction::Bypass)
+            .unwrap();
+        let second = state
+            .add_user_rule(suffix("example.org"), RuleAction::Tunnel)
+            .unwrap();
+        let precedence = |id| {
+            state
+                .rules()
+                .iter()
+                .find(|r| r.id() == id)
+                .unwrap()
+                .precedence()
+        };
+        assert_eq!(precedence(first), dnet_core::doh_block::USER_RULES_START);
+        assert_eq!(
+            precedence(second),
+            dnet_core::doh_block::USER_RULES_START + 1
+        );
+        assert_eq!(
+            dnet_core::rule::validate_user_rules_follow_builtins(state.rules()),
+            Ok(())
+        );
+    }
+
+    /// Also when the person opted out of the encrypted-DNS block: a rule still comes after the built-ins.
+    #[test]
+    fn opting_out_of_the_block_does_not_let_a_rule_move_up() {
+        let mut state = DomainState::seeded();
+        state.opt_out_of_encrypted_dns_block().unwrap();
+        let id = state
+            .add_user_rule(suffix("example.com"), RuleAction::Tunnel)
+            .unwrap();
+        let rule = state.rules().iter().find(|r| r.id() == id).unwrap();
+        assert!(rule.precedence() >= dnet_core::doh_block::USER_RULES_START);
+    }
+
+    #[test]
+    fn a_persons_rules_are_saved_and_come_back() {
+        let mut state = DomainState::seeded();
+        let id = state
+            .add_user_rule(suffix("example.com"), RuleAction::Bypass)
+            .unwrap();
+        let back = reload(&state);
+        assert!(back.refusal.is_none(), "{:?}", back.refusal);
+        let rule = back
+            .state
+            .rules()
+            .iter()
+            .find(|r| r.id() == id)
+            .expect("saved");
+        assert_eq!(rule.matcher(), &suffix("example.com"));
+        assert!(!rule.is_builtin());
+        // The built-ins are made fresh, not doubled.
+        assert_eq!(back.state.rules().len(), state.rules().len());
+    }
+
+    #[test]
+    fn removing_a_persons_rule_removes_it_and_a_built_in_cannot_be_removed() {
+        let mut state = DomainState::seeded();
+        let id = state
+            .add_user_rule(suffix("example.com"), RuleAction::Bypass)
+            .unwrap();
+        assert_eq!(state.remove_rule(id), Ok(true));
+        assert!(state.rules().iter().all(RoutingRule::is_builtin));
+        let builtin = state.rules()[0].id();
+        assert!(state.remove_rule(builtin).is_err());
+    }
+
+    #[test]
+    fn the_rule_list_names_each_rule_and_what_it_matches() {
+        let mut state = DomainState::seeded();
+        let id = state
+            .add_user_rule(suffix("example.com"), RuleAction::Bypass)
+            .unwrap();
+        let json: Value = serde_json::from_str(&state.rules_json()).unwrap();
+        let mine = json["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == id.to_string())
+            .expect("listed by id");
+        assert_eq!(mine["kind"], "domain_suffix");
+        assert_eq!(mine["value"], "example.com");
+        assert_eq!(mine["builtin"], false);
+        assert!(json["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["id"].is_string()));
     }
 }

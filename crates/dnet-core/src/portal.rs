@@ -144,15 +144,21 @@ pub fn combine(first: &PortalState, second: &PortalState) -> PortalState {
 /// The longest login address kept.
 pub const MAX_LOGIN_URL: usize = 2048;
 
-/// A login address made safe to offer: only a plain `http` or `https` address, with a host, no
-/// credentials, no control or whitespace character, and a bounded length. `None` for anything else.
+/// A login address made safe to offer: only a plain `http` or `https` address in ASCII, with a host,
+/// no credentials, no control or whitespace character, and a bounded length. `None` for anything else.
 ///
 /// It is **offered to the person** to open in their own browser. The product never requests it.
 pub fn login_url(raw: &str) -> Option<String> {
     let url = raw.trim();
+    // ASCII only: a `Location` is ASCII (RFC 9110, RFC 3986; anything else is percent-encoded or
+    // punycode), and the address is shown to a person, so a character that reorders or disguises text
+    // (U+202E, a zero-width space, a look-alike letter) has no business in it.
     if url.is_empty()
         || url.len() > MAX_LOGIN_URL
-        || url.chars().any(|c| c.is_control() || c.is_whitespace())
+        || !url.is_ascii()
+        || url
+            .chars()
+            .any(|c| c.is_ascii_control() || c.is_ascii_whitespace())
     {
         return None;
     }
@@ -370,6 +376,12 @@ mod tests {
             "http://h/a b",
             "http://h/\n/x",
             long.as_str(),
+            // Shown to a person before it is opened: nothing that reorders or disguises the text. A
+            // `Location` is ASCII by RFC 9110/3986 (others are percent-encoded or punycode).
+            "http://login.example\u{202e}moc.evil/",
+            "http://xn--e1afmkfd.example/\u{2066}x",
+            "http://раураl.example/",
+            "http://h/\u{200b}",
         ] {
             assert_eq!(login_url(bad), None, "{bad:?}");
         }

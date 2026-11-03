@@ -4,8 +4,10 @@
 //! 1. **DNS capture** (port 53), precedence `0` — the anti-leak rule outranks everything.
 //! 2. `Bypass` for the **active endpoint address**, mirroring the R4 host route so rule
 //!    evaluation and the route table agree (data-model §Cross-cutting 2).
-//! 3. `Bypass` for **local ranges**: RFC1918, link-local, multicast.
-//! 4. `Bypass` for the **captive-portal probe hosts**, so portal detection and login work
+//! 3. `Tunnel` for the **measurement origins' own addresses** (a `/32` each). They sit inside the
+//!    private range below and must be reached through the tunnel to prove anything about it.
+//! 4. `Bypass` for **local ranges**: RFC1918, link-local, multicast.
+//! 5. `Bypass` for the **captive-portal probe hosts**, so portal detection and login work
 //!    before the tunnel can.
 //!
 //! **Non-deletable** is enforced by [`validate_builtin_rules_present`], which every rule-set
@@ -51,22 +53,31 @@ pub fn builtin_rules(active_endpoint: Option<&EndpointAddress>) -> Vec<RoutingRu
             .expect("the built-in DNS-capture rule is valid"),
     ];
 
-    let mut bypasses: Vec<RuleMatcher> = Vec::new();
-    bypasses.extend(active_endpoint.map(endpoint_matcher));
-    bypasses.extend(LOCAL_BYPASS_CIDRS.iter().map(|c| {
-        RuleMatcher::IpCidr(IpCidr::parse(c).expect("built-in CIDR constants are valid"))
+    let mut ordered: Vec<(RuleMatcher, RuleAction)> = Vec::new();
+    ordered.extend(active_endpoint.map(|e| (endpoint_matcher(e), RuleAction::Bypass)));
+    // Inside the private range below, so they must come first: a private address matches the first rule
+    // that holds it. Only the origins' own single addresses, so the rest of a person's LAN stays local.
+    ordered.extend(crate::origin::TUNNEL_ORIGIN_HOSTS.iter().map(|host| {
+        let cidr = IpCidr::parse(&format!("{host}/32")).expect("built-in origin hosts are valid");
+        (RuleMatcher::IpCidr(cidr), RuleAction::Tunnel)
     }));
-    bypasses.extend(
-        CAPTIVE_PORTAL_PROBE_SUFFIXES
-            .iter()
-            .map(|s| RuleMatcher::DomainSuffix((*s).to_string())),
-    );
+    ordered.extend(LOCAL_BYPASS_CIDRS.iter().map(|c| {
+        (
+            RuleMatcher::IpCidr(IpCidr::parse(c).expect("built-in CIDR constants are valid")),
+            RuleAction::Bypass,
+        )
+    }));
+    ordered.extend(CAPTIVE_PORTAL_PROBE_SUFFIXES.iter().map(|s| {
+        (
+            RuleMatcher::DomainSuffix((*s).to_string()),
+            RuleAction::Bypass,
+        )
+    }));
 
-    // Precedence 0 is DNS capture's; the bypasses follow in order from 1.
-    for (matcher, precedence) in bypasses.into_iter().zip(1u32..) {
+    // Precedence 0 is DNS capture's; the rest follow in order from 1.
+    for ((matcher, action), precedence) in ordered.into_iter().zip(1u32..) {
         rules.push(
-            RoutingRule::builtin(matcher, RuleAction::Bypass, precedence)
-                .expect("built-in bypass rules are valid"),
+            RoutingRule::builtin(matcher, action, precedence).expect("built-in rules are valid"),
         );
     }
     rules
@@ -84,6 +95,52 @@ pub fn builtin_rules_for(
     let mut rules = builtin_rules(active_endpoint);
     rules.extend(crate::doh_block::blocking_rules(policy));
     rules
+}
+
+/// The rule set a tunnel to `endpoint` is generated from: `rules` (the set held while disconnected) plus
+/// the built-in bypass of the active endpoint, which mirrors the host route (R4, CC-05, data-model §4).
+///
+/// The endpoint bypass takes precedence 1, right after DNS capture, as [`builtin_rules`] places it; the
+/// other built-in bypasses move down by one to make room, keeping their ids and their order. Nothing at
+/// or beyond `doh_block::FIRST_PRECEDENCE` moves, so the encrypted-DNS block and every person's rule keep
+/// their numbers. The result is checked as every rule set is; a set that already bypasses this endpoint
+/// is returned as it is.
+pub fn with_active_endpoint(
+    rules: &[RoutingRule],
+    endpoint: &EndpointAddress,
+) -> Result<Vec<RoutingRule>, DomainError> {
+    let matcher = endpoint_matcher(endpoint);
+    if rules
+        .iter()
+        .any(|r| r.is_builtin() && r.action() == RuleAction::Bypass && r.matcher() == &matcher)
+    {
+        return Ok(rules.to_vec());
+    }
+    let first_after_bypasses = crate::doh_block::FIRST_PRECEDENCE;
+    let mut out: Vec<RoutingRule> = rules
+        .iter()
+        .map(|r| {
+            let moves = r.is_builtin()
+                && !r.is_dns_capture()
+                && (1..first_after_bypasses).contains(&r.precedence());
+            if moves {
+                r.renumbered(r.precedence() + 1)
+            } else {
+                r.clone()
+            }
+        })
+        .collect();
+    if out.iter().any(|r| {
+        r.is_builtin() && r.action() == RuleAction::Bypass && r.precedence() >= first_after_bypasses
+    }) {
+        // The last bypass was pushed onto the block's first number: the layout no longer fits.
+        return Err(DomainError::PrecedenceCollision(first_after_bypasses));
+    }
+    out.push(RoutingRule::builtin(matcher, RuleAction::Bypass, 1)?);
+    crate::rule::validate_rule_set(&out)?;
+    crate::rule::validate_dns_leak_protection(&out)?;
+    validate_builtin_rules_present(&out, Some(endpoint))?;
+    Ok(out)
 }
 
 /// A human-readable name for a built-in rule, for errors.
@@ -154,9 +211,16 @@ mod tests {
         let bypass = bypass_matchers(&rules);
 
         assert!(rules.iter().all(RoutingRule::is_builtin));
-        assert!(rules
-            .iter()
-            .all(|r| r.action() == RuleAction::Bypass || r.is_dns_capture()));
+        // Bypasses and DNS capture, and one kind of exception: a single-address tunnel rule for each
+        // measurement origin (see the test below).
+        assert!(rules.iter().all(|r| {
+            r.action() == RuleAction::Bypass
+                || r.is_dns_capture()
+                || (r.action() == RuleAction::Tunnel
+                    && crate::origin::TUNNEL_ORIGIN_HOSTS
+                        .iter()
+                        .any(|h| r.matcher() == &cidr(&format!("{h}/32"))))
+        }));
         // RFC1918, link-local, and multicast in both families.
         for range in [
             "10.0.0.0/8",
@@ -181,6 +245,56 @@ mod tests {
         // Internally valid.
         assert_eq!(validate_rule_set(&rules), Ok(()));
         assert_eq!(validate_dns_leak_protection(&rules), Ok(()));
+    }
+
+    /// The measurement origin lives at a private address on the server, reached through the tunnel and
+    /// nowhere else. A private address is in the range that stays direct, so without a rule of its own
+    /// ahead of that range a fetch from the origin would go to the physical network and prove nothing (or
+    /// fail), and a tunnel that works would look broken. Found 2026-11-01 while building the session.
+    #[test]
+    fn the_measurement_origins_are_reached_through_the_tunnel_and_not_around_it() {
+        use crate::doh_block::Policy;
+        use crate::origin::TUNNEL_ORIGIN_HOSTS;
+        use crate::rule_eval::{evaluate, Flow, Transport};
+        let endpoint = EndpointAddress::new("203.0.113.9", 8443).unwrap();
+        let flow =
+            |host: &str| Flow::to_address(host.parse().unwrap()).on_port(8080, Transport::Tcp);
+        for rules in [
+            builtin_rules(Some(&endpoint)),
+            builtin_rules_for(Some(&endpoint), Policy::Block),
+            builtin_rules_for(Some(&endpoint), Policy::Allow),
+            builtin_rules(None),
+        ] {
+            for host in TUNNEL_ORIGIN_HOSTS {
+                assert_eq!(
+                    evaluate(&rules, &flow(host)).action,
+                    RuleAction::Tunnel,
+                    "{host} must go through the tunnel"
+                );
+            }
+            // Nothing else changed: the rest of the private ranges, including the neighbours of the
+            // origins, still stay on the local network.
+            for host in [
+                "10.0.0.1",
+                "10.66.0.2",
+                "10.9.0.2",
+                "10.66.0.0",
+                "192.168.1.1",
+                "172.16.0.1",
+            ] {
+                assert_eq!(
+                    evaluate(&rules, &flow(host)).action,
+                    RuleAction::Bypass,
+                    "{host} must stay local"
+                );
+            }
+        }
+        // Only the origins' own addresses are carved out (a /32 each), so a person's LAN keeps working.
+        let carved: Vec<_> = builtin_rules(None)
+            .into_iter()
+            .filter(|r| r.action() == RuleAction::Tunnel)
+            .collect();
+        assert_eq!(carved.len(), TUNNEL_ORIGIN_HOSTS.len());
     }
 
     #[test]
@@ -303,5 +417,89 @@ mod tests {
         let disconnected = builtin_rules(None);
         assert_eq!(validate_builtin_rules_present(&disconnected, None), Ok(()));
         assert!(validate_builtin_rules_present(&disconnected, Some(&addr)).is_err());
+    }
+
+    // ---------------------------------------------------------------- the endpoint at connect time
+
+    fn connected_set() -> (Vec<RoutingRule>, EndpointAddress) {
+        let disconnected = builtin_rules_for(None, crate::doh_block::Policy::Block);
+        let endpoint = EndpointAddress::new("203.0.113.10", 44443).unwrap();
+        (
+            with_active_endpoint(&disconnected, &endpoint).unwrap(),
+            endpoint,
+        )
+    }
+
+    /// The rule set a tunnel is generated from must carry the endpoint bypass that mirrors the host
+    /// route (data-model §4, CC-05), right after DNS capture and ahead of everything else.
+    #[test]
+    fn a_connected_set_bypasses_the_endpoint_right_after_dns_capture() {
+        let (rules, endpoint) = connected_set();
+        let mut sorted: Vec<&RoutingRule> = rules.iter().collect();
+        sorted.sort_by_key(|r| r.precedence());
+        assert!(sorted[0].is_dns_capture());
+        assert_eq!(sorted[1].matcher(), &cidr("203.0.113.10/32"));
+        assert_eq!(sorted[1].action(), RuleAction::Bypass);
+        assert!(sorted[1].is_builtin());
+        assert_eq!(
+            validate_builtin_rules_present(&rules, Some(&endpoint)),
+            Ok(())
+        );
+        assert_eq!(validate_rule_set(&rules), Ok(()));
+        assert_eq!(validate_dns_leak_protection(&rules), Ok(()));
+    }
+
+    /// Nothing else is lost, reordered or renamed: the other rules keep their ids and their order.
+    #[test]
+    fn adding_the_endpoint_keeps_every_other_rule_and_its_order() {
+        let disconnected = builtin_rules_for(None, crate::doh_block::Policy::Block);
+        let endpoint = EndpointAddress::new("203.0.113.10", 44443).unwrap();
+        let rules = with_active_endpoint(&disconnected, &endpoint).unwrap();
+        assert_eq!(rules.len(), disconnected.len() + 1);
+        let order = |set: &[RoutingRule]| {
+            let mut v: Vec<&RoutingRule> = set.iter().collect();
+            v.sort_by_key(|r| r.precedence());
+            v.into_iter().map(RoutingRule::id).collect::<Vec<_>>()
+        };
+        let before = order(&disconnected);
+        let after: Vec<_> = order(&rules)
+            .into_iter()
+            .filter(|id| disconnected.iter().any(|r| r.id() == *id))
+            .collect();
+        assert_eq!(before, after);
+        // The encrypted-DNS block stays where it was, ahead of every user rule.
+        let block_before: Vec<u32> = disconnected
+            .iter()
+            .filter(|r| r.action() == RuleAction::Reject)
+            .map(RoutingRule::precedence)
+            .collect();
+        let block_after: Vec<u32> = rules
+            .iter()
+            .filter(|r| r.action() == RuleAction::Reject)
+            .map(RoutingRule::precedence)
+            .collect();
+        assert_eq!(block_before, block_after);
+    }
+
+    #[test]
+    fn adding_the_same_endpoint_twice_changes_nothing() {
+        let (rules, endpoint) = connected_set();
+        assert_eq!(with_active_endpoint(&rules, &endpoint).unwrap(), rules);
+    }
+
+    /// A person's rule is never renumbered: only the built-in bypasses move to make room.
+    #[test]
+    fn a_users_rule_keeps_its_precedence() {
+        let mut disconnected = builtin_rules_for(None, crate::doh_block::Policy::Block);
+        let mine = RoutingRule::user(
+            RuleMatcher::Domain("example.com".into()),
+            RuleAction::Tunnel,
+            crate::doh_block::USER_RULES_START,
+        )
+        .unwrap();
+        disconnected.push(mine.clone());
+        let endpoint = EndpointAddress::new("203.0.113.10", 44443).unwrap();
+        let rules = with_active_endpoint(&disconnected, &endpoint).unwrap();
+        assert!(rules.contains(&mine));
     }
 }

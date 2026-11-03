@@ -34,7 +34,7 @@ use dnet_core::health::ProbeOutcome as EndpointProbeOutcome;
 use dnet_core::ids::{EndpointId, ProfileId};
 use dnet_core::origin::Origin;
 use dnet_core::probe::RaceDecision;
-use dnet_core::profile::{ConnectionProfile, CoreBinding};
+use dnet_core::profile::{ConnectionProfile, CoreBinding, ProfileKind};
 use dnet_core::reprobe::LiveCheck;
 use dnet_core::rule::RoutingRule;
 use dnet_core::session::FailureCause;
@@ -52,12 +52,17 @@ use tokio_util::sync::CancellationToken;
 
 use crate::checks;
 use crate::feed_service::SharedDefinitions;
+use crate::listener;
 use crate::orchestrator::{Effects, RaceOutcome};
-use crate::plan::{plan_tunnel, probe_job, reach_ports, AMNEZIAWG_ADAPTER};
+use crate::plan::{
+    origin_for, plan_tunnel, probe_job, race_origin, reach_ports, SessionInfo, AMNEZIAWG_ADAPTER,
+};
 use crate::portal_probe::{self, PortalMemory};
 use crate::recovery::windows_ops::CORE_EXECUTABLES;
+use crate::session_switch::{switch_to, ControlClient, NudgeOutcome, NudgePlan, OriginProbe};
 use crate::tunnel::{Prepared, TunnelHost, Tunnels};
 use crate::winwatch::{WatchSetup, WindowsWatch};
+use dnet_config::session::CarrierKind;
 
 /// How long a single host may take to answer the pre-connect reachability check. Windows reports a
 /// refused connection only after about two seconds, so less would read a refusal as silence.
@@ -280,8 +285,12 @@ pub struct RealEffects {
     configuration_error: Option<String>,
     /// The origin the tunnel in use is measured against. Set while a tunnel is up.
     carrying: Mutex<Option<Origin>>,
+    /// The checks of the tunnel in use: a sliver each time, a full measurement on a slow clock.
+    live: checks::LiveChecker,
     /// What the network watch needs to know about the tunnel in use. Set while a tunnel is up.
     watching: Mutex<Option<WatchSetup>>,
+    /// The session connection that is up, if it is one: what a live move of the carrier needs.
+    live_session: Mutex<Option<LiveSession>>,
     /// Whether the network is watched at all. Off only for a development run with
     /// `--no-path-watch`, so a test never sends probes to the network it runs on.
     watch_paths: bool,
@@ -299,6 +308,37 @@ pub struct RealEffects {
     /// configuration is generated, so a feed accepted mid-session reaches the next connection and
     /// never the one that is up.
     definitions: SharedDefinitions,
+}
+
+/// A session connection that is up (ADR-0008): which endpoint it is on, its carriers and the one it runs on, how
+/// to reach its core's control API, and where the connection is measured (the nudge goes there).
+#[derive(Clone)]
+struct LiveSession {
+    endpoint: EndpointId,
+    info: SessionInfo,
+    origin: Origin,
+}
+
+/// What a live move of the carrier has to settle before it touches anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Preflight {
+    /// Not a session connection to this endpoint, or the target is not one of its carriers: not a live move.
+    Cannot,
+    /// The connection is already on that carrier.
+    Already,
+    /// A move is possible; the checks on the control port come next.
+    Switch,
+}
+
+fn preflight(live: &LiveSession, endpoint: EndpointId, target: CarrierKind) -> Preflight {
+    // The same server, and a carrier this connection has. Anything else is a different connection.
+    if live.endpoint != endpoint || !live.info.carriers.contains(&target) {
+        Preflight::Cannot
+    } else if live.info.active == target {
+        Preflight::Already
+    } else {
+        Preflight::Switch
+    }
 }
 
 /// How long one look for a captive portal may take. Shorter than the orchestrator's wait for the
@@ -415,7 +455,9 @@ impl RealEffects {
             privileged: is_elevated(),
             configuration_error,
             carrying: Mutex::new(None),
+            live: checks::LiveChecker::new(checks::DEEP_EVERY),
             watching: Mutex::new(None),
+            live_session: Mutex::new(None),
             watch_paths: !std::env::args().any(|a| a == "--no-path-watch"),
             check_install,
             fakeip: FakeIpRotation::new(first_fakeip_half(
@@ -472,6 +514,20 @@ impl RealEffects {
     fn set_watching(&self, setup: Option<WatchSetup>) {
         *self.watching.lock().unwrap_or_else(PoisonError::into_inner) = setup;
     }
+
+    fn live_session(&self) -> Option<LiveSession> {
+        self.live_session
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    fn set_live_session(&self, session: Option<LiveSession>) {
+        *self
+            .live_session
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = session;
+    }
 }
 
 /// File name of the adapter driver library that ships beside the cores. Assembled at run time so
@@ -484,7 +540,7 @@ fn adapter_library_name() -> String {
 /// Every program the service launches or loads as SYSTEM that exists: the two cores, the adapter
 /// driver library beside them, and the service itself. One that is missing is reported where it is
 /// needed; here it only has nothing to protect.
-fn programs_of(layout: &Layout) -> Vec<PathBuf> {
+pub(crate) fn programs_of(layout: &Layout) -> Vec<PathBuf> {
     let mut programs = vec![layout.primary_core.clone(), layout.amneziawg_core.clone()];
     if let Some(folder) = layout.primary_core.parent() {
         programs.push(folder.join(adapter_library_name()));
@@ -522,8 +578,8 @@ fn prober(layout: &Layout, origin: Origin) -> Prober {
         origin,
         measure: MeasureConfig {
             connect_timeout: Duration::from_secs(8),
-            transfer_timeout: Duration::from_secs(12),
-            bytes: 512 * 1024,
+            transfer_timeout: checks::RACE_TRANSFER_TIMEOUT,
+            bytes: checks::RACE_BYTES,
         },
         ready_timeout: READY_TIMEOUT,
     }
@@ -612,7 +668,7 @@ impl Effects for RealEffects {
                 return Some(nothing_usable());
             }
         };
-        let Some(origin) = credentials.measure_origin.clone() else {
+        let Some(origin) = race_origin(&credentials) else {
             tracing::error!("the endpoint has no measurement origin");
             return Some(nothing_usable());
         };
@@ -683,8 +739,9 @@ impl Effects for RealEffects {
                     configuration(install_message(&problem))
                 })?;
         }
+        let endpoint_id = endpoint;
         let (endpoint, credentials) = self.credentials(endpoint).await.map_err(configuration)?;
-        let origin = credentials.measure_origin.clone();
+        let origin = origin_for(profile.kind(), &credentials);
         // One half per start, taken even if this start fails: the next must not reuse it.
         let plan = plan_tunnel(
             profile,
@@ -706,24 +763,122 @@ impl Effects for RealEffects {
             endpoint_tcp: endpoint_ip
                 .zip(tcp_port)
                 .map(|(ip, port)| SocketAddrV4::new(ip, port)),
+            session_origin: plan.session.as_ref().and(origin.clone()),
         };
         drop(credentials);
 
         self.tunnels.start(&plan).await?;
+        // A session connection can later be moved to another carrier without ending it.
+        self.set_live_session(
+            plan.session
+                .clone()
+                .zip(origin.clone())
+                .map(|(info, origin)| LiveSession {
+                    endpoint: endpoint_id,
+                    info,
+                    origin,
+                }),
+        );
         self.set_carrying(origin);
         self.set_watching(Some(setup));
+        // The race that chose this method just moved a full transfer through it.
+        self.live.proved(std::time::Instant::now());
         Ok(())
     }
 
     async fn stop_tunnel(&self) {
+        self.live.forget();
         self.set_carrying(None);
         self.set_watching(None);
+        self.set_live_session(None);
         self.tunnels.stop().await;
+    }
+
+    async fn move_tunnel(&self, profile: &ProfileId, endpoint: EndpointId) -> bool {
+        let Some(profile) = self.profiles.iter().find(|p| p.id() == profile) else {
+            return false;
+        };
+        let target = match profile.kind() {
+            ProfileKind::Hysteria2 => CarrierKind::Hysteria2,
+            ProfileKind::VlessReality => CarrierKind::Reality,
+            // Not a carrier of the session: it has its own adapter, and is started as it always was.
+            ProfileKind::AmneziaWg => return false,
+        };
+        let Some(live) = self.live_session() else {
+            return false;
+        };
+        match preflight(&live, endpoint, target) {
+            Preflight::Cannot => return false,
+            Preflight::Already => return true,
+            Preflight::Switch => {}
+        }
+
+        // The control secret goes to a local port chosen before the core bound it. Send it only if the core
+        // we started is the only thing a connection to that port can reach (T157 review, step d).
+        let port = live.info.control.port;
+        let Some(core) = self.tunnels.primary_core_pid().await else {
+            tracing::warn!("the core's process is not known; not moving the connection live");
+            return false;
+        };
+        let table = match tokio::task::spawn_blocking(listener::listening_sockets).await {
+            Ok(Ok(table)) => table,
+            _ => {
+                tracing::warn!(
+                    "the listening ports could not be read; not moving the connection live"
+                );
+                return false;
+            }
+        };
+        if !listener::only_this_process_listens(&table, port, core) {
+            tracing::warn!(
+                "something other than the core listens on its control port; not sending it the secret"
+            );
+            return false;
+        }
+
+        let Ok(api) = ControlClient::new(port, live.info.control.secret.clone()) else {
+            return false;
+        };
+        match switch_to(
+            &api,
+            &OriginProbe(&live.origin),
+            target,
+            NudgePlan::default(),
+        )
+        .await
+        {
+            Ok(report) if matches!(report.nudge, NudgeOutcome::Recovered { .. }) => {
+                if let Some(mut now) = self.live_session() {
+                    now.info.active = target;
+                    self.set_live_session(Some(now));
+                }
+                // The watch of the next tunnel hears which kind of path the carrier needs now.
+                if let Some(setup) = self
+                    .watching
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .as_mut()
+                {
+                    setup.carrier = profile.carrier();
+                }
+                // A transfer just crossed the new carrier: the same proof the race gives a new tunnel.
+                self.live.proved(std::time::Instant::now());
+                true
+            }
+            Ok(report) => {
+                tracing::warn!(?report, "the session did not come back on the new carrier");
+                false
+            }
+            Err(error) => {
+                tracing::warn!(%error, "the carrier could not be switched");
+                false
+            }
+        }
     }
 
     async fn live_check(&self, _profile: &ProfileId) -> LiveCheck {
         let result = match self.carrying_origin() {
-            Some(origin) => checks::live_check(&origin).await,
+            Some(origin) => self.live.check(&origin, std::time::Instant::now()).await,
             None => LiveCheck::Failed,
         };
         if result != LiveCheck::Passed {
@@ -904,6 +1059,64 @@ mod install_tests {
         assert!(
             !message.to_lowercase().contains(&["sing", "box"].join("-")),
             "no vendor name in what the user reads"
+        );
+    }
+}
+
+#[cfg(test)]
+mod live_move_tests {
+    use super::*;
+    use crate::plan::ControlChannel;
+    use crate::session_switch::ControlSecret;
+
+    fn live(endpoint: EndpointId, carriers: &[CarrierKind], active: CarrierKind) -> LiveSession {
+        LiveSession {
+            endpoint,
+            info: SessionInfo {
+                control: ControlChannel {
+                    port: 29090,
+                    secret: ControlSecret::new("k".repeat(64)).unwrap(),
+                },
+                carriers: carriers.to_vec(),
+                active,
+            },
+            origin: Origin::parse("http://10.9.0.254:8080").unwrap(),
+        }
+    }
+
+    const BOTH: [CarrierKind; 2] = [CarrierKind::Hysteria2, CarrierKind::Reality];
+
+    #[test]
+    fn a_move_is_possible_only_to_another_carrier_of_the_same_connection() {
+        let here = EndpointId::new();
+        let session = live(here, &BOTH, CarrierKind::Hysteria2);
+        assert_eq!(
+            preflight(&session, here, CarrierKind::Reality),
+            Preflight::Switch
+        );
+        // Already there: nothing to do, and nothing is torn down for it.
+        assert_eq!(
+            preflight(&session, here, CarrierKind::Hysteria2),
+            Preflight::Already
+        );
+    }
+
+    #[test]
+    fn another_server_is_a_different_connection_not_a_move() {
+        let session = live(EndpointId::new(), &BOTH, CarrierKind::Hysteria2);
+        assert_eq!(
+            preflight(&session, EndpointId::new(), CarrierKind::Reality),
+            Preflight::Cannot
+        );
+    }
+
+    #[test]
+    fn a_carrier_the_connection_does_not_hold_cannot_be_moved_to() {
+        let here = EndpointId::new();
+        let only_hy2 = live(here, &[CarrierKind::Hysteria2], CarrierKind::Hysteria2);
+        assert_eq!(
+            preflight(&only_hy2, here, CarrierKind::Reality),
+            Preflight::Cannot
         );
     }
 }

@@ -164,8 +164,10 @@ jobs:
       #
       # Measured 2026-10-16: 95% of lines across these four.
       #
-      # Still to join: dnet-supervisor, dnet-netstate (OS-heavy; their elevated tests do not run
-      # in CI), dnet-etw and dnet-provision (empty crates pending Phases 6 and 8).
+      # Still to join: dnet-supervisor, dnet-netstate, dnet-etw, dnet-provision. None is empty any
+      # more. Measured on Linux 2026-10-26 (lines): supervisor 95.7%, netstate 95.2%, etw 98.6%,
+      # provision 95.5%. Not yet measured on Windows, where their Windows-only modules also count
+      # and the elevated tests do not run; add each here once it clears 80% on this runner.
       - name: Enforce coverage floor (implemented crates)
         run: >
           cargo llvm-cov

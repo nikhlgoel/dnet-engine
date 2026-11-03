@@ -501,7 +501,7 @@ The owner delegated these on 2026-10-21 ("I will leave the decisions to you"); t
 | D-UI-3 | Fonts | **System faces only** (Bahnschrift, Segoe UI Variable, Cascadia Mono); none bundled in v1 |
 | D-UI-4 | SC-013 reworded to name its state and metric | **Adopted, and applied to `spec.md` 2026-10-24**: "idle, window closed, combined private memory ≤ 150 MB"; "window open ≤ 300 MB private; open → loaded ≤ 600 ms" (`spec.md` to be amended with the next spec edit) |
 | D-UI-5 | Release name | **Open** (ADR-0006 P6); the wordmark is the working name |
-| Rust floor | 1.83 → 1.85 | **Adopted** (T143) |
+| Rust floor | 1.83 → 1.88 | **Adopted** (T143: 1.85 was proposed, but the dependency set already needed 1.88) |
 | Aggregation | Shown only as a labelled concept | **Adopted**; a real feature needs its own specification |
 
 ---

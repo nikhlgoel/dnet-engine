@@ -24,14 +24,16 @@ use crate::secret_store::SecretKey;
 use crate::write::default_run_dir;
 use dnet_core::catalogue::bundled_kind;
 use dnet_core::credential::CredentialRef;
+use dnet_core::doh_block::USER_RULES_START;
 use dnet_core::doh_consent::ConsentState;
 use dnet_core::endpoint::{Endpoint, EndpointAddress, EndpointOrigin};
 use dnet_core::hostname::is_dns_hostname;
-use dnet_core::ids::{EndpointId, ProfileId};
+use dnet_core::ids::{EndpointId, ProfileId, RuleId};
 use dnet_core::profile::{
     BandwidthPair, BrutalAcknowledgement, ConnectionProfile, ProfileKind, ProfileParams,
     BRUTAL_WARNING_REVISION,
 };
+use dnet_core::rule::{IpCidr, RoutingRule, RuleAction, RuleMatcher};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -45,8 +47,12 @@ const MAX_PARAM_KEY_LEN: usize = 64;
 const MAX_PARAM_VALUE_LEN: usize = 512;
 const MAX_RESOURCE_IDS: usize = 32;
 const MAX_TEXT_LEN: usize = 256;
-/// Bandwidth above this is a typo, not a link (one terabit per second).
-const MAX_BRUTAL_MBPS: u32 = 1_000_000;
+/// The most rules a person may add (T108).
+pub const MAX_USER_RULES: usize = 128;
+
+/// The largest Brutal bandwidth accepted in either direction, in Mbit/s. Above this is a typo, not a
+/// link (one terabit per second).
+pub const MAX_BRUTAL_MBPS: u32 = 1_000_000;
 
 /// Why the configuration could not be used.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,6 +124,9 @@ pub struct LoadedConfig {
     /// `None` for a file written before it existed: the protective default applies (block, and the
     /// disclosure is shown).
     pub encrypted_dns: Option<ConsentState>,
+    /// The rules the person added (T108), with the ids they were saved under. Never a built-in rule:
+    /// those are the service's own and are made fresh at every start.
+    pub rules: Vec<RoutingRule>,
     /// Things worth telling the user that are not errors: a setting that was dropped because it no
     /// longer applies. For the log and the session's events.
     pub notes: Vec<String>,
@@ -127,6 +136,8 @@ pub struct LoadedConfig {
 pub trait StateFile: Send + Sync {
     fn read(&self) -> Result<Option<Vec<u8>>, String>;
     fn write(&self, bytes: &[u8]) -> Result<(), String>;
+    /// Delete the file, so the next read is `None`. A file that is not there is already removed.
+    fn remove(&self) -> Result<(), String>;
 }
 
 /// The saved configuration.
@@ -205,6 +216,13 @@ impl StateFile for MemoryStateFile {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(bytes.to_vec());
         Ok(())
     }
+    fn remove(&self) -> Result<(), String> {
+        *self
+            .bytes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        Ok(())
+    }
 }
 
 /// A shared handle to a state file is a state file, so a caller can keep one end.
@@ -214,6 +232,9 @@ impl<T: StateFile + ?Sized> StateFile for std::sync::Arc<T> {
     }
     fn write(&self, bytes: &[u8]) -> Result<(), String> {
         (**self).write(bytes)
+    }
+    fn remove(&self) -> Result<(), String> {
+        (**self).remove()
     }
 }
 
@@ -242,6 +263,9 @@ mod windows_file {
         fn write(&self, bytes: &[u8]) -> Result<(), String> {
             self.0.write(bytes).map_err(|e| e.to_string())
         }
+        fn remove(&self) -> Result<(), String> {
+            self.0.remove().map(|_| ()).map_err(|e| e.to_string())
+        }
     }
 }
 
@@ -256,6 +280,21 @@ struct Wire {
     /// Absent in files written before the choice existed, and when nothing was ever chosen.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     encrypted_dns: Option<ConsentWire>,
+    /// The person's rules (T108). Absent in files written before they existed, and when there are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    rules: Vec<RuleWire>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuleWire {
+    id: String,
+    /// `domain`, `domain_suffix`, `ip_cidr` or `application`.
+    kind: String,
+    value: String,
+    /// `tunnel` or `bypass`.
+    action: String,
+    precedence: u32,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -371,33 +410,70 @@ pub fn encode(
     encode_full(endpoints, profiles, None)
 }
 
+/// [`encode_full`], also recording the person's rules (T108). Built-in rules in `rules` are left out:
+/// they are the service's own and are made fresh at every start.
+pub fn encode_with_rules(
+    endpoints: &[Endpoint],
+    profiles: &[ConnectionProfile],
+    encrypted_dns: Option<ConsentState>,
+    rules: &[RoutingRule],
+) -> Result<Vec<u8>, PersistError> {
+    finish(endpoints, encrypted_dns, profile_wires(profiles), rules)
+}
+
 /// [`encode`], also recording the encrypted-DNS choice (T071).
 pub fn encode_full(
     endpoints: &[Endpoint],
     profiles: &[ConnectionProfile],
     encrypted_dns: Option<ConsentState>,
 ) -> Result<Vec<u8>, PersistError> {
-    finish(
-        endpoints,
-        encrypted_dns,
-        profiles
-            .iter()
-            .map(|p| ProfileWire {
-                id: p.id().as_str().to_owned(),
-                params: p
-                    .params()
-                    .iter()
-                    .map(|(k, v)| (k.to_owned(), v.to_owned()))
-                    .collect(),
-                brutal: p.brutal().map(|b| BrutalWire {
-                    up_mbps: b.bandwidth().up_mbps,
-                    down_mbps: b.bandwidth().down_mbps,
-                    warning_revision: b.acknowledgement().warning_revision,
-                    acknowledged_at_unix: b.acknowledgement().acknowledged_at_unix,
-                }),
-            })
-            .collect(),
-    )
+    finish(endpoints, encrypted_dns, profile_wires(profiles), &[])
+}
+
+fn profile_wires(profiles: &[ConnectionProfile]) -> Vec<ProfileWire> {
+    profiles
+        .iter()
+        .map(|p| ProfileWire {
+            id: p.id().as_str().to_owned(),
+            params: p
+                .params()
+                .iter()
+                .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                .collect(),
+            brutal: p.brutal().map(|b| BrutalWire {
+                up_mbps: b.bandwidth().up_mbps,
+                down_mbps: b.bandwidth().down_mbps,
+                warning_revision: b.acknowledgement().warning_revision,
+                acknowledged_at_unix: b.acknowledgement().acknowledged_at_unix,
+            }),
+        })
+        .collect()
+}
+
+fn rule_wire(rule: &RoutingRule) -> Option<RuleWire> {
+    if rule.is_builtin() {
+        return None;
+    }
+    let (kind, value) = match rule.matcher() {
+        RuleMatcher::Domain(d) => ("domain", d.clone()),
+        RuleMatcher::DomainSuffix(d) => ("domain_suffix", d.clone()),
+        RuleMatcher::IpCidr(c) => ("ip_cidr", c.to_string()),
+        RuleMatcher::Application(p) => ("application", p.clone()),
+        // Not a person's rule (`RoutingRule::restored_user` refuses it on the way back in).
+        RuleMatcher::DnsPort | RuleMatcher::EncryptedDnsPort => return None,
+    };
+    let action = match rule.action() {
+        RuleAction::Tunnel => "tunnel",
+        RuleAction::Bypass => "bypass",
+        RuleAction::Capture | RuleAction::Reject => return None,
+    };
+    Some(RuleWire {
+        id: rule.id().to_string(),
+        kind: kind.to_owned(),
+        value,
+        action: action.to_owned(),
+        precedence: rule.precedence(),
+    })
 }
 
 /// The stored form of a configuration that was read back (or built from one), for a tool that
@@ -424,6 +500,7 @@ pub fn encode_config(config: &LoadedConfig) -> Result<Vec<u8>, PersistError> {
                 }),
             })
             .collect(),
+        &config.rules,
     )
 }
 
@@ -460,6 +537,7 @@ fn finish(
     endpoints: &[Endpoint],
     encrypted_dns: Option<ConsentState>,
     profiles: Vec<ProfileWire>,
+    rules: &[RoutingRule],
 ) -> Result<Vec<u8>, PersistError> {
     let wire = Wire {
         version: FORMAT_VERSION,
@@ -472,6 +550,7 @@ fn finish(
                 disclosed_version,
             }
         }),
+        rules: rules.iter().filter_map(rule_wire).collect(),
     };
     let bytes = serde_json::to_vec_pretty(&wire).map_err(|e| malformed(&e))?;
     // The strongest statement that what is written can be read: read it.
@@ -533,12 +612,66 @@ pub fn decode(bytes: &[u8]) -> Result<LoadedConfig, PersistError> {
         ConsentState::from_stored(&c.policy, c.disclosed_version)
     });
 
+    let rules = decode_rules(wire.rules)?;
+
     Ok(LoadedConfig {
         endpoints,
         profiles,
         encrypted_dns,
+        rules,
         notes,
     })
+}
+
+/// The person's rules, each through the checks a new rule gets (`RoutingRule::restored_user`), after
+/// every built-in (`USER_RULES_START` on), with unique ids and precedences. One bad rule refuses the
+/// file, like any other bad entry. Errors name the rule's position, never its text.
+fn decode_rules(wire: Vec<RuleWire>) -> Result<Vec<RoutingRule>, PersistError> {
+    if wire.len() > MAX_USER_RULES {
+        return Err(invalid(format!("more than {MAX_USER_RULES} rules")));
+    }
+    let mut ids = HashSet::new();
+    let mut precedences = HashSet::new();
+    let mut rules = Vec::with_capacity(wire.len());
+    for (index, r) in wire.into_iter().enumerate() {
+        let bad = |why: &str| invalid(format!("rule {index}: {why}"));
+        let id = RuleId::from_uuid(
+            r.id.parse::<uuid::Uuid>()
+                .map_err(|_| bad("its id is not an id"))?,
+        );
+        let matcher = match r.kind.as_str() {
+            "domain" => RuleMatcher::Domain(r.value),
+            "domain_suffix" => RuleMatcher::DomainSuffix(r.value),
+            "ip_cidr" => RuleMatcher::IpCidr(
+                IpCidr::parse(&r.value).map_err(|_| bad("its address range is not valid"))?,
+            ),
+            "application" => {
+                plain_text(&r.value, "a program path")
+                    .map_err(|_| bad("its program path is not allowed"))?;
+                RuleMatcher::Application(r.value)
+            }
+            _ => return Err(bad("it is not a kind of rule a person can add")),
+        };
+        let action = match r.action.as_str() {
+            "tunnel" => RuleAction::Tunnel,
+            "bypass" => RuleAction::Bypass,
+            _ => return Err(bad("it is not an action a person's rule can have")),
+        };
+        if r.precedence < USER_RULES_START {
+            return Err(bad("it would outrank the built-in rules"));
+        }
+        // The domain error can quote the pattern, which is text from a file that may have been planted.
+        let rule = RoutingRule::restored_user(id, matcher, action, r.precedence)
+            .map_err(|_| bad("it is not a rule that can be applied"))?;
+        if !ids.insert(rule.id()) {
+            return Err(bad("its id is used twice"));
+        }
+        if !precedences.insert(rule.precedence()) {
+            return Err(bad("its precedence is used twice"));
+        }
+        rules.push(rule);
+    }
+    Ok(rules)
 }
 
 /// Whether `host` is something an endpoint can be reached at: an IP address or a host name. The one
@@ -799,6 +932,10 @@ mod tests {
             *self.0.lock().unwrap() = Some(bytes.to_vec());
             Ok(())
         }
+        fn remove(&self) -> Result<(), String> {
+            *self.0.lock().unwrap() = None;
+            Ok(())
+        }
     }
 
     // ---------------------------------------------------------------- round trip
@@ -975,6 +1112,9 @@ mod tests {
                 Err("refusing the file: not controlled only by SYSTEM".into())
             }
             fn write(&self, _: &[u8]) -> Result<(), String> {
+                Err("disk full".into())
+            }
+            fn remove(&self) -> Result<(), String> {
                 Err("disk full".into())
             }
         }
@@ -1289,5 +1429,120 @@ mod tests {
         let beside = std::path::Path::new("DNet Engine").join("state");
         assert!(default_config_path().ends_with(beside.join("config.json")));
         assert!(default_secrets_dir().ends_with(beside.join("secrets")));
+    }
+
+    // ---------------------------------------------------------------- a person's rules (T108)
+
+    /// Fixed ids, so two calls describe the same rules.
+    fn my_rules() -> Vec<RoutingRule> {
+        let id = |n: u8| RuleId::from_uuid(uuid::Uuid::from_bytes([n; 16]));
+        vec![
+            RoutingRule::restored_user(
+                id(1),
+                RuleMatcher::DomainSuffix("example.com".into()),
+                RuleAction::Bypass,
+                USER_RULES_START,
+            )
+            .unwrap(),
+            RoutingRule::restored_user(
+                id(2),
+                RuleMatcher::IpCidr(IpCidr::parse("198.51.100.0/24").unwrap()),
+                RuleAction::Tunnel,
+                USER_RULES_START + 1,
+            )
+            .unwrap(),
+        ]
+    }
+
+    fn with_rules() -> Vec<u8> {
+        encode_with_rules(&endpoints(), &profiles(), None, &my_rules()).unwrap()
+    }
+
+    #[test]
+    fn a_persons_rules_are_saved_and_come_back_with_their_ids() {
+        let loaded = decode(&with_rules()).unwrap();
+        assert_eq!(loaded.rules, my_rules());
+        // A file without rules (every file written before they existed) reads as none.
+        assert!(decode(&encode(&endpoints(), &profiles()).unwrap())
+            .unwrap()
+            .rules
+            .is_empty());
+        // And the form a tool rewrites keeps them.
+        assert_eq!(
+            decode(&encode_config(&loaded).unwrap()).unwrap().rules,
+            my_rules()
+        );
+    }
+
+    #[test]
+    fn built_in_rules_are_never_saved() {
+        let mut rules = my_rules();
+        rules.extend(dnet_core::builtin_rules::builtin_rules(None));
+        let loaded =
+            decode(&encode_with_rules(&endpoints(), &profiles(), None, &rules).unwrap()).unwrap();
+        assert_eq!(loaded.rules, my_rules());
+    }
+
+    /// The file is input from a place a user may have reached: a rule there gets the checks a new rule
+    /// gets, and one that would outrank the built-ins, or that only the built-in set may have, refuses
+    /// the file.
+    #[test]
+    fn a_planted_rule_that_is_not_one_a_person_can_make_refuses_the_file() {
+        let good = String::from_utf8(with_rules()).unwrap();
+        let start = format!("\"precedence\": {USER_RULES_START}");
+        for (from, to) in [
+            (start.as_str(), "\"precedence\": 5"),
+            ("\"action\": \"bypass\"", "\"action\": \"reject\""),
+            ("\"action\": \"bypass\"", "\"action\": \"capture\""),
+            ("\"kind\": \"domain_suffix\"", "\"kind\": \"dns_port\""),
+            ("\"value\": \"example.com\"", "\"value\": \"\""),
+            (
+                "\"value\": \"198.51.100.0/24\"",
+                "\"value\": \"198.51.100.0/99\"",
+            ),
+        ] {
+            let text = good.replacen(from, to, 1);
+            assert_ne!(text, good, "the injection point {from} must exist");
+            assert!(
+                matches!(decode(text.as_bytes()), Err(PersistError::Invalid(_))),
+                "{to} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn rules_that_share_an_id_or_a_precedence_refuse_the_file() {
+        let good = String::from_utf8(with_rules()).unwrap();
+        let second = format!("\"precedence\": {}", USER_RULES_START + 1);
+        let same_precedence =
+            good.replacen(&second, &format!("\"precedence\": {USER_RULES_START}"), 1);
+        assert!(decode(same_precedence.as_bytes()).is_err());
+
+        let ids: Vec<String> = my_rules().iter().map(|r| r.id().to_string()).collect();
+        let text = String::from_utf8(
+            encode_with_rules(&endpoints(), &profiles(), None, &my_rules()).unwrap(),
+        )
+        .unwrap();
+        let loaded = decode(text.as_bytes()).unwrap();
+        let saved_ids: Vec<String> = loaded.rules.iter().map(|r| r.id().to_string()).collect();
+        let same_id = text.replacen(&saved_ids[1], &saved_ids[0], 1);
+        assert_ne!(same_id, text);
+        assert!(decode(same_id.as_bytes()).is_err());
+        assert_eq!(ids, saved_ids);
+    }
+
+    #[test]
+    fn too_many_rules_refuse_the_file() {
+        let many: Vec<RoutingRule> = (0..=MAX_USER_RULES as u32)
+            .map(|i| {
+                RoutingRule::user(
+                    RuleMatcher::Domain(format!("host{i}.example.com")),
+                    RuleAction::Tunnel,
+                    USER_RULES_START + i,
+                )
+                .unwrap()
+            })
+            .collect();
+        assert!(encode_with_rules(&endpoints(), &profiles(), None, &many).is_err());
     }
 }

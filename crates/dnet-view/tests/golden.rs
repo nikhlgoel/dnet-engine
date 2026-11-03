@@ -163,14 +163,31 @@ async fn the_endpoint_and_rule_lists() {
             { "id": "0a1b2c3d-0000-4000-8000-000000000001", "label": "spare", "address": "vpn.example.com:443", "enabled": false, "health": "Unknown" }
         ]})),
         dnet_ipc::protocol::Request::ListRules => done(json!({ "rules": [
-            { "precedence": 1, "action": "Bypass", "reliability": "Deterministic", "builtin": true },
-            { "precedence": 200, "action": "Bypass", "reliability": "BestEffort", "builtin": false }
+            { "id": "11111111-2222-4333-8444-555555555555", "kind": "ip_cidr", "value": "10.0.0.0/8",
+              "precedence": 1, "action": "Bypass", "reliability": "Deterministic", "builtin": true },
+            { "id": "21111111-2222-4333-8444-555555555555", "kind": "application", "value": "C:\\Apps\\app.exe\u{202e}",
+              "precedence": 200, "action": "Bypass", "reliability": "BestEffort", "builtin": false, "extra": "dropped" }
         ], "encrypted_dns": { "block": true, "needs_disclosure": false }})),
         other => panic!("unexpected {other:?}"),
     });
     let bridge = dnet_view::Bridge::new(link);
     golden("endpoints", &bridge.endpoints().await.unwrap());
     golden("rules", &bridge.rules().await.unwrap());
+}
+
+#[tokio::test]
+async fn the_list_of_changes_waiting_for_approval() {
+    let link = FakeLink::new(|request| match request {
+        dnet_ipc::protocol::Request::ListPending => done(json!({ "pending": [
+            { "id": "a1b2c3d4", "what": "Adding the server \"home\" at 203.0.113.9",
+              "proposed_unix_ms": 1000, "expires_unix_ms": 601000, "extra": "dropped" },
+            { "id": "0f9e8d7c", "what": "Sending example.com\u{202e} around the tunnel",
+              "proposed_unix_ms": 2000, "expires_unix_ms": 602000 }
+        ]})),
+        other => panic!("unexpected {other:?}"),
+    });
+    let bridge = dnet_view::Bridge::new(link);
+    golden("pending", &bridge.pending().await.unwrap());
 }
 
 #[tokio::test]

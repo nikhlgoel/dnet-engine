@@ -7,14 +7,20 @@
     {
       "action": "Bypass",
       "builtin": true,
+      "id": "11111111-2222-4333-8444-555555555555",
+      "kind": "ip_cidr",
       "precedence": 1,
-      "reliability": "Deterministic"
+      "reliability": "Deterministic",
+      "value": "10.0.0.0/8"
     },
     {
       "action": "Bypass",
       "builtin": false,
+      "id": "21111111-2222-4333-8444-555555555555",
+      "kind": "application",
       "precedence": 200,
-      "reliability": "BestEffort"
+      "reliability": "BestEffort",
+      "value": "C:\\Apps\\app.exe?"
     }
   ]
 }

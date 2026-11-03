@@ -38,7 +38,7 @@ fn invalid(detail: impl Into<String>) -> IpcError {
 
 /// Characters that must never reach a screen from a peer: controls, and the characters that reorder
 /// or hide text.
-fn is_hostile(c: char) -> bool {
+pub(crate) fn is_hostile(c: char) -> bool {
     c.is_control()
         || ('\u{202a}'..='\u{202e}').contains(&c)
         || ('\u{2066}'..='\u{2069}').contains(&c)

@@ -296,7 +296,7 @@ fn ipc_19_the_credentials_are_the_stored_form_and_nothing_laxer() {
         ),
         (
             "another version",
-            Box::new(|w| w["credentials"]["version"] = json!(2)),
+            Box::new(|w| w["credentials"]["version"] = json!(3)),
         ),
         (
             "an unknown field",

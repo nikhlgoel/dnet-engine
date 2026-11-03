@@ -14,11 +14,27 @@ use crate::text::plain;
 const MAX_ENDPOINTS: usize = 64;
 /// More rules than any real set holds.
 const MAX_RULES: usize = 512;
+/// At most this many changes wait for approval at once (`dnetd::approval::MAX_HELD`).
+const MAX_PENDING: usize = 16;
+
+/// The bundled connection methods (`dnet_core::catalogue`); a longer list is not that list.
+const MAX_PROFILES: usize = 16;
+const KINDS: [&str; 3] = ["AmneziaWg", "Hysteria2", "VlessReality"];
+const TIERS: [&str; 2] = ["Tier1", "Tier2"];
 
 const HEALTH: [&str; 4] = ["Unknown", "Healthy", "Degraded", "Unreachable"];
 /// The service's own names (`dnetd::domain::reliability_name`): address and domain rules are deterministic,
 /// application rules are best effort (Principle VI).
 const RELIABILITY: [&str; 2] = ["Deterministic", "BestEffort"];
+/// What a rule can match (`dnet_ipc::protocol::rule_wire`).
+const RULE_KINDS: [&str; 6] = [
+    "domain",
+    "domain_suffix",
+    "ip_cidr",
+    "application",
+    "dns_port",
+    "encrypted_dns_port",
+];
 
 fn items<'a>(reply: &'a Value, key: &str, max: usize) -> Result<&'a Vec<Value>, String> {
     let list = reply.get(key).and_then(Value::as_array).ok_or_else(|| {
@@ -57,6 +73,44 @@ pub fn endpoints(reply: &Value) -> Result<Value, String> {
     Ok(json!({ "endpoints": out }))
 }
 
+/// `ListProfiles` as the window's list: which methods exist, their tier (measured, never intended), and
+/// whether Brutal is on.
+pub fn profiles(reply: &Value) -> Result<Value, String> {
+    let mut out = Vec::new();
+    for item in items(reply, "profiles", MAX_PROFILES)? {
+        let kind = text(item, "kind")?;
+        let tier = text(item, "tier")?;
+        if !KINDS.contains(&kind) || !TIERS.contains(&tier) {
+            return Err(
+                "a connection method had a kind or tier this program does not know".to_owned(),
+            );
+        }
+        out.push(json!({
+            "id": plain(text(item, "id")?, 64),
+            "kind": kind,
+            "tier": tier,
+            "brutal": item.get("brutal").and_then(Value::as_bool).unwrap_or(false),
+        }));
+    }
+    Ok(json!({ "profiles": out }))
+}
+
+/// `ListPending` as the window's list (T160): what is waiting for an elevated approval, in the service's own
+/// words, and until when. The id is how the window asks to approve or drop one; it names a change and is not a
+/// secret.
+pub fn pending(reply: &Value) -> Result<Value, String> {
+    let mut out = Vec::new();
+    for item in items(reply, "pending", MAX_PENDING)? {
+        out.push(json!({
+            "id": plain(text(item, "id")?, 32),
+            "what": plain(text(item, "what")?, 400),
+            "expiresUnixMs": item.get("expires_unix_ms").and_then(Value::as_u64)
+                .ok_or_else(|| "a waiting change had no deadline".to_owned())?,
+        }));
+    }
+    Ok(json!({ "pending": out }))
+}
+
 /// `ListRules` as the window's list, with the encrypted-name setting that rides along with it.
 pub fn rules(reply: &Value) -> Result<Value, String> {
     let mut out = Vec::new();
@@ -65,7 +119,15 @@ pub fn rules(reply: &Value) -> Result<Value, String> {
         if !RELIABILITY.contains(&reliability) {
             return Err("a rule had a reliability this program does not know".to_owned());
         }
+        let kind = text(item, "kind")?;
+        if !RULE_KINDS.contains(&kind) {
+            return Err("a rule matched something this program does not know".to_owned());
+        }
         out.push(json!({
+            "id": plain(text(item, "id")?, 64),
+            "kind": kind,
+            // A program path can be long; it is cleaned of anything that would reorder or hide text.
+            "value": plain(text(item, "value")?, 260),
             "precedence": item.get("precedence").and_then(Value::as_u64)
                 .ok_or_else(|| "a rule had no precedence".to_owned())?,
             "action": plain(text(item, "action")?, 32),

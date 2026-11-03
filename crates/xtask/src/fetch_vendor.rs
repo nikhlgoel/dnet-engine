@@ -29,33 +29,34 @@ use std::process::Command;
 use crate::pins::{sha256_hex, wintun_dll};
 
 /// A third-party Go program built from pinned source.
-struct GoSource {
+pub(crate) struct GoSource {
     /// Directory name under `vendor/`.
-    dest: &'static str,
-    repo: &'static str,
+    pub(crate) dest: &'static str,
+    pub(crate) repo: &'static str,
     /// Human-readable version, recorded in the build provenance file.
-    version: &'static str,
+    pub(crate) version: &'static str,
     /// Immutable commit SHA. A tag can be moved; a commit cannot.
-    commit: &'static str,
+    pub(crate) commit: &'static str,
     /// Package path to build, relative to the repository root.
-    package: &'static str,
+    pub(crate) package: &'static str,
     /// Output executable name.
-    binary: &'static str,
+    pub(crate) binary: &'static str,
     /// Go build tags. Empty means the upstream default.
     ///
     /// For the primary core we select only what the three v1 profiles need, which
     /// takes the binary from 78 MB to a fraction of it (ADR-0004, Finding 3).
-    /// Notably `with_wireguard` is **absent**: AmneziaWG is served by a separate
-    /// supervised process, so the primary core needs no WireGuard support at all.
-    tags: &'static str,
+    /// `with_wireguard` is **present** since ADR-0008 (it was excluded in ADR-0004): the session
+    /// is a WireGuard endpoint inside the primary core, carried over a replaceable carrier. The
+    /// AmneziaWG profile is still a separate supervised process on its own adapter.
+    pub(crate) tags: &'static str,
     /// Source patches applied to a dependency before building.
-    patch: Option<&'static ModulePatch>,
+    pub(crate) patch: Option<&'static ModulePatch>,
 }
 
 /// A patch to one Go module dependency, applied through a `go mod edit -replace` onto a
 /// patched copy. The copy starts from the module cache, verified against the pinned
 /// source's `go.sum`.
-struct ModulePatch {
+pub(crate) struct ModulePatch {
     module: &'static str,
     /// The exact version the pinned source requires. A core bump that changes it fails
     /// loudly, so the patch is re-reviewed rather than silently applied to new code.
@@ -89,7 +90,7 @@ const TUN_DLL_LOADER_PATCH: ModulePatch = ModulePatch {
     test_package: "github.com/sagernet/sing-tun/internal/wintun",
 };
 
-const GO_SOURCES: &[GoSource] = &[
+pub(crate) const GO_SOURCES: &[GoSource] = &[
     GoSource {
         dest: "primary-core",
         repo: "https://github.com/SagerNet/sing-box",
@@ -101,10 +102,13 @@ const GO_SOURCES: &[GoSource] = &[
         // with_utls               -> REALITY fingerprinting (Profile C)
         // with_clash_api          -> the runtime control API dnetd drives the core through
         // with_gvisor             -> TUN network stack
+        // with_wireguard         -> the session endpoint carried over a replaceable carrier
+        //                           (ADR-0008). The pin before this refused the endpoint.
         // with_external_windivert -> do NOT embed the packet-diversion kernel driver. No
         //                            profile uses it, and we never ship the driver file,
         //                            so the features needing it fail closed (Finding 4).
-        tags: "with_quic,with_utls,with_clash_api,with_gvisor,with_external_windivert",
+        tags:
+            "with_quic,with_utls,with_clash_api,with_gvisor,with_wireguard,with_external_windivert",
         patch: Some(&TUN_DLL_LOADER_PATCH),
     },
     GoSource {
@@ -552,7 +556,7 @@ fn copy_tree(from: &Path, to: &Path) -> Result<()> {
 }
 
 /// `remove_dir_all` fails on read-only files on Windows, so clear the flag first.
-fn remove_tree(dir: &Path) -> Result<()> {
+pub(crate) fn remove_tree(dir: &Path) -> Result<()> {
     if !dir.exists() {
         return Ok(());
     }
@@ -623,7 +627,7 @@ fn extract_zip(zip: &Path, into: &Path) -> Result<()> {
     }
 }
 
-fn require_tool(bin: &str, args: &[&str]) -> Result<()> {
+pub(crate) fn require_tool(bin: &str, args: &[&str]) -> Result<()> {
     Command::new(bin)
         .args(args)
         .output()
@@ -631,7 +635,7 @@ fn require_tool(bin: &str, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-fn run_cmd(bin: &str, args: &[&str], cwd: Option<&Path>) -> Result<()> {
+pub(crate) fn run_cmd(bin: &str, args: &[&str], cwd: Option<&Path>) -> Result<()> {
     let mut cmd = Command::new(bin);
     cmd.args(args);
     if let Some(dir) = cwd {
@@ -646,7 +650,7 @@ fn run_cmd(bin: &str, args: &[&str], cwd: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-fn capture(bin: &str, args: &[&str], cwd: Option<&Path>) -> Result<String> {
+pub(crate) fn capture(bin: &str, args: &[&str], cwd: Option<&Path>) -> Result<String> {
     let mut cmd = Command::new(bin);
     cmd.args(args);
     if let Some(dir) = cwd {
@@ -687,21 +691,6 @@ mod tests {
             assert_eq!(s.commit.len(), 40, "{} is not pinned to a full SHA", s.dest);
             assert!(s.commit.chars().all(|c| c.is_ascii_hexdigit()));
         }
-    }
-
-    /// The primary core must not carry WireGuard support: AmneziaWG is served by a
-    /// separate supervised process, and including it would inflate the binary against
-    /// the installer budget for no benefit.
-    #[test]
-    fn primary_core_excludes_wireguard() {
-        let core = GO_SOURCES
-            .iter()
-            .find(|s| s.dest == "primary-core")
-            .unwrap();
-        assert!(!core.tags.contains("with_wireguard"));
-        assert!(core.tags.contains("with_quic"));
-        assert!(core.tags.contains("with_utls"));
-        assert!(core.tags.contains("with_clash_api"));
     }
 
     /// The harness endpoint builds its AmneziaWG server from source. Both ends must run
@@ -804,6 +793,24 @@ mod tests {
                 "{rel} embeds a file"
             );
         }
+    }
+
+    /// ADR-0008: the session is a WireGuard endpoint inside the primary core. Without its tag the core refuses
+    /// the endpoint ("WireGuard is not included in this build"), which was found by running the previous pin.
+    #[test]
+    fn the_primary_core_is_built_with_the_session_endpoint() {
+        let tags: Vec<&str> = primary_core().tags.split(',').collect();
+        for needed in [
+            "with_quic",
+            "with_utls",
+            "with_clash_api",
+            "with_gvisor",
+            "with_wireguard",
+        ] {
+            assert!(tags.contains(&needed), "{needed}");
+        }
+        // The packet-diversion driver stays out (Finding 4).
+        assert!(tags.contains(&"with_external_windivert"));
     }
 
     /// A binary built before a tag or patch change must be rebuilt, not skipped.

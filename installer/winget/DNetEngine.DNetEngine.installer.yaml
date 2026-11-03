@@ -1,0 +1,23 @@
+# T114 — winget installer manifest, rendered by .github/workflows/release.yml.
+# The installer is per-machine (it registers a LocalSystem service), so it asks for elevation itself.
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.9.0.schema.json
+PackageIdentifier: DNetEngine.DNetEngine
+PackageVersion: ${VERSION}
+MinimumOSVersion: 10.0.17763.0
+InstallerType: nullsoft
+Scope: machine
+InstallModes:
+  - interactive
+  - silent
+  - silentWithProgress
+InstallerSwitches:
+  Silent: /S
+  SilentWithProgress: /P
+UpgradeBehavior: install
+ElevationRequirement: elevatesSelf
+Installers:
+  - Architecture: x64
+    InstallerUrl: ${INSTALLER_URL}
+    InstallerSha256: ${INSTALLER_SHA256}
+ManifestType: installer
+ManifestVersion: 1.9.0

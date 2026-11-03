@@ -1,0 +1,14 @@
+{
+  "pending": [
+    {
+      "expiresUnixMs": 601000,
+      "id": "a1b2c3d4",
+      "what": "Adding the server \"home\" at 203.0.113.9"
+    },
+    {
+      "expiresUnixMs": 602000,
+      "id": "0f9e8d7c",
+      "what": "Sending example.com? around the tunnel"
+    }
+  ]
+}

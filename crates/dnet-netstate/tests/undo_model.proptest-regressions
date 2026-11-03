@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b8a7b5907d7c3761fc8c5e2bfeaa099e61cb5672523eebb6abf614417b831999 # shrinks to sequence = [Add { route: (1, 6), fails: false }, Disk(true), Undo(0), Add { route: (1, 1), fails: false }, Foreign((1, 6))]
+cc b5d28c80a9af8b997263d84304de1e3cb0d500fde5d765bca0b9a43efc065cca # shrinks to sequence = [Disk(true), Add { route: (1, 1), fails: false }]
+cc 588dd42573633bfd674810bcebfdb2e433c83c1e6c9e02e052308222ddac0421 # shrinks to sequence = [Reversals(false), Add { route: (1, 1), fails: false }, Disk(false), Add { route: (1, 2), fails: false }, Replay]

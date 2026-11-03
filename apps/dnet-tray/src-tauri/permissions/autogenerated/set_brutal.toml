@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-brutal"
+description = "Enables the set_brutal command without any pre-configured scope."
+commands.allow = ["set_brutal"]
+
+[[permission]]
+identifier = "deny-set-brutal"
+description = "Denies the set_brutal command without any pre-configured scope."
+commands.deny = ["set_brutal"]

@@ -14,23 +14,26 @@
 //! sees them. They are accepted only while nothing is connected or being connected, because the
 //! engine and the effects it drives were built from the endpoints and rules of the moment; replacing
 //! them under a live tunnel would leave the tunnel running on a configuration nobody can see. The
-//! remaining configuration requests (rules, profile settings, Brutal, provisioning) are recognized
+//! remaining configuration requests (profile settings, provisioning) are recognized
 //! but still answer that they are not available. The privilege boundary and the read path are real.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
 use dnet_core::feed::fetch::FetchRoute;
 use dnet_core::posture::RoutingPosture;
+use dnet_core::profile::BandwidthPair;
+use dnet_core::rule::{RuleAction, RuleMatcher};
 use dnet_core::session::{CheckFailure, ConnectionEvent, DefinitionsChange};
 use dnet_ipc::authz::ConsoleSession;
 use dnet_ipc::protocol::{encode_state_snapshot, FeedImport, IpcError, Request, RequestClass};
 use dnet_ipc::service::Service;
 use dnet_ipc::wire::{EventBus, Subscription};
 
-use crate::configure::{added_reply, dns_reply, Configurator, APPLIED};
+use crate::configure::{added_reply, dns_reply, rule_added_reply, Configurator, APPLIED};
 use crate::domain::DomainState;
 use crate::feed_fetch::{Busy, Fetcher, Pace, Transport};
 use crate::feed_service::{FeedNote, FeedRefusal, FeedService, SharedDefinitions};
+use crate::intent::{Intent, Remembered};
 use crate::orchestrator::Handle;
 use crate::recovery::{Recovered, RecoveryError};
 
@@ -76,6 +79,18 @@ pub struct DnetService {
     feed: Option<Arc<Mutex<FeedService>>>,
     /// Asks for a check for updated definitions now (`FetchFeed`). Present once a fetcher is attached.
     check_requester: Option<CheckRequester>,
+    /// What the person last asked for, kept across restarts (T147). Without it nothing is remembered.
+    intent: Option<Intent>,
+    /// Setting up the person's own server from a script and a pasted result (T150). Without it the
+    /// requests answer that they are not available.
+    server_setup: Option<crate::server_setup::ServerSetup>,
+    /// Changes that redirect traffic, waiting for an elevated client to approve them (T160).
+    pending: Mutex<crate::approval::PendingChanges>,
+    /// Held across approving a change, so the same one is not applied twice by two approvers.
+    approving: Mutex<()>,
+    /// Whether such changes are held at all. True for every service built by `new`; only the tests
+    /// that exercise the changes themselves turn it off, and nothing outside tests can.
+    hold_changes: bool,
 }
 
 /// Starts a requested check and says which network it will use, or that one is under way.
@@ -83,6 +98,52 @@ type CheckRequester = Box<dyn Fn() -> Result<FetchRoute, Busy> + Send + Sync>;
 
 /// Tell subscribers what a feed operation changed, and, for a check the person asked for that came to
 /// nothing, why. Also logged, since nobody may be subscribed.
+/// A setup that cannot proceed, as the client is told. A build with no server downloads is the
+/// service's limit, not the client's mistake.
+fn setup_refusal(error: crate::server_setup::SetupError) -> IpcError {
+    use crate::server_setup::SetupError;
+    match error {
+        SetupError::NoDownloads | SetupError::NoBuild | SetupError::Script => {
+            IpcError::InternalError {
+                detail: error.to_string(),
+            }
+        }
+        other => IpcError::InvalidRequest {
+            detail: other.to_string(),
+        },
+    }
+}
+
+impl crate::keep_trying::Retry for DnetService {
+    /// Under the store lock, as every request is: a person's disconnect forgets the intent under the
+    /// same lock, so a retry is either before it (and the disconnect stops it) or sees it off.
+    fn retry_if_left_on(&self) -> crate::keep_trying::Tick {
+        use crate::keep_trying::Tick;
+        use dnet_ipc::protocol::ConnectionStatus;
+
+        let _state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(Remembered::On { profile }) = self.intent.as_ref().map(Intent::load) else {
+            return Tick::Idle;
+        };
+        let Some(orchestrator) = self.orchestrator() else {
+            return Tick::Idle;
+        };
+        if !orchestrator.is_idle() {
+            return match orchestrator.snapshot().status {
+                ConnectionStatus::Connected => Tick::Healthy,
+                _ => Tick::InProgress,
+            };
+        }
+        match orchestrator.connect(profile) {
+            Ok(()) => {
+                tracing::info!("left on and not connected: trying again");
+                Tick::Attempted
+            }
+            Err(_) => Tick::InProgress,
+        }
+    }
+}
+
 fn announce(events: &EventBus, notes: &[FeedNote], failure: Option<CheckFailure>) {
     let changes = notes
         .iter()
@@ -115,6 +176,52 @@ fn unix_millis() -> u64 {
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
+/// A short random name for a held change: eight lower-case hex digits. It names a change; it is
+/// not a secret, since approving needs elevation and not the name.
+fn fresh_change_id() -> String {
+    let mut bytes = [0u8; 4];
+    // The system generator failing is not a state to carry on from with a guessable id.
+    getrandom::fill(&mut bytes).expect("the system random generator is available");
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn unknown_change(error: crate::approval::FindError) -> IpcError {
+    IpcError::InvalidRequest {
+        detail: match error {
+            crate::approval::FindError::Unknown => {
+                "no change is waiting under that name; it may have been applied, withdrawn or \
+                 dropped after ten minutes"
+            }
+            crate::approval::FindError::Expired => {
+                "that change waited more than ten minutes and was dropped; ask for it again"
+            }
+        }
+        .to_string(),
+    }
+}
+
+/// Text from a request, made safe to show in a prompt: no control characters, and not long.
+fn shown(text: &str) -> String {
+    let clean: String = text.chars().filter(|c| !c.is_control()).collect();
+    if clean.chars().count() > 64 {
+        let cut: String = clean.chars().take(64).collect();
+        format!("{cut}...")
+    } else {
+        clean
+    }
+}
+
+fn describe_matcher(matcher: &RuleMatcher) -> String {
+    match matcher {
+        RuleMatcher::Domain(name) => format!("traffic to {}", shown(name)),
+        RuleMatcher::DomainSuffix(name) => format!("traffic to {} and its subdomains", shown(name)),
+        RuleMatcher::IpCidr(range) => format!("traffic to {range}"),
+        RuleMatcher::Application(path) => format!("traffic from {}", shown(path)),
+        RuleMatcher::DnsPort => "name lookups".to_string(),
+        RuleMatcher::EncryptedDnsPort => "encrypted name lookups".to_string(),
+    }
+}
+
 impl DnetService {
     /// Build a service over `state`, resolving the console user with `console`, gated by
     /// the outcome of start-up recovery.
@@ -135,7 +242,19 @@ impl DnetService {
             definitions: SharedDefinitions::default(),
             feed: None,
             check_requester: None,
+            intent: None,
+            server_setup: None,
+            pending: Mutex::new(crate::approval::PendingChanges::new()),
+            approving: Mutex::new(()),
+            hold_changes: true,
         }
+    }
+
+    /// For tests of the changes themselves: apply them as they are asked for, without holding them.
+    #[cfg(test)]
+    pub fn applying_changes_without_approval(mut self) -> Self {
+        self.hold_changes = false;
+        self
     }
 
     /// Attach the connection orchestrator. It must publish to [`DnetService::events`], so that a
@@ -152,6 +271,67 @@ impl DnetService {
     pub fn with_configurator(mut self, configurator: Configurator) -> Self {
         self.configurator = Some(configurator);
         self
+    }
+
+    /// Let the person set up their own server (T150).
+    #[cfg_attr(not(windows), allow(dead_code))] // Windows builds it; the tests supply their own.
+    pub fn with_server_setup(mut self, setup: crate::server_setup::ServerSetup) -> Self {
+        self.server_setup = Some(setup);
+        self
+    }
+
+    /// Remember what the person asks for in `intent`, and resume it at start-up (T147).
+    #[cfg_attr(not(windows), allow(dead_code))] // Windows builds it; the tests supply their own.
+    pub fn with_intent(mut self, intent: Intent) -> Self {
+        self.intent = Some(intent);
+        self
+    }
+
+    /// Connect again if the person left it on (T147). Called once, at start-up, after recovery and
+    /// after the orchestrator is attached; a service that may not connect does nothing and keeps the
+    /// intent for a start that can.
+    #[cfg_attr(not(windows), allow(dead_code))] // Called at start-up on Windows, and by the tests.
+    pub fn resume_if_left_on(&self) {
+        let Some(Remembered::On { profile }) = self.intent.as_ref().map(Intent::load) else {
+            return;
+        };
+        let Some(orchestrator) = self.orchestrator() else {
+            tracing::warn!("left on, but connecting is unavailable in this start; not resuming");
+            return;
+        };
+        match orchestrator.connect(profile) {
+            Ok(()) => tracing::info!("left on: connecting again"),
+            Err(error) => {
+                tracing::warn!(%error, "left on, but the connection could not be resumed")
+            }
+        }
+    }
+
+    /// Start trying again whenever the connection is down while left on (T148), for as long as the
+    /// service exists. `changes` signals network changes, where the platform has them.
+    #[cfg_attr(not(windows), allow(dead_code))] // Started on Windows; the tests drive the loop.
+    pub fn keep_trying(
+        self: &Arc<Self>,
+        changes: Option<tokio::sync::mpsc::Receiver<()>>,
+    ) -> tokio::task::JoinHandle<()> {
+        let weak = Arc::downgrade(self) as std::sync::Weak<dyn crate::keep_trying::Retry>;
+        tokio::spawn(crate::keep_trying::run(
+            weak,
+            changes,
+            crate::keep_trying::Pace::default(),
+        ))
+    }
+
+    fn remember(&self, profile: Option<&dnet_core::ids::ProfileId>) {
+        if let Some(Err(error)) = self.intent.as_ref().map(|i| i.remember_on(profile)) {
+            tracing::warn!(%error, "the connection will not be resumed after a restart: it could not be remembered");
+        }
+    }
+
+    fn forget(&self) {
+        if let Some(Err(error)) = self.intent.as_ref().map(Intent::forget) {
+            tracing::warn!(%error, "the remembered connection could not be cleared; it may resume after a restart");
+        }
     }
 
     /// Let a saved change replace the orchestrator with one built from the changed store.
@@ -260,7 +440,8 @@ impl DnetService {
         };
         if self.orchestrator().is_some_and(|o| !o.is_idle()) {
             return Err(IpcError::InvalidRequest {
-                detail: "disconnect before changing endpoints or encrypted-DNS handling; the                          change would not reach a connection that is already up"
+                detail: "disconnect before changing settings; the change would not reach a connection that is \
+                         already up"
                     .to_string(),
             });
         }
@@ -378,7 +559,17 @@ impl DnetService {
             recovery,
         )
         .with_config_refusal(refusal)
-        .with_configurator(configurator);
+        .with_configurator(configurator)
+        // Beside the configuration, under the same owner and DACL check (T147).
+        .with_intent(Intent::new(Box::new(TrustedStateFile::new(
+            default_config_path().with_file_name("connection-intent.json"),
+        ))));
+
+        // The server downloads this release carries, beside the service in the folder only administrators
+        // can change (T150). Absent or unreadable, setting up a server answers that it is not available.
+        let service = service.with_server_setup(crate::server_setup::ServerSetup::new(
+            crate::server_setup::installed_pins(),
+        ));
 
         // The signed profile feed, if this build carries a trust anchor (T066d). Its documents sit
         // beside the configuration, under the same owner and DACL check.
@@ -479,22 +670,170 @@ impl Service for DnetService {
     }
 
     fn dispatch(&self, request: &Request) -> Result<String, IpcError> {
+        // The three requests about held changes are answered here, before the store is touched.
+        match request {
+            Request::ListPending => {
+                return Ok(self
+                    .pending
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .list_json(unix_millis()));
+            }
+            Request::RejectChange { id } => return self.reject_change(id),
+            Request::ApproveChange { id } => return self.approve_change(id),
+            _ => {}
+        }
+        if self.hold_changes {
+            if let Some(what) = self.redirects_traffic(request) {
+                return self.hold_change(request, what);
+            }
+        }
+        self.apply(request)
+    }
+
+    fn subscribe(&self) -> Result<Subscription, IpcError> {
+        self.events.subscribe()
+    }
+}
+
+impl DnetService {
+    /// The strict gate (T038, T124): refuses a change while a previous run's network changes are
+    /// unrestored or the saved configuration was refused.
+    fn refuse_while_unsafe(&self) -> Result<(), IpcError> {
+        if let Err(e) = &self.recovery {
+            return Err(IpcError::InternalError {
+                detail: e.to_string(),
+            });
+        }
+        if let Some(reason) = &self.config_refusal {
+            return Err(IpcError::InternalError {
+                detail: format!(
+                    "{reason}. DNet Engine will not connect or change anything until the \
+                     file is corrected or removed, then the service restarted"
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// If `request` changes where traffic goes, what it would do, in words for the person (T160).
+    ///
+    /// Held: a new server (added by hand or by the setup guide), turning a server on, a rule that
+    /// sends traffic around the tunnel, and an imported feed. Not held: everything that can only make
+    /// the connection stricter or leave it where it is (removing or turning off a server, a rule that
+    /// tunnels, captures or rejects, the encrypted-DNS setting, Brutal), and everything that is not a
+    /// change at all.
+    fn redirects_traffic(&self, request: &Request) -> Option<String> {
+        match request {
+            Request::AddEndpoint(new) => Some(format!(
+                "Adding the server \"{}\" at {}",
+                shown(new.label()),
+                shown(new.host())
+            )),
+            Request::FinishServer { label, host, .. } => Some(format!(
+                "Adding the server \"{}\" at {} made by the setup guide",
+                shown(label),
+                shown(host)
+            )),
+            Request::SetEndpointEnabled {
+                endpoint,
+                enabled: true,
+            } => {
+                let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+                // An unknown server is not held: applying it fails, and changes nothing.
+                let found = state.endpoints().iter().find(|e| e.id() == *endpoint)?;
+                Some(format!(
+                    "Turning on the server \"{}\"",
+                    shown(found.label())
+                ))
+            }
+            Request::AddRule {
+                matcher,
+                action: RuleAction::Bypass,
+            } => Some(format!(
+                "Sending {} around the tunnel",
+                describe_matcher(matcher)
+            )),
+            Request::ImportFeed(_) => {
+                Some("Importing connection-method definitions from a file".to_string())
+            }
+            _ => None,
+        }
+    }
+
+    /// Hold `request` and say so as the refusal it is: nothing was applied.
+    fn hold_change(&self, request: &Request, what: String) -> Result<String, IpcError> {
+        // A change that could not be applied even if approved is not worth anyone's prompt.
+        self.refuse_while_unsafe()?;
+        let held = self
+            .pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .hold(
+                request.clone(),
+                what.clone(),
+                unix_millis(),
+                fresh_change_id,
+            );
+        match held {
+            Ok(id) => {
+                // Only the id is logged: what a change names (a server's address) stays out of the log.
+                tracing::info!(change = %id, "a change that redirects traffic is waiting for approval");
+                Err(IpcError::ApprovalRequired { id, what })
+            }
+            Err(crate::approval::HoldError::Full) => Err(IpcError::InvalidRequest {
+                detail: "too many changes are waiting for approval; approve or withdraw one first \
+                         (`dnetctl pending`)"
+                    .to_string(),
+            }),
+        }
+    }
+
+    /// Apply the held change `id`. Only reached for an elevated client in the console session
+    /// (`dnet_ipc::authz`); the change applied is exactly the one held, never one the caller sends.
+    fn approve_change(&self, id: &str) -> Result<String, IpcError> {
+        let _one_at_a_time = self
+            .approving
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let found = self
+            .pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .find(id, unix_millis());
+        let held = found.map_err(unknown_change)?;
+        // A change that fails (a connection is up, say) stays held until it expires, so the person
+        // can try again without asking for it again.
+        let reply = self.apply(&held.request)?;
+        self.pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(id);
+        tracing::info!(change = %id, "a change was approved by an elevated client");
+        Ok(reply)
+    }
+
+    /// Drop the held change `id` without applying it.
+    fn reject_change(&self, id: &str) -> Result<String, IpcError> {
+        let found = self
+            .pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .find(id, unix_millis());
+        found.map_err(unknown_change)?;
+        self.pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(id);
+        tracing::info!(change = %id, "a waiting change was withdrawn");
+        Ok(APPLIED.to_string())
+    }
+
+    fn apply(&self, request: &Request) -> Result<String, IpcError> {
         // Strict gate (T038): nothing may change while a previous run's network changes
         // are still unrestored. Read-only queries still answer, so the user can see why.
         if request.class() == RequestClass::Mutating {
-            if let Err(e) = &self.recovery {
-                return Err(IpcError::InternalError {
-                    detail: e.to_string(),
-                });
-            }
-            if let Some(reason) = &self.config_refusal {
-                return Err(IpcError::InternalError {
-                    detail: format!(
-                        "{reason}. DNet Engine will not connect or change anything until the \
-                         file is corrected or removed, then the service restarted"
-                    ),
-                });
-            }
+            self.refuse_while_unsafe()?;
         }
         let mut state = self.state.lock().expect("domain state mutex poisoned");
         let orchestrator = self.orchestrator();
@@ -570,17 +909,22 @@ impl Service for DnetService {
                         });
                     }
                     orchestrator.connect(profile.clone())?;
+                    self.remember(profile.as_ref());
                     Ok(ACCEPTED.to_string())
                 }
                 None => Self::not_available("connecting"),
             },
-            Request::Disconnect => match &orchestrator {
-                Some(orchestrator) => {
-                    orchestrator.disconnect()?;
-                    Ok(ACCEPTED.to_string())
+            // The person said off, so it stays off after a restart whatever the answer below (T147).
+            Request::Disconnect => {
+                self.forget();
+                match &orchestrator {
+                    Some(orchestrator) => {
+                        orchestrator.disconnect()?;
+                        Ok(ACCEPTED.to_string())
+                    }
+                    None => Self::not_available("disconnecting"),
                 }
-                None => Self::not_available("disconnecting"),
-            },
+            }
 
             // Configuration changes (Phase 9a). Each is refused while a connection is up or being
             // made, saved before it is applied, and followed by a rebuilt orchestrator.
@@ -599,6 +943,76 @@ impl Service for DnetService {
             Request::SetEndpointEnabled { endpoint, enabled } => {
                 let configurator = self.before_change()?;
                 configurator.set_endpoint_enabled(&mut state, *endpoint, *enabled)?;
+                self.reload(&state);
+                Ok(APPLIED.to_string())
+            }
+            Request::PrepareServer { arch } => {
+                let Some(setup) = &self.server_setup else {
+                    return Self::not_available("setting up a server");
+                };
+                match setup.prepare(*arch, unix_millis() / 1000) {
+                    Ok(prepared) => Ok(dnet_ipc::server_setup::encode_prepared(&prepared)),
+                    Err(error) => Err(setup_refusal(error)),
+                }
+            }
+            Request::FinishServer {
+                label,
+                host,
+                report,
+            } => {
+                // Idle only, like every change to the endpoints; checked before the result is read so a
+                // refusal costs the person nothing.
+                let configurator = self.before_change()?;
+                let Some(setup) = &self.server_setup else {
+                    return Self::not_available("setting up a server");
+                };
+                let credentials = setup
+                    .finish(report, unix_millis() / 1000)
+                    .map_err(setup_refusal)?;
+                let new = dnet_ipc::protocol::NewEndpoint::new(label, host, credentials)?;
+                let id = configurator.add_endpoint(&mut state, &new)?;
+                // Saved: the keys that were waiting for it are no longer needed.
+                setup.complete();
+                self.reload(&state);
+                Ok(added_reply(id))
+            }
+            Request::AddRule { matcher, action } => {
+                let configurator = self.before_change()?;
+                let id = configurator.add_rule(&mut state, matcher.clone(), *action)?;
+                self.reload(&state);
+                Ok(rule_added_reply(id))
+            }
+            Request::RemoveRule { rule } => {
+                let configurator = self.before_change()?;
+                configurator.remove_rule(&mut state, *rule)?;
+                self.reload(&state);
+                Ok(APPLIED.to_string())
+            }
+            Request::EnableBrutal {
+                profile,
+                up_mbps,
+                down_mbps,
+                // The IPC layer accepts only the revision in force; the acknowledgement is recorded
+                // under that revision, at the service's time.
+                warning_revision: _,
+            } => {
+                let configurator = self.before_change()?;
+                let bandwidth = BandwidthPair {
+                    up_mbps: *up_mbps,
+                    down_mbps: *down_mbps,
+                };
+                configurator.set_brutal(
+                    &mut state,
+                    profile,
+                    Some(bandwidth),
+                    unix_millis() / 1000,
+                )?;
+                self.reload(&state);
+                Ok(APPLIED.to_string())
+            }
+            Request::DisableBrutal { profile } => {
+                let configurator = self.before_change()?;
+                configurator.set_brutal(&mut state, profile, None, unix_millis() / 1000)?;
                 self.reload(&state);
                 Ok(APPLIED.to_string())
             }
@@ -629,22 +1043,22 @@ impl Service for DnetService {
             },
 
             // Recognized, authorized, but not yet actionable.
-            Request::AddRule
-            | Request::RemoveRule
-            | Request::SetProfileParams
-            | Request::EnableBrutal
+            Request::SetProfileParams
             | Request::StartProvisioning
             | Request::CancelProvisioning => Self::not_available("this configuration change"),
+
+            // Answered by `dispatch` before `apply` is reached; they never come through here.
+            Request::ListPending | Request::ApproveChange { .. } | Request::RejectChange { .. } => {
+                Err(IpcError::InternalError {
+                    detail: "a request about held changes reached the apply step".to_string(),
+                })
+            }
 
             // Streaming is handled by the connection loop (`Service::subscribe`), not one-shot dispatch.
             Request::Subscribe => Err(IpcError::InvalidRequest {
                 detail: "Subscribe is a streaming request, not a one-shot dispatch".to_string(),
             }),
         }
-    }
-
-    fn subscribe(&self) -> Result<Subscription, IpcError> {
-        self.events.subscribe()
     }
 }
 
@@ -654,7 +1068,7 @@ mod tests {
 
     use dnet_config::persist::{ConfigStore, MemoryStateFile};
     use dnet_config::secret_store::MemorySecretStore;
-    use dnet_core::ids::EndpointId;
+    use dnet_core::ids::{EndpointId, ProfileId};
 
     use super::*;
     use crate::configure::tests::new_endpoint;
@@ -663,6 +1077,11 @@ mod tests {
     /// A service with a fixed (test) console identity, so `dispatch` can be exercised
     /// without the OS console lookup.
     fn service() -> DnetService {
+        holding_service().applying_changes_without_approval()
+    }
+
+    /// The service as it is built for real: changes that redirect traffic are held for approval.
+    fn holding_service() -> DnetService {
         DnetService::new(
             DomainState::seeded(),
             Box::new(|| {
@@ -736,7 +1155,7 @@ mod tests {
         let svc = service();
         // Not built yet.
         assert!(matches!(
-            svc.dispatch(&Request::AddRule),
+            svc.dispatch(&Request::SetProfileParams),
             Err(IpcError::InternalError { .. })
         ));
         // Built, but this service has nothing to save them with.
@@ -1060,6 +1479,253 @@ mod tests {
         assert!(reply.get("consequence").is_none());
     }
 
+    fn enable_brutal() -> Request {
+        Request::EnableBrutal {
+            profile: ProfileId::new("hy2-default"),
+            up_mbps: 50,
+            down_mbps: 200,
+            warning_revision: dnet_core::profile::BRUTAL_WARNING_REVISION,
+        }
+    }
+
+    fn brutal_listed(svc: &DnetService) -> bool {
+        json_of(svc.dispatch(&Request::ListProfiles))["profiles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == "hy2-default")
+            .unwrap()["brutal"]
+            .as_bool()
+            .unwrap()
+    }
+
+    /// T108: a rule added through the service is listed with its pattern, saved, and removed by id.
+    #[test]
+    fn a_rule_can_be_added_listed_and_removed_through_the_service() {
+        let (svc, file) = configurable_service();
+        let added = json_of(svc.dispatch(&Request::AddRule {
+            matcher: dnet_core::rule::RuleMatcher::DomainSuffix("example.com".into()),
+            action: dnet_core::rule::RuleAction::Bypass,
+        }));
+        let id = added["rule"]
+            .as_str()
+            .expect("the new rule's id")
+            .to_owned();
+        let listed = json_of(svc.dispatch(&Request::ListRules));
+        let mine = listed["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == id.as_str())
+            .expect("listed")
+            .clone();
+        assert_eq!(mine["value"], "example.com");
+        assert_eq!(mine["action"], "Bypass");
+        let saved = dnet_config::persist::decode(&file.bytes().unwrap()).unwrap();
+        assert_eq!(saved.rules.len(), 1);
+
+        let rule = dnet_core::ids::RuleId::from_uuid(id.parse().unwrap());
+        assert_eq!(
+            svc.dispatch(&Request::RemoveRule { rule }).unwrap(),
+            APPLIED
+        );
+        let saved = dnet_config::persist::decode(&file.bytes().unwrap()).unwrap();
+        assert!(saved.rules.is_empty());
+    }
+
+    // ---------------------------------------------------------------- T150: the person's own server
+
+    fn setup_pins() -> dnet_provision::server_pins::ServerPins {
+        use serde_json::json;
+        dnet_provision::server_pins::ServerPins::parse(
+            &json!({
+                "version": 1,
+                "base_url": "https://example.test/d/",
+                "primary_core": { "name": "primary-core", "version": "v1.14.0", "licence": "GPL-3.0-or-later",
+                    "source": "https://example.test/s",
+                    "amd64": { "file": "p-amd64", "sha256": "a".repeat(64) },
+                    "arm64": { "file": "p-arm64", "sha256": "b".repeat(64) } },
+                "amneziawg": { "name": "amneziawg-go", "version": "v3.1.0", "licence": "MIT",
+                    "source": "https://example.test/a",
+                    "amd64": { "file": "a-amd64", "sha256": "c".repeat(64) },
+                    "arm64": { "file": "a-arm64", "sha256": "d".repeat(64) } },
+            })
+            .to_string(),
+        )
+        .unwrap()
+    }
+
+    fn serving() -> (DnetService, Arc<MemoryStateFile>) {
+        let (svc, file) = configurable_service();
+        (
+            svc.with_server_setup(crate::server_setup::ServerSetup::new(Some(setup_pins()))),
+            file,
+        )
+    }
+
+    fn prepare_amd64() -> Request {
+        Request::PrepareServer {
+            arch: dnet_ipc::server_setup::ServerKind::Amd64,
+        }
+    }
+
+    /// What the script would print, read off the reply the way the server would.
+    fn printed(prepared: &dnet_ipc::server_setup::Prepared) -> String {
+        let client = prepared
+            .script
+            .lines()
+            .find_map(|l| l.strip_prefix("public_key="))
+            .unwrap();
+        let report = serde_json::json!({
+            "version": 2,
+            "session": crate::server_setup::session_printed_by(&prepared.script),
+            "amneziawg": { "server_public_key_hex": "d".repeat(64), "listen_port": 51820,
+                "client_address": "10.66.0.2", "prefix_len": 24, "client_public_key_hex": client },
+            "hysteria2": { "server_port": 44443, "server_name": crate::server_setup::DEFAULT_SITE,
+                "spki_sha256_hex": "e".repeat(64), "auth_password": "auth-secret-0123456789abcdef",
+                "obfs_password": "obfs-secret-0123456789abcdef", "cert_key_algorithm": "ecdsa-p256" },
+            "reality": { "server_port": 8443, "target_domain": crate::server_setup::DEFAULT_SITE,
+                "public_key": "jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0",
+                "short_id": "0123456789abcdef", "uuid": "bf000d23-0752-40b4-affe-68f7707a9661",
+                "flow": "xtls-rprx-vision" },
+            "cores": { "primary_core": { "version": "v1.14.0", "sha256": "a".repeat(64) },
+                "amneziawg": { "version": "v3.1.0", "sha256": "c".repeat(64) } },
+        });
+        format!("root@vm:~# sh setup.sh\nDNET-BOOTSTRAP-REPORT {report}\nroot@vm:~# ")
+    }
+
+    fn finish(label: &str, report: String) -> Request {
+        Request::FinishServer {
+            label: label.to_owned(),
+            host: "203.0.113.10".to_owned(),
+            report,
+        }
+    }
+
+    #[test]
+    fn t150_a_server_is_set_up_from_a_script_and_a_pasted_result() {
+        let (svc, _file) = serving();
+        let prepared =
+            dnet_ipc::server_setup::decode_prepared(&svc.dispatch(&prepare_amd64()).unwrap())
+                .unwrap();
+        assert!(prepared.script.starts_with("#!/bin/sh"));
+        assert_eq!(prepared.ports.len(), 3);
+
+        let reply = svc
+            .dispatch(&finish("my server", printed(&prepared)))
+            .unwrap();
+        let id: Value = serde_json::from_str(&reply).unwrap();
+        assert!(id["endpoint"].as_str().is_some(), "{reply}");
+
+        let endpoints: Value =
+            serde_json::from_str(&svc.dispatch(&Request::ListEndpoints).unwrap()).unwrap();
+        let list = endpoints["endpoints"].as_array().expect("a list");
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0]["label"], "my server");
+        // The result is used once: pasting it again finds nothing waiting.
+        assert!(svc.dispatch(&finish("again", printed(&prepared))).is_err());
+    }
+
+    #[test]
+    fn t150_a_failed_save_keeps_the_keys_so_the_person_can_choose_another_name() {
+        let (svc, _file) = serving();
+        let prepared =
+            dnet_ipc::server_setup::decode_prepared(&svc.dispatch(&prepare_amd64()).unwrap())
+                .unwrap();
+        svc.dispatch(&Request::AddEndpoint(Box::new(new_endpoint("taken"))))
+            .unwrap();
+        let text = printed(&prepared);
+        match svc.dispatch(&finish("taken", text.clone())) {
+            Err(IpcError::InvalidRequest { detail }) => {
+                assert!(detail.contains("label"), "{detail}")
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(svc.dispatch(&finish("another", text)).is_ok());
+    }
+
+    #[test]
+    fn t150_a_bad_result_is_refused_with_a_reason_that_repeats_nothing() {
+        let (svc, _file) = serving();
+        svc.dispatch(&prepare_amd64()).unwrap();
+        match svc.dispatch(&finish("x", "SENTINEL no report here".to_owned())) {
+            Err(IpcError::InvalidRequest { detail }) => {
+                assert!(!detail.contains("SENTINEL"), "{detail}");
+                assert!(detail.contains("no bootstrap report"), "{detail}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            serde_json::from_str::<Value>(&svc.dispatch(&Request::ListEndpoints).unwrap()).unwrap()
+                ["endpoints"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn t150_without_downloads_in_this_build_it_says_so() {
+        let (svc, _file) = configurable_service();
+        let svc = svc.with_server_setup(crate::server_setup::ServerSetup::new(None));
+        match svc.dispatch(&prepare_amd64()) {
+            Err(IpcError::InternalError { detail }) => {
+                assert!(detail.contains("not available"), "{detail}")
+            }
+            other => panic!("{other:?}"),
+        }
+        // And a service with no setup machinery at all.
+        let (svc, _file) = configurable_service();
+        assert!(svc.dispatch(&prepare_amd64()).is_err());
+    }
+
+    /// T105: Brutal turned on through the service is listed, saved, and off again on request.
+    #[test]
+    fn brutal_can_be_turned_on_and_off_through_the_service() {
+        let (svc, file) = configurable_service();
+        assert!(!brutal_listed(&svc));
+
+        assert_eq!(svc.dispatch(&enable_brutal()).unwrap(), APPLIED);
+        assert!(brutal_listed(&svc));
+        let saved = dnet_config::persist::decode(&file.bytes().unwrap()).unwrap();
+        let hy2 = saved
+            .profiles
+            .iter()
+            .find(|p| p.id.as_str() == "hy2-default")
+            .unwrap();
+        let (bandwidth, ack) = hy2.brutal.unwrap();
+        assert_eq!((bandwidth.up_mbps, bandwidth.down_mbps), (50, 200));
+        assert!(
+            ack.acknowledged_at_unix > 1_600_000_000,
+            "the service's clock"
+        );
+
+        let off = Request::DisableBrutal {
+            profile: ProfileId::new("hy2-default"),
+        };
+        assert_eq!(svc.dispatch(&off).unwrap(), APPLIED);
+        assert!(!brutal_listed(&svc));
+    }
+
+    #[test]
+    fn brutal_on_another_kind_of_profile_is_an_invalid_request_that_says_why() {
+        let (svc, file) = configurable_service();
+        let request = Request::EnableBrutal {
+            profile: ProfileId::new("awg-default"),
+            up_mbps: 50,
+            down_mbps: 200,
+            warning_revision: dnet_core::profile::BRUTAL_WARNING_REVISION,
+        };
+        match svc.dispatch(&request) {
+            Err(IpcError::InvalidRequest { detail }) => {
+                assert!(detail.contains("Hysteria 2"), "{detail}")
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(file.bytes().is_none());
+    }
+
     #[test]
     fn the_gates_still_come_before_a_configuration_change() {
         let (configurator, file) = memory_configurator();
@@ -1130,10 +1796,18 @@ mod tests {
                 endpoint: EndpointId::new(),
                 enabled: true,
             },
-            Request::AddRule,
-            Request::RemoveRule,
+            Request::AddRule {
+                matcher: dnet_core::rule::RuleMatcher::Domain("example.com".into()),
+                action: dnet_core::rule::RuleAction::Bypass,
+            },
+            Request::RemoveRule {
+                rule: dnet_core::ids::RuleId::new(),
+            },
             Request::SetProfileParams,
-            Request::EnableBrutal,
+            enable_brutal(),
+            Request::DisableBrutal {
+                profile: ProfileId::new("hy2-default"),
+            },
             Request::SetEncryptedDnsHandling { block: true },
             Request::ImportFeed(FeedImport::new(Some("{}".to_string()), None).unwrap()),
             Request::FetchFeed,
@@ -1263,6 +1937,7 @@ mod tests {
         use tokio_util::sync::CancellationToken;
 
         use super::*;
+        use crate::intent::{Intent, Remembered};
         use crate::orchestrator::{self, Effects, RaceOutcome, Timing};
 
         /// An endpoint that always works: the race picks Hysteria 2 and the tunnel comes up.
@@ -1408,6 +2083,273 @@ mod tests {
                 decode_stats(&svc.dispatch(&Request::GetStats).unwrap()).unwrap(),
                 StatsReply::NotConnected
             );
+        }
+
+        /// T147: a service whose remembered intent lives in `file`.
+        fn remembering(svc: DnetService, file: &Arc<MemoryStateFile>) -> DnetService {
+            svc.with_intent(Intent::new(Box::new(Arc::clone(file))))
+        }
+
+        fn remembered(file: &Arc<MemoryStateFile>) -> Remembered {
+            Intent::new(Box::new(Arc::clone(file))).load()
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn t147_a_connect_is_remembered_and_a_disconnect_forgets_it() {
+            let file = Arc::new(MemoryStateFile::default());
+            let svc = remembering(orchestrated_service(), &file);
+            svc.dispatch(&Request::Connect {
+                acknowledge_tier2: false,
+                profile: Some(ProfileId::new("hy2-default")),
+                endpoint: None,
+            })
+            .unwrap();
+            assert_eq!(
+                remembered(&file),
+                Remembered::On {
+                    profile: Some(ProfileId::new("hy2-default"))
+                }
+            );
+            until_status(&svc, ConnectionStatus::Connected).await;
+
+            svc.dispatch(&Request::Disconnect).unwrap();
+            assert_eq!(remembered(&file), Remembered::Off);
+            until_status(&svc, ConnectionStatus::Disconnected).await;
+        }
+
+        /// The person said off; that holds whether or not anything was connected at the time.
+        #[tokio::test(start_paused = true)]
+        async fn t147_a_disconnect_forgets_even_when_nothing_was_connected() {
+            let file = Arc::new(MemoryStateFile::default());
+            Intent::new(Box::new(Arc::clone(&file)))
+                .remember_on(None)
+                .unwrap();
+            let svc = remembering(orchestrated_service(), &file);
+            assert!(svc.dispatch(&Request::Disconnect).is_err());
+            assert_eq!(remembered(&file), Remembered::Off);
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn t147_a_refused_connect_is_not_remembered() {
+            let file = Arc::new(MemoryStateFile::default());
+            let svc = remembering(orchestrated_service(), &file);
+            assert!(svc
+                .dispatch(&Request::Connect {
+                    acknowledge_tier2: false,
+                    profile: None,
+                    endpoint: Some(EndpointId::new()),
+                })
+                .is_err());
+            assert_eq!(remembered(&file), Remembered::Off);
+
+            // Already connected: the second connect is refused as busy and changes nothing.
+            svc.dispatch(&connect_request()).unwrap();
+            until_status(&svc, ConnectionStatus::Connected).await;
+            assert!(svc
+                .dispatch(&Request::Connect {
+                    acknowledge_tier2: false,
+                    profile: Some(ProfileId::new("awg-default")),
+                    endpoint: None,
+                })
+                .is_err());
+            assert_eq!(remembered(&file), Remembered::On { profile: None });
+        }
+
+        /// After a reboot, an update or a crash, a service left on connects by itself, with the same
+        /// choice of profile.
+        #[tokio::test(start_paused = true)]
+        async fn t147_a_service_left_on_connects_by_itself_when_it_starts() {
+            let file = Arc::new(MemoryStateFile::default());
+            Intent::new(Box::new(Arc::clone(&file)))
+                .remember_on(Some(&ProfileId::new("hy2-default")))
+                .unwrap();
+            let svc = remembering(orchestrated_service(), &file);
+            assert_eq!(state_of(&svc).status, ConnectionStatus::Disconnected);
+
+            svc.resume_if_left_on();
+            until_status(&svc, ConnectionStatus::Connected).await;
+            assert_eq!(state_of(&svc).active_profile.unwrap().id, "hy2-default");
+            assert_eq!(
+                remembered(&file),
+                Remembered::On {
+                    profile: Some(ProfileId::new("hy2-default"))
+                }
+            );
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn t147_a_service_left_off_stays_off() {
+            let file = Arc::new(MemoryStateFile::default());
+            let svc = remembering(orchestrated_service(), &file);
+            svc.resume_if_left_on();
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            assert_eq!(state_of(&svc).status, ConnectionStatus::Disconnected);
+        }
+
+        /// A service that may not connect (a failed recovery, a refused configuration, no files) does not
+        /// try, and keeps what the person asked for, for the start that can.
+        #[tokio::test(start_paused = true)]
+        async fn t147_a_service_that_cannot_connect_keeps_the_intent_for_later() {
+            let file = Arc::new(MemoryStateFile::default());
+            Intent::new(Box::new(Arc::clone(&file)))
+                .remember_on(None)
+                .unwrap();
+            let svc = remembering(service(), &file);
+            svc.resume_if_left_on();
+            assert_eq!(remembered(&file), Remembered::On { profile: None });
+        }
+
+        /// Effects whose tunnel cannot start during the first `failures` connect attempts (one race each),
+        /// then as `Quick`.
+        struct Flaky {
+            failures: usize,
+            checks: Arc<std::sync::atomic::AtomicUsize>,
+        }
+
+        impl Effects for Flaky {
+            fn environment(&self) -> Environment {
+                Quick.environment()
+            }
+            async fn reach(&self, endpoints: &[Endpoint]) -> Vec<Reach> {
+                Quick.reach(endpoints).await
+            }
+            async fn race(
+                &self,
+                profiles: Vec<ProfileId>,
+                endpoint: EndpointId,
+                cancel: CancellationToken,
+            ) -> Option<RaceOutcome> {
+                self.checks
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Quick.race(profiles, endpoint, cancel).await
+            }
+            async fn start_tunnel(&self, p: &ProfileId, e: EndpointId) -> Result<(), FailureCause> {
+                if self.checks.load(std::sync::atomic::Ordering::SeqCst) <= self.failures {
+                    Err(FailureCause::AllProfilesBlocked)
+                } else {
+                    Quick.start_tunnel(p, e).await
+                }
+            }
+            async fn stop_tunnel(&self) {}
+            async fn live_check(&self, p: &ProfileId) -> LiveCheck {
+                Quick.live_check(p).await
+            }
+            type Watch = crate::netwatch::NoWatch;
+            fn network_watch(&self, _: &ProfileId, _: EndpointId) -> Option<Self::Watch> {
+                None
+            }
+            async fn probe_endpoint(&self, e: EndpointId) -> ProbeOutcome {
+                Quick.probe_endpoint(e).await
+            }
+        }
+
+        /// A service over `Flaky`, and the count of connect attempts.
+        fn flaky_service(
+            failures: usize,
+        ) -> (Arc<DnetService>, Arc<std::sync::atomic::AtomicUsize>) {
+            let service = service();
+            let endpoint = Endpoint::new(
+                EndpointId::new(),
+                "home",
+                EndpointAddress::new("203.0.113.10", 51820).unwrap(),
+                EndpointOrigin::Manual,
+                CredentialRef::new("endpoint-home"),
+            )
+            .unwrap();
+            let checks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let engine = Engine::new(DomainState::seeded().profiles().to_vec(), vec![endpoint]);
+            let handle = orchestrator::spawn(
+                engine,
+                Arc::new(Flaky {
+                    failures,
+                    checks: Arc::clone(&checks),
+                }),
+                service.events().clone(),
+                Timing::default(),
+            );
+            (Arc::new(service.with_orchestrator(handle)), checks)
+        }
+
+        fn keep_trying(svc: &Arc<DnetService>) -> tokio::task::JoinHandle<()> {
+            let weak = Arc::downgrade(svc) as std::sync::Weak<dyn crate::keep_trying::Retry>;
+            tokio::spawn(crate::keep_trying::run(
+                weak,
+                None,
+                crate::keep_trying::Pace::default(),
+            ))
+        }
+
+        /// T148: left on at start-up with no network yet (two failed attempts), it connects by itself.
+        #[tokio::test(start_paused = true)]
+        async fn t148_a_service_left_on_keeps_trying_until_it_connects() {
+            let (svc, checks) = flaky_service(2);
+            let svc = Arc::new(
+                Arc::into_inner(svc)
+                    .unwrap()
+                    .with_intent(Intent::new(Box::new(MemoryStateFile::default()))),
+            );
+            svc.dispatch(&connect_request()).unwrap();
+            until_status(&svc, ConnectionStatus::Failed).await;
+            let task = keep_trying(&svc);
+            until_status(&svc, ConnectionStatus::Connected).await;
+            assert_eq!(checks.load(std::sync::atomic::Ordering::SeqCst), 3);
+            task.abort();
+        }
+
+        /// The person turned it off: no retry follows, however long it waits.
+        #[tokio::test(start_paused = true)]
+        async fn t148_a_disconnect_stops_the_retries() {
+            use std::sync::atomic::Ordering;
+            let (svc, checks) = flaky_service(usize::MAX);
+            let svc = Arc::new(
+                Arc::into_inner(svc)
+                    .unwrap()
+                    .with_intent(Intent::new(Box::new(MemoryStateFile::default()))),
+            );
+            svc.dispatch(&connect_request()).unwrap();
+            until_status(&svc, ConnectionStatus::Failed).await;
+            let task = keep_trying(&svc);
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            let tried = checks.load(Ordering::SeqCst);
+            assert!(tried >= 2, "it kept trying while left on: {tried}");
+
+            svc.dispatch(&Request::Disconnect).unwrap();
+            until_status(&svc, ConnectionStatus::Disconnected).await;
+            let at_disconnect = checks.load(Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            assert_eq!(checks.load(Ordering::SeqCst), at_disconnect);
+            assert_eq!(state_of(&svc).status, ConnectionStatus::Disconnected);
+            task.abort();
+        }
+
+        /// Without a remembered intent (never turned on through this service), a failure stays a failure.
+        #[tokio::test(start_paused = true)]
+        async fn t148_nothing_is_retried_unless_left_on() {
+            use std::sync::atomic::Ordering;
+            let (svc, checks) = flaky_service(usize::MAX);
+            svc.dispatch(&connect_request()).unwrap();
+            until_status(&svc, ConnectionStatus::Failed).await;
+            let task = keep_trying(&svc);
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            assert_eq!(checks.load(Ordering::SeqCst), 1);
+            task.abort();
+        }
+
+        /// Connected, it is only looked at.
+        #[tokio::test(start_paused = true)]
+        async fn t148_a_healthy_connection_is_left_alone() {
+            use crate::keep_trying::{Retry, Tick};
+            let (svc, checks) = flaky_service(0);
+            let svc = Arc::new(
+                Arc::into_inner(svc)
+                    .unwrap()
+                    .with_intent(Intent::new(Box::new(MemoryStateFile::default()))),
+            );
+            svc.dispatch(&connect_request()).unwrap();
+            assert_eq!(svc.retry_if_left_on(), Tick::InProgress);
+            until_status(&svc, ConnectionStatus::Connected).await;
+            assert_eq!(svc.retry_if_left_on(), Tick::Healthy);
+            assert_eq!(checks.load(std::sync::atomic::Ordering::SeqCst), 1);
         }
 
         #[tokio::test(start_paused = true)]
@@ -1566,6 +2508,11 @@ mod tests {
                     enabled: false,
                 },
                 Request::SetEncryptedDnsHandling { block: false },
+                enable_brutal(),
+                Request::AddRule {
+                    matcher: dnet_core::rule::RuleMatcher::Domain("example.com".into()),
+                    action: dnet_core::rule::RuleAction::Tunnel,
+                },
             ];
 
             // Being made, then up: both refuse.
@@ -1576,7 +2523,9 @@ mod tests {
                             assert!(
                                 detail.contains("disconnect"),
                                 "{phase} {request:?}: {detail}"
-                            )
+                            );
+                            // Shown to the person as it is: one sentence, no run of spaces.
+                            assert!(!detail.contains("  "), "{detail:?}");
                         }
                         other => panic!("{phase} {request:?}: {other:?}"),
                     }
@@ -1705,5 +2654,279 @@ mod tests {
             "an endpoint that does not exist is not removed"
         );
         assert!(!refused["reason"].as_str().unwrap().is_empty());
+    }
+
+    // ------------------------------------------------------------------ T160: held changes
+
+    /// A service built the way the real one is (changes that redirect traffic are held), with a
+    /// store to save into.
+    fn holding_configurable_service() -> (DnetService, Arc<MemoryStateFile>) {
+        let (configurator, file) = memory_configurator();
+        (holding_service().with_configurator(configurator), file)
+    }
+
+    /// The id a held change waits under, from the refusal that says so.
+    fn held_id(reply: Result<String, IpcError>) -> String {
+        match reply {
+            Err(IpcError::ApprovalRequired { id, .. }) => id,
+            other => panic!("expected the change to be held, got {other:?}"),
+        }
+    }
+
+    fn pending_ids(svc: &DnetService) -> Vec<String> {
+        json_of(svc.dispatch(&Request::ListPending))["pending"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["id"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    fn add_home() -> Request {
+        Request::AddEndpoint(Box::new(new_endpoint("home")))
+    }
+
+    #[test]
+    fn a_new_server_is_held_not_applied_and_the_person_is_told_what_waits() {
+        let (svc, file) = holding_configurable_service();
+        match svc.dispatch(&add_home()) {
+            Err(IpcError::ApprovalRequired { id, what }) => {
+                assert!(what.contains("home"), "{what}");
+                assert!(what.contains("Adding the server"), "{what}");
+                assert!(!id.is_empty());
+            }
+            other => panic!("expected the change to be held, got {other:?}"),
+        }
+        // Nothing was applied and nothing was saved.
+        let listed = json_of(svc.dispatch(&Request::ListEndpoints));
+        assert!(listed["endpoints"].as_array().unwrap().is_empty());
+        assert!(file.bytes().is_none(), "something was saved");
+        assert_eq!(pending_ids(&svc).len(), 1);
+    }
+
+    #[test]
+    fn approving_applies_exactly_the_held_change_once() {
+        let (svc, file) = holding_configurable_service();
+        let id = held_id(svc.dispatch(&add_home()));
+
+        let reply = json_of(svc.dispatch(&Request::ApproveChange { id: id.clone() }));
+        assert!(reply["endpoint"].is_string(), "{reply}");
+        let listed = json_of(svc.dispatch(&Request::ListEndpoints));
+        assert_eq!(listed["endpoints"][0]["label"], "home");
+        let saved = dnet_config::persist::decode(&file.bytes().expect("saved")).unwrap();
+        assert_eq!(saved.endpoints.len(), 1);
+        assert!(pending_ids(&svc).is_empty());
+
+        // The same approval again finds nothing: a change is applied once.
+        match svc.dispatch(&Request::ApproveChange { id }) {
+            Err(IpcError::InvalidRequest { detail }) => {
+                assert!(detail.contains("no change is waiting"), "{detail}")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_withdrawn_change_is_never_applied() {
+        let (svc, file) = holding_configurable_service();
+        let id = held_id(svc.dispatch(&add_home()));
+        assert_eq!(
+            svc.dispatch(&Request::RejectChange { id: id.clone() })
+                .unwrap(),
+            APPLIED
+        );
+        assert!(pending_ids(&svc).is_empty());
+        assert!(matches!(
+            svc.dispatch(&Request::ApproveChange { id }),
+            Err(IpcError::InvalidRequest { .. })
+        ));
+        assert!(file.bytes().is_none());
+        let listed = json_of(svc.dispatch(&Request::ListEndpoints));
+        assert!(listed["endpoints"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn asking_again_for_the_same_change_does_not_add_a_second_one() {
+        let (svc, _file) = holding_configurable_service();
+        let first = held_id(svc.dispatch(&add_home()));
+        let again = held_id(svc.dispatch(&add_home()));
+        assert_eq!(first, again);
+        assert_eq!(pending_ids(&svc).len(), 1);
+    }
+
+    #[test]
+    fn changes_that_can_only_tighten_things_are_applied_without_waiting() {
+        let (svc, _file) = holding_configurable_service();
+        let id = held_id(svc.dispatch(&add_home()));
+        let added = json_of(svc.dispatch(&Request::ApproveChange { id }));
+        let endpoint = id_in(&added);
+
+        // Turning a server off, removing one, and tunnelling more are not held ...
+        assert_eq!(
+            svc.dispatch(&Request::SetEndpointEnabled {
+                endpoint,
+                enabled: false,
+            })
+            .unwrap(),
+            APPLIED
+        );
+        json_of(svc.dispatch(&Request::AddRule {
+            matcher: RuleMatcher::Domain("example.com".into()),
+            action: RuleAction::Tunnel,
+        }));
+        assert_eq!(
+            svc.dispatch(&Request::RemoveEndpoint { endpoint }).unwrap(),
+            APPLIED
+        );
+        // ... and none of them left anything waiting.
+        assert!(pending_ids(&svc).is_empty());
+    }
+
+    #[test]
+    fn turning_a_server_on_waits_and_names_it() {
+        let (svc, _file) = holding_configurable_service();
+        let id = held_id(svc.dispatch(&add_home()));
+        let endpoint = id_in(&json_of(svc.dispatch(&Request::ApproveChange { id })));
+        svc.dispatch(&Request::SetEndpointEnabled {
+            endpoint,
+            enabled: false,
+        })
+        .unwrap();
+
+        let turn_on = Request::SetEndpointEnabled {
+            endpoint,
+            enabled: true,
+        };
+        match svc.dispatch(&turn_on) {
+            Err(IpcError::ApprovalRequired { id, what }) => {
+                assert!(what.contains("Turning on"), "{what}");
+                assert!(what.contains("home"), "{what}");
+                json_of(svc.dispatch(&Request::ApproveChange { id }));
+            }
+            other => panic!("{other:?}"),
+        }
+        let listed = json_of(svc.dispatch(&Request::ListEndpoints));
+        assert_eq!(listed["endpoints"][0]["enabled"], true);
+    }
+
+    #[test]
+    fn turning_on_a_server_that_does_not_exist_is_not_held() {
+        let (svc, _file) = holding_configurable_service();
+        let reply = svc.dispatch(&Request::SetEndpointEnabled {
+            endpoint: EndpointId::new(),
+            enabled: true,
+        });
+        // The store says why; no prompt is raised for something that cannot happen.
+        assert!(
+            !matches!(reply, Err(IpcError::ApprovalRequired { .. })),
+            "{reply:?}"
+        );
+        assert!(pending_ids(&svc).is_empty());
+    }
+
+    #[test]
+    fn a_rule_that_goes_around_the_tunnel_waits_and_one_that_does_not_does_not() {
+        let (svc, _file) = holding_configurable_service();
+        let around = Request::AddRule {
+            matcher: RuleMatcher::Domain("example.com".into()),
+            action: RuleAction::Bypass,
+        };
+        match svc.dispatch(&around) {
+            Err(IpcError::ApprovalRequired { what, .. }) => {
+                assert!(what.contains("example.com"), "{what}");
+                assert!(what.contains("around the tunnel"), "{what}");
+            }
+            other => panic!("{other:?}"),
+        }
+        let rules_before = json_of(svc.dispatch(&Request::ListRules));
+        assert!(!rules_before.to_string().contains("example.com"));
+        // The control: the same domain through the tunnel is applied at once.
+        json_of(svc.dispatch(&Request::AddRule {
+            matcher: RuleMatcher::Domain("example.com".into()),
+            action: RuleAction::Tunnel,
+        }));
+        assert!(json_of(svc.dispatch(&Request::ListRules))
+            .to_string()
+            .contains("example.com"));
+    }
+
+    #[test]
+    fn an_imported_feed_and_a_server_from_the_guide_wait_too() {
+        let (svc, _file) = holding_configurable_service();
+        let import = Request::ImportFeed(FeedImport::new(Some("{}".to_string()), None).unwrap());
+        match svc.dispatch(&import) {
+            Err(IpcError::ApprovalRequired { what, .. }) => {
+                assert!(what.contains("Importing"), "{what}")
+            }
+            other => panic!("{other:?}"),
+        }
+        let finish = Request::FinishServer {
+            label: "from the guide".into(),
+            host: "203.0.113.9".into(),
+            report: "{}".into(),
+        };
+        match svc.dispatch(&finish) {
+            Err(IpcError::ApprovalRequired { what, .. }) => {
+                assert!(what.contains("from the guide"), "{what}");
+                assert!(what.contains("203.0.113.9"), "{what}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A change that fails when approved stays held, so the person need not ask for it again.
+    #[test]
+    fn a_change_that_fails_when_approved_stays_waiting() {
+        let (svc, _file) = holding_configurable_service();
+        let first = held_id(svc.dispatch(&add_home()));
+        json_of(svc.dispatch(&Request::ApproveChange { id: first }));
+        // Another server under the same name cannot be added; it is held all the same, and approving
+        // it fails with the store's reason.
+        let other = Request::AddEndpoint(Box::new(new_endpoint("home")));
+        let second = held_id(svc.dispatch(&other));
+        assert!(matches!(
+            svc.dispatch(&Request::ApproveChange { id: second.clone() }),
+            Err(IpcError::InvalidRequest { .. })
+        ));
+        assert_eq!(pending_ids(&svc), [second]);
+    }
+
+    #[test]
+    fn only_so_many_changes_wait() {
+        let (svc, _file) = holding_configurable_service();
+        for n in 0..crate::approval::MAX_HELD {
+            held_id(
+                svc.dispatch(&Request::AddEndpoint(Box::new(new_endpoint(&format!(
+                    "server{n}"
+                ))))),
+            );
+        }
+        match svc.dispatch(&Request::AddEndpoint(Box::new(new_endpoint(
+            "one-too-many",
+        )))) {
+            Err(IpcError::InvalidRequest { detail }) => {
+                assert!(detail.contains("too many changes"), "{detail}")
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(pending_ids(&svc).len(), crate::approval::MAX_HELD);
+    }
+
+    #[test]
+    fn what_waits_is_listed_without_the_credentials_it_would_install() {
+        let (svc, _file) = holding_configurable_service();
+        held_id(svc.dispatch(&add_home()));
+        let text = svc.dispatch(&Request::ListPending).unwrap();
+        for word in ["credentials", "password", "private", "secret"] {
+            assert!(!text.to_lowercase().contains(word), "{word} in {text}");
+        }
+        assert!(text.contains("home"));
+    }
+
+    #[test]
+    fn a_label_with_control_characters_is_cleaned_before_it_reaches_a_prompt() {
+        assert_eq!(shown("ho\u{7}me\nx"), "homex");
+        let long = "a".repeat(200);
+        assert!(shown(&long).chars().count() <= 67);
     }
 }

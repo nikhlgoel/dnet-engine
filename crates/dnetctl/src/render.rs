@@ -197,6 +197,49 @@ pub fn profiles(reply: &Value) -> Result<String, String> {
     ))
 }
 
+/// The `ListRules` answer as a table, in the order the rules apply.
+pub fn rules(reply: &Value) -> Result<String, String> {
+    let items = list(reply, "rules")?;
+    let mut rows: Vec<(u64, Vec<String>)> = Vec::with_capacity(items.len());
+    for r in items {
+        let precedence = r
+            .get("precedence")
+            .and_then(Value::as_u64)
+            .ok_or("a rule has no precedence")?;
+        let value = cell(r, "value");
+        let what = match r.get("kind").and_then(Value::as_str) {
+            Some("domain") => value,
+            Some("domain_suffix") => format!("*.{value}"),
+            Some("ip_cidr") => value,
+            Some("application") => format!("program {value}"),
+            Some("dns_port") => "port 53".to_owned(),
+            Some("encrypted_dns_port") => format!("port {value}"),
+            _ => "?".to_owned(),
+        };
+        let builtin = r.get("builtin").and_then(Value::as_bool) == Some(true);
+        rows.push((
+            precedence,
+            vec![
+                precedence.to_string(),
+                what,
+                cell(r, "action"),
+                cell(r, "reliability"),
+                if builtin {
+                    "built-in".to_owned()
+                } else {
+                    cell(r, "id")
+                },
+            ],
+        ));
+    }
+    rows.sort_by_key(|(p, _)| *p);
+    let rows: Vec<Vec<String>> = rows.into_iter().map(|(_, row)| row).collect();
+    Ok(table(
+        &["ORDER", "MATCHES", "ACTION", "RELIABILITY", "RULE"],
+        &rows,
+    ))
+}
+
 /// The `ListEndpoints` answer as a table, or a sentence if there are none.
 pub fn endpoints(reply: &Value) -> Result<String, String> {
     let items = list(reply, "endpoints")?;
@@ -379,6 +422,53 @@ pub fn stats(reply: &StatsReply) -> String {
             .to_string(),
     );
     lines.join("\n")
+}
+
+/// The changes waiting for approval, one per line (T160). `now_ms` is the time to count the
+/// minutes left from; it is given so the text can be tested.
+pub fn pending(value: &Value, now_ms: u64) -> Result<String, String> {
+    let waiting = value
+        .get("pending")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "the list of waiting changes is missing".to_string())?;
+    if waiting.is_empty() {
+        return Ok("Nothing is waiting for approval.".to_string());
+    }
+    let mut lines = vec![format!(
+        "{} {} waiting for approval:",
+        waiting.len(),
+        if waiting.len() == 1 {
+            "change"
+        } else {
+            "changes"
+        }
+    )];
+    for item in waiting {
+        let id = item
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "a waiting change has no id".to_string())?;
+        let what = item
+            .get("what")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "a waiting change does not say what it does".to_string())?;
+        let expires = item
+            .get("expires_unix_ms")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "a waiting change has no deadline".to_string())?;
+        let minutes = expires.saturating_sub(now_ms).div_ceil(60_000);
+        lines.push(format!(
+            "  {}  {}  (dropped in {} min)",
+            plain(id),
+            plain(what),
+            minutes
+        ));
+    }
+    lines.push(
+        "Approve one with 'dnetctl approve <id>', or drop it with 'dnetctl reject <id>'."
+            .to_string(),
+    );
+    Ok(lines.join("\n"))
 }
 
 #[cfg(test)]

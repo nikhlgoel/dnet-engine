@@ -67,6 +67,7 @@ pub fn credentials() -> EndpointCredentials {
             },
         }),
         measure_origin: None,
+        session: None,
     }
 }
 

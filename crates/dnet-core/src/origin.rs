@@ -4,6 +4,19 @@
 //! the origin its probes and live checks fetch from, and the configuration crate must be able to
 //! refuse a bad one when it is stored, with the same rule the prober applies when it is used.
 
+/// The addresses a server's own measurement origins have **inside** a tunnel: the AmneziaWG tunnel's server
+/// address, and the session's (ADR-0008). They are private addresses that exist nowhere else, so a fetch from
+/// one proves the tunnel carries traffic, but only if it is sent into the tunnel: the built-in rules send
+/// every private range around it, so each of these has a rule of its own ahead of that range.
+/// `dnet-provision` builds its script and its origins from these same two values.
+pub const AMNEZIAWG_ORIGIN_HOST: &str = "10.66.0.1";
+/// Not the server's own session address (10.9.0.1): that address belongs to the server's network stack, which
+/// would answer a connection to it itself, and the connection would never reach the exit's rules that map the
+/// origin to its loopback service. Found by running the composed session (T158), refused with "connection
+/// refused" from inside the session.
+pub const SESSION_ORIGIN_HOST: &str = "10.9.0.254";
+pub const TUNNEL_ORIGIN_HOSTS: [&str; 2] = [AMNEZIAWG_ORIGIN_HOST, SESSION_ORIGIN_HOST];
+
 /// The known origin a probe fetches from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Origin {
