@@ -32,7 +32,7 @@ The privilege boundary lives here. `dnet-tray` is unprivileged; `dnetd` is Local
 
 | Class | Requests | Authorization |
 |---|---|---|
-| **Read-only** | `GetVersion`, `GetState`, `GetSession`, `GetPaths`, `GetStats`, `ListEndpoints`, `ListProfiles`, `ListRules`, `GetDiagnostics`, `ListPending` | Authenticated caller |
+| **Read-only** | `GetVersion`, `GetState`, `GetSession`, `GetPaths`, `GetStats`, `GetComponents`, `ListEndpoints`, `ListProfiles`, `ListRules`, `GetDiagnostics`, `ListPending` | Authenticated caller |
 | **Mutating** | `Connect`, `Disconnect`, `AddEndpoint`, `RemoveEndpoint`, `SetEndpointEnabled`, `AddRule`, `RemoveRule`, `SetProfileParams`, `EnableBrutal`, `DisableBrutal`, `SetEncryptedDnsHandling`, `StartProvisioning`, `CancelProvisioning`, `RejectChange` | Interactive console user |
 | **Approval** | `ApproveChange` | An **elevated** client in the console session (any account: a standard user who types an administrator's credentials into the Windows prompt runs the approver as that administrator) |
 | **Stream** | `Subscribe` | Authenticated caller |
@@ -187,6 +187,38 @@ Both fields `null` means "choose for me" — the single-control path (FR-036).
   connected, the service connects again on its own with the same selection (backing off from 15 s to
   5 min, sooner on a network change). Clients see it as an ordinary connect on the `Subscribe`
   stream; `Disconnect` ends it.
+
+### `GetComponents → ComponentsReply` (T170, IPC-28)
+
+Every part of the connection with its state and why (ADR-0008 section 3.6): each network, the connection, the endpoint
+carrying it, the routing decision and a sign-in page in the way. Read-only and **additive** (no version bump; a service
+that predates it answers `InvalidRequest` "unknown request", which a client shows as "this service cannot say").
+
+```jsonc
+{ "as_of_unix_ms": 1730000000000,
+  "overall": "Unknown | Off | Starting | Ok | Degraded | Blocked | Failed",   // the worst part (order in dnet_core::registry)
+  "components": [ { "kind": "NetworkPath | CarrierLeaf | Session | Endpoint | CoreProcess | Adapter | Routes | DnsHandling | Guard | CaptivePortal",
+                    "id": "interface-7",            // opaque, 1 to 64 characters
+                    "state": "Unknown | Off | Starting | Ok | Degraded | Blocked | Failed",
+                    "reason": "Wi-Fi: carrying the connection, but lossy or slow",   // the part's own words, never cut, at most 512 characters
+                    "changed_ago_ms": 30000,        // how long before as_of the state last changed (an age, not a clock)
+                    "latency_ms": 95 | null, "loss_permille": 34 | null, "restarts": 2 | null } ] }   // at most 128 components
+```
+
+- **Nothing here names a person's things.** No endpoint label or address, no network name, no credential: ids are opaque,
+  and the service builds each reason from its own fixed words and `dnet_core::failure::explain` titles.
+- **A part with no facts is absent, not fine.** Today the service reports networks, the connection, the endpoint, the
+  routing decision and the sign-in page; the transport processes, the adapter, name-server handling, the guard and each
+  carrier are not reported yet, and a client must not read their absence as healthy. A network nobody has measured is `Unknown`.
+- **The routing reading is a decision.** It says so in its words: nothing at the operating-system level enforces it yet.
+- **Strict, as every client-side decoder here:** an unknown kind or state, a duplicate part, a number out of range, a reason
+  over the bound or a count over 128 is refused; hostile characters are removed on both ends; nothing is cut.
+- **The summary is checked against the parts.** `overall` is computed by the service from the parts it writes (the same
+  `dnet_core::registry::roll_up` a client can run), and a decoder refuses a reply whose `overall` differs: Ok over a Failed part,
+  or Ok over no parts, contradicts itself. A part the decoder would refuse (an id empty once cleaned or too long, a reason too
+  long) is left out by the service, so one odd part cannot make a client refuse the whole reply.
+- **Age is counted from the first time a reader saw the state** (the service records readings when asked). Recording on every
+  state change, so the age is the true moment, is the next step of T170.
 
 ### Setting up the person's own server (T150, IPC-26)
 
@@ -494,3 +526,4 @@ defect.
 | IPC-23 | `ImportFeed` carries the keys document, the feed, or both, each within the size cap, and nothing else; an unknown field is refused without being repeated. |
 | IPC-15 | `GetVersion` is answered by the dispatch itself for any authenticated caller, never reaches the service, and tells an unauthenticated caller nothing; the reply has exactly the contracted keys; a client refuses a reply that is malformed, out of range, or from a service that predates the request. |
 | IPC-27 | The three new requests have the classes the design gives them; the console user **without** elevation cannot approve and the service is never asked; an elevated client in the console session can, whatever its account; an elevated client in another session cannot; withdrawing and listing need no elevation; ids that are not short plain names, and any extra field, are refused; the held reply names what waits, the change id and the command that approves it. (daemon) a held change is not applied or saved, approving applies exactly it once, a withdrawn one never applies, the same change twice is one change, tightening changes are not held, at most eight wait, and the list shows no credential. |
+| IPC-28 | `GetComponents` is Read-only and round-trips (every request does); the reply round-trips and an age never goes negative; hostile characters are removed on both ends and a reason is never cut; an unknown kind or state, an empty or over-long id, an over-long reason, a negative age, a loss above 100%, a restart count out of range, a duplicate part and more than 128 parts are each refused; the largest possible reply is far below a frame. (daemon) the reply is one a client can read; nothing connected reads as Off; asking again changes nothing; a state that holds keeps its age and a state that changes restarts it; no endpoint label and no network name reaches a reading; no reason the service can write is longer than a client accepts. (`dnetctl`) the parts are shown with state, age and reason, `--json` is the service's own answer, an old service is told apart from an empty answer, and an unreadable answer is not shown. |
