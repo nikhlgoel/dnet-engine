@@ -982,6 +982,10 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
 
 **Checkpoint**: Feature complete.
   > **2026-10-26 (not committed): runbook written, not run** (`docs/owner-gates.md`). The screen-reader half (Narrator and NVDA) can run now against the built window; the stranger half waits for T107 and a real provider.
+  > **Found before the pass, 2026-11-03, fixed test first:** in a window narrower than 760 px the dock shows only the icon of each section it is not on, and hid the
+  > words with `display: none`, which also took the link's name away, so a screen reader would have read five unnamed links. Each link now carries its name
+  > (`aria-label`); a component test hides the words and asks for every link by name (red before, green after), and a browser check at the window's minimum
+  > width (560 px) found the links by name and no sideways scroll in Servers, Rules or the guide. jsdom does not run container queries, which is why axe never saw it.
 
 ---
 

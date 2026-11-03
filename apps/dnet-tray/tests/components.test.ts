@@ -122,6 +122,19 @@ describe('every view', () => {
     });
   }
 
+  /** In a narrow window the dock shows only the icon of each section it is not on (`Dock.svelte`, a container
+   * query jsdom does not run). The words are hidden then, so each link must keep its name without them. */
+  it('the dock’s links keep their names when their words are hidden in a narrow window', async () => {
+    mount();
+    await screen.findByRole('switch');
+    const nav = screen.getByRole('navigation');
+    for (const words of nav.querySelectorAll<HTMLElement>('a .label')) words.style.display = 'none';
+    for (const name of ['Status', 'Servers', 'Rules', 'Activity', 'Settings']) {
+      expect(within(nav).getByRole('link', { name })).toBeTruthy();
+    }
+    expect(await violations()).toEqual([]);
+  });
+
   /** FR-033, Principle VI: what the obfuscation hides, and what it does not, said where a person looks for it. */
   it('About says the tunnel is not hidden, nor how much is sent or where it goes', async () => {
     mount();
