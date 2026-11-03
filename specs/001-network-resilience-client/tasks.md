@@ -1797,8 +1797,9 @@ own, made by DNet Engine's wizard on Oracle Cloud Always Free (or any Linux serv
   > Left as noted, by choice: a warning is logged for every part dropped from a full Registry on each request (a client cannot cause a full Registry; only over 128 real interfaces could); and a read records what it saw, so nothing security-relevant may ever consume the Tracker.
   > **Step 3 built 2026-11-03** (contract `IPC-28`, `ipc-protocol.md`): `Request::GetComponents` (additive, read-only), `dnet_ipc::componentview` (encode, and a strict decoder: unknown kind or state, duplicates, ranges, bounds and hostile text; 10 tests,
   > five mutations each caught), `dnetd::components::Tracker` (one Registry and the clock; answers the request; 4 more tests), the handler in `service_impl.rs` (2 tests), and `dnetctl components` (4 tests, `--json`, an old service told apart from an empty answer).
-  > The renderer shows a reason whole. **Known limit:** a part's age counts from the first time anyone asked, because the service records readings when asked. **Open, in order:** (1) record readings on every state or path change, so the age is the true moment, and add
-  > the transport processes, adapter and DNS where the service has the facts; (2) a golden file for the window and `dnet-view` (the window's map); (3) the log classifier for the two benign lines per switch. Unblocks T165's display.
+  > The renderer shows a reason whole. **Step 4 done 2026-11-03 (test first):** the service records readings itself once a second (`keep_components_current`, started where both the console and the Windows service are built, holding the service weakly so it ends with it),
+  > so a part's age is the true moment to within a second and not "when someone first asked"; three tests (age counts from the true moment, the control without the task, the task ends with the service), two mutations caught. **Open, in order:** (1) the transport
+  > processes, the adapter and DNS where the service has the facts; (2) a golden file for the window and `dnet-view` (the window's map); (3) the log classifier for the two benign lines per switch. Unblocks T165's display.
 
 ## Dependencies
 
