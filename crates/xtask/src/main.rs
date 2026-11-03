@@ -13,6 +13,7 @@ mod import_harness;
 mod lint_branding;
 mod pins;
 mod server_cores;
+mod site_facts;
 mod stage_installer;
 mod verify_vendor;
 

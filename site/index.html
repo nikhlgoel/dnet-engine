@@ -66,9 +66,9 @@
 
       <dl class="facts">
         <div><dt>Licence</dt><dd>GPL-3.0-or-later</dd></div>
-        <div><dt>Platform</dt><dd>Windows 10 or later, 64-bit</dd></div>
+        <div><dt>Platform</dt><dd>Windows 10 (version 1809) or later, 64-bit</dd></div>
         <div><dt>Server</dt><dd>Yours. None is provided.</dd></div>
-        <div><dt>Status</dt><dd>Early. No installer yet.</dd></div>
+        <div><dt>Status</dt><dd>Early. Installer written, not yet run.</dd></div>
       </dl>
     </section>
 
@@ -137,67 +137,124 @@
       </details>
     </section>
 
-    <section class="wrap rows" aria-labelledby="h-limits">
+    <section class="wrap limits" aria-labelledby="h-limits">
       <h2 id="h-limits">Known limits</h2>
-      <p class="hint">Things it cannot promise yet.</p>
-      <details>
-        <summary><span class="t">The kill switch is not a guarantee</span><span class="h">A stopped service is not a promise.</span></summary>
-        <p>The service refuses to send traffic unprotected, but nothing at the operating-system level enforces that yet. A
-          crash or a stopped service does not guarantee that nothing leaves the machine.</p>
-      </details>
-      <details>
-        <summary><span class="t">Rules by program are best-effort</span><span class="h">Rules by destination are reliable.</span></summary>
-        <p>A rule by destination name or address is reliable. A rule by program depends on spotting the program as it
-          connects, which can miss short-lived connections.</p>
-      </details>
-      <details>
-        <summary><span class="t">Switching networks can drop open connections</span><span class="h">The next ones work.</span></summary>
-        <p>Today every method is treated as one that drops open transfers when it switches. A method is only called better
-          after a recorded measurement says it survives.</p>
-      </details>
+      <p class="hint">Three things it cannot promise yet. For each: why, what is being done, and where it stands.</p>
+      <ol class="limit-list">
+        <li class="limit" data-state="not-built">
+          <h3>The kill switch is not a guarantee</h3>
+          <p class="state"><span class="pill pill-wait">Not built yet</span></p>
+          <dl>
+            <div><dt>Why</dt><dd>The service refuses to send traffic unprotected, but nothing at the operating-system level enforces
+              that. A crash or a stopped service does not guarantee that nothing leaves the machine.</dd></div>
+            <div><dt>Being done</dt><dd>A guard made of firewall filters that outlive the service is designed (ADR-0008, task T161).
+              It changes how the machine&rsquo;s network behaves, so it waits for the owner&rsquo;s approval and for five yes-or-no checks in a lab.</dd></div>
+            <div><dt>Where it stands</dt><dd>Designed. Not built.</dd></div>
+          </dl>
+        </li>
+        <li class="limit" data-state="built">
+          <h3>Rules by program are best-effort</h3>
+          <p class="state"><span class="pill pill-part">Built, not connected</span></p>
+          <dl>
+            <div><dt>Why</dt><dd>A rule by destination name or address is reliable. A rule by program depends on spotting the program as
+              it connects, which can miss short-lived connections.</dd></div>
+            <div><dt>Being done</dt><dd>The part that watches connections is built and tested, but not yet connected to the service (ADR-0001).
+              The window labels these rules best-effort until it is.</dd></div>
+            <div><dt>Where it stands</dt><dd>Built and tested; not yet connected to the service.</dd></div>
+          </dl>
+        </li>
+        <li class="limit" data-state="unmeasured">
+          <h3>Switching networks can drop open connections</h3>
+          <p class="state"><span class="pill pill-wait">Not yet measured</span></p>
+          <dl>
+            <div><dt>Why</dt><dd>Today every method is treated as one that drops open transfers when it switches. A method is only called
+              better after a recorded measurement says it survives, never because of its name.</dd></div>
+            <div><dt>Being done</dt><dd>The switch itself is proven on a single computer (tasks T157 and T169). The measurement on two real
+              networks is a lab step that needs a person; its result is then a data file, not a code change.</dd></div>
+            <div><dt>Where it stands</dt><dd>No method has yet been measured to keep an open transfer alive.</dd></div>
+          </dl>
+        </li>
+      </ol>
     </section>
 
-    <section class="wrap rows" aria-labelledby="h-status">
+    <section class="wrap status" aria-labelledby="h-status">
       <h2 id="h-status">Where it stands</h2>
-      <p class="hint">Early. The engine runs in a simulated network and a Windows lab. It has not been used on a real network,
-        and there is no installer yet. Checked 2026-11-03.</p>
-      <details>
-        <summary><span class="t">Part by part</span><span class="h">What works, what is built, what is not.</span></summary>
-        <div class="table-wrap" tabindex="0" role="region" aria-label="Status by part">
-          <table>
-            <thead><tr><th scope="col">Part</th><th scope="col">State</th></tr></thead>
-            <tbody>
-              <tr><td>Background service: three methods, two supervised transport programs, restores network settings</td><td>Works in a simulated network and a Windows lab</td></tr>
-              <tr><td>Choosing a method by measurement; recovery when one is blocked</td><td>Works</td></tr>
-              <tr><td>Following the network as it changes</td><td>Works for one method; not yet proven on two real networks</td></tr>
-              <tr><td>Command-line client</td><td>Works</td></tr>
-              <tr><td>Destination rules; noticing a sign-in page in the way</td><td>Built and tested; not yet met a real network</td></tr>
-              <tr><td>Tray icon and window</td><td>Built and tested; icons are placeholders</td></tr>
-              <tr><td>Setting up a server in your own cloud account</td><td>Tested against a stand-in; no real provider connected</td></tr>
-              <tr><td>Installer</td><td>Not built</td></tr>
-            </tbody>
-          </table>
-        </div>
-        <p class="more">The dated, authoritative list is
-          <a href="https://github.com/nikhlgoel/dnet-engine/blob/master/specs/001-network-resilience-client/tasks.md">tasks.md</a>
-          in the repository.</p>
-      </details>
+      <p class="hint">Early. The engine runs in a simulated network and a Windows lab; it has not been used on a real network.
+        15 parts, in three groups. Checked 2026-11-04.</p>
+      <div class="groups">
+        <section class="group" data-group="works" aria-labelledby="g-works">
+          <h3 id="g-works">Works <span class="count">3</span></h3>
+          <p class="gnote">In a simulated network and a Windows lab.</p>
+          <ul>
+            <li>Background service: three methods, two supervised transport programs, restores network settings</li>
+            <li>Choosing a method by measurement; recovery when one is blocked</li>
+            <li>Command-line client</li>
+          </ul>
+        </section>
+        <section class="group" data-group="built" aria-labelledby="g-built">
+          <h3 id="g-built">Built and tested <span class="count">7</span></h3>
+          <p class="gnote">Not yet met a real network.</p>
+          <ul>
+            <li>Following the network as it changes (one method; not yet proven on two real networks)</li>
+            <li>Destination rules; noticing a sign-in page in the way</li>
+            <li>Tray icon and window (the icons are placeholders)</li>
+            <li>A guide that makes your own server, in your own cloud account or on any Linux server. It asks for no cloud password or key; the setup script has run only in tests</li>
+            <li>The live map of every part, with its state and reason (in the service and the command line; not yet in the window)</li>
+            <li>Cheap checks while connected: about 1 MB an hour idle, worked out from the code, not yet measured on a wire</li>
+            <li>The leak settings of the tunnel, pinned by tests for all three methods</li>
+          </ul>
+        </section>
+        <section class="group" data-group="not-yet" aria-labelledby="g-not">
+          <h3 id="g-not">Not yet <span class="count">5</span></h3>
+          <p class="gnote">Written, planned or waiting for a person.</p>
+          <ul>
+            <li>Installer written; not yet built or run on Windows</li>
+            <li>The operating-system kill switch (T161)</li>
+            <li>Rules by program, connected to the service</li>
+            <li>A recorded measurement that a method keeps open transfers alive</li>
+            <li>Networks that have only IPv6 (T166)</li>
+          </ul>
+        </section>
+      </div>
+      <p class="more">The dated, authoritative list is
+        <a href="https://github.com/nikhlgoel/dnet-engine/blob/master/specs/001-network-resilience-client/tasks.md">tasks.md</a>
+        in the repository.</p>
     </section>
   </main>
 
   <footer class="foot">
     <div class="wrap foot-grid">
-      <nav aria-label="Project links">
-        <a href="https://github.com/nikhlgoel/dnet-engine">Source</a>
-        <a href="https://github.com/nikhlgoel/dnet-engine#building-and-testing">Build it</a>
-        <a href="https://github.com/nikhlgoel/dnet-engine/blob/master/docs/Research-Critique.md">Why it is built this way</a>
-        <a href="https://github.com/nikhlgoel/dnet-engine/issues">Report a problem</a>
-        <a href="https://github.com/nikhlgoel/dnet-engine/blob/master/LICENSE">Licence</a>
-        <a href="https://github.com/nikhlgoel/dnet-engine/blob/master/THIRD-PARTY-NOTICES.md">Third-party notices</a>
-      </nav>
-      <p>Found a security problem? Please tell the maintainer privately, not in a public issue.
-        &ldquo;DNet Engine&rdquo; names the technology; the finished program may be called something else.
-        This page sets no cookies, loads nothing from other sites and runs no scripts.</p>
+      <section aria-labelledby="f-project">
+        <h2 id="f-project">The project</h2>
+        <ul>
+          <li><a href="https://github.com/nikhlgoel/dnet-engine">Source on GitHub</a></li>
+          <li><a href="https://github.com/nikhlgoel/dnet-engine#building-and-testing">Build it yourself</a></li>
+          <li><a href="https://github.com/nikhlgoel/dnet-engine/issues">Report a problem</a></li>
+        </ul>
+        <p>Found a security problem? Tell the maintainer privately, not in a public issue.</p>
+      </section>
+      <section aria-labelledby="f-docs">
+        <h2 id="f-docs">The documents</h2>
+        <ul>
+          <li><a href="https://github.com/nikhlgoel/dnet-engine/blob/master/docs/Research-Critique.md">Why it is built this way</a></li>
+          <li><a href="https://github.com/nikhlgoel/dnet-engine/blob/master/specs/001-network-resilience-client/tasks.md">What is done, dated</a></li>
+          <li><a href="https://github.com/nikhlgoel/dnet-engine/blob/master/docs/network-budget.md">What it sends over the network</a></li>
+          <li><a href="https://github.com/nikhlgoel/dnet-engine/blob/master/docs/owner-gates.md">What only a person on Windows can check</a></li>
+        </ul>
+      </section>
+      <section aria-labelledby="f-licence">
+        <h2 id="f-licence">Licence and notices</h2>
+        <ul>
+          <li><a href="https://github.com/nikhlgoel/dnet-engine/blob/master/LICENSE">GPL-3.0-or-later</a></li>
+          <li><a href="https://github.com/nikhlgoel/dnet-engine/blob/master/THIRD-PARTY-NOTICES.md">Third-party notices</a></li>
+        </ul>
+        <p>Free and open source. It runs other programs, each with its own licence, as separate files.</p>
+      </section>
+      <section aria-labelledby="f-name">
+        <h2 id="f-name">The name</h2>
+        <p>&ldquo;DNet Engine&rdquo; names the technology; the finished program may be called something else.</p>
+        <p class="fine">This page sets no cookies, loads nothing from other sites and runs no scripts. Checked 2026-11-04.</p>
+      </section>
     </div>
   </footer>
 </body>
