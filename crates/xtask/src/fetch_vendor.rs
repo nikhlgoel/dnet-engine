@@ -669,6 +669,28 @@ pub(crate) fn capture(bin: &str, args: &[&str], cwd: Option<&Path>) -> Result<St
 mod tests {
     use super::*;
 
+    /// A measurement of survival belongs to one exact core. The commits `dnet-core` checks the evidence
+    /// against are the ones the cores are built from, so they cannot drift apart: a pin bumped here without
+    /// being bumped there would let old evidence stand for a different core.
+    #[test]
+    fn the_evidence_is_checked_against_the_commits_the_cores_are_built_from() {
+        let commit_of = |dest: &str| {
+            GO_SOURCES
+                .iter()
+                .find(|s| s.dest == dest)
+                .unwrap_or_else(|| panic!("no source called {dest}"))
+                .commit
+        };
+        assert_eq!(
+            dnet_core::survival_evidence::PINNED_PRIMARY_COMMIT,
+            commit_of("primary-core")
+        );
+        assert_eq!(
+            dnet_core::survival_evidence::PINNED_AMNEZIAWG_COMMIT,
+            commit_of("amneziawg-go")
+        );
+    }
+
     #[test]
     fn empty_pin_is_rejected() {
         assert!(verify_digest(b"anything", "").is_err());

@@ -114,10 +114,20 @@ without `--accept-tier2` must be refused with the Tier 2 warning (that is "the U
 then connect with `--accept-tier2`, repeat steps 2–3. **Pass**: the transfer breaks (expected for TCP),
 and the warning was shown first.
 
-**Then** (a code change, test-first, by whoever records it): in `crates/dnet-core/src/tier.rs`, set
-`recorded_survival` to `Survived` **only** for a kind that passed all three HV-07 runs, with the core
-versions in the doc comment; leave any other at `NotMeasured` (or `Broke` if it failed). The tier label in
-configuration and UI follows from that function, never from intent.
+**Then** (data, not code; T175): add one record per method to `crates/dnet-core/evidence/survival.json`:
+
+```json
+{ "version": 1, "records": [ { "method": "hysteria2", "core_commit": "<40-digit commit from vendor/*/BUILD-PROVENANCE.md>",
+  "runs": [ { "on": "2026-11-05", "same_connection": true, "bytes_expected": 524288000, "bytes_received": 524288000,
+              "moved_without_disconnect": true } ] } ] }
+```
+
+One entry in `runs` per run (at least three for survival); put `false` and the real byte count for a run that failed,
+and do not leave a failed run out. `methods` are `amneziawg`, `hysteria2`, `vless_reality`. The tier follows by itself:
+three clean runs at the pinned commit is Tier 1, one failure is Broke, a record for another commit is ignored (so a
+core upgrade retires it). Then update `what_the_shipped_evidence_says_today` in `survival_evidence.rs` to state the
+new tier, and `cargo test -p dnet-core -p xtask`: the site test will then insist the page stops saying nothing was
+measured.
 
 ---
 
