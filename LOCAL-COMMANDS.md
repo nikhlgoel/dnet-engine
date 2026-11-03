@@ -324,3 +324,12 @@ The server should now be listed and nothing waiting. Remove it afterwards with `
 ```powershell
 run 10.10 ".\target\debug\dnetctl.exe approve zz99; .\target\debug\dnetctl.exe reject zz99; .\target\debug\dnetctl.exe pending"
 ```
+
+## 11. Lab check: does the core match a rule by program on Windows? (not runnable yet)
+
+This decides whether the core's own matching can serve rules by program (an ADR-0001 decision for the owner). The Linux build accepts the core's
+program-matching setting either way, so only Windows can answer. **There is nothing to run yet:** `dnetctl add-rule` has no program option and the service
+refuses program rules on purpose, so a command here would only show the refusal. The cloud session's next step, if the owner agrees, is a test-first,
+development-only switch (`dnetd --console --allow-program-rules`, refused for the installed service) that lets one program rule reach the core's
+configuration with its `find_process` option on, plus `dnetctl add-rule --program`. Then this section gets its commands: connect, note the public address
+`curl.exe` sees, add a bypass rule for `curl.exe`, and compare. **Pass:** with the rule `curl.exe` shows your own address while a browser still shows the server's.

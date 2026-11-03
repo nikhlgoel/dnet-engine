@@ -7,6 +7,7 @@
 import type { Bridge, Capabilities, NewEndpointInput, Outcome } from './bridge';
 import type {
   ActivityItem,
+  ComponentsView,
   EncryptedDnsSetting,
   EndpointView,
   FailureCause,
@@ -17,7 +18,7 @@ import type {
   RulesView,
   Snapshot,
 } from './model';
-import { parseSnapshot } from './model';
+import { parseComponents, parseSnapshot } from './model';
 
 export type MockState = 'off' | 'probe' | 'ok' | 'warn' | 'fail';
 export type MockNetworks = 'one' | 'two' | 'three';
@@ -159,6 +160,8 @@ export interface MockOptions {
   disclosed?: boolean;
   /** Start with aggressive speed mode (Brutal) on for the Hysteria 2 method. */
   brutalOn?: boolean;
+  /** Pretend the service is too old to list its parts (it does not know `GetComponents`). */
+  noComponents?: boolean;
   /** Pretend this build has no list of server downloads, so setting a server up is unavailable. */
   noServerDownloads?: boolean;
 }
@@ -324,6 +327,27 @@ export function createMockBridge(options: MockOptions = {}): MockController {
       if (!endpoints.some((e) => e.id === id)) return refuse('there is no endpoint with that id');
       endpoints = endpoints.map((e) => (e.id === id ? { ...e, enabled } : e));
       return { ok: true };
+    },
+
+    async components(): Promise<ComponentsView> {
+      if (options.noComponents === true) {
+        return parseComponents({ supported: false, asOfUnixMs: null, overall: 'Unknown', parts: [] });
+      }
+      const part = (kind: string, id: string, state: string, reason: string, ageSeconds: number) => ({ kind, id, state, reason, ageSeconds });
+      const parts =
+        scenario.state === 'off'
+          ? [part('Session', 'session', 'Off', 'Not connected.', 3600)]
+          : scenario.state === 'fail'
+            ? [part('Session', 'session', 'Failed', 'No network path is usable right now.', 12)]
+            : scenario.state === 'probe'
+              ? [part('Session', 'session', 'Starting', 'Testing each connection method.', 2)]
+              : [
+                  part('NetworkPath', 'wi-fi', scenario.state === 'warn' ? 'Degraded' : 'Ok', scenario.state === 'warn' ? 'Lossy: 8% of probes were lost.' : 'Answering.', 95),
+                  part('NetworkPath', 'ethernet', 'Ok', 'Answering.', 95),
+                  part('Session', 'session', 'Ok', 'Carrying traffic.', 94),
+                ];
+      const overall = scenario.state === 'ok' ? 'Ok' : scenario.state === 'warn' ? 'Degraded' : scenario.state === 'fail' ? 'Failed' : scenario.state === 'probe' ? 'Starting' : 'Off';
+      return parseComponents({ supported: true, asOfUnixMs: now(), overall, parts });
     },
 
     async profiles() {

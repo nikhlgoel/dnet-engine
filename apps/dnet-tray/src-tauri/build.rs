@@ -14,6 +14,7 @@ const COMMANDS: &[&str] = &[
     "finish_server",
     "set_endpoint_enabled",
     "list_profiles",
+    "list_components",
     "set_brutal",
     "list_rules",
     "add_rule",

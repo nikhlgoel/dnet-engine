@@ -125,6 +125,29 @@ mod tests {
         );
     }
 
+    // ------------------------------------------------------------------ the map of parts
+
+    /// The page says where the live map of parts can be seen; that changes the day the window shows it.
+    #[test]
+    fn the_map_of_parts_is_said_to_be_where_it_is() {
+        let window_shows_it =
+            read("apps/dnet-tray/src/views/Activity.svelte").contains("bridge.components()");
+        let page = text_of(&page());
+        if window_shows_it {
+            assert!(
+                !page.contains("not yet in the window"),
+                "the window shows the map now"
+            );
+            assert!(
+                page.contains("live map of every part"),
+                "the row is still there"
+            );
+            assert!(page.contains("the window"), "and says the window has it");
+        } else {
+            assert!(page.contains("not yet in the window"));
+        }
+    }
+
     // ------------------------------------------------------------------ the three limits
 
     /// A limit is true only while the code is as it says. These tie each limit's wording to its cause.

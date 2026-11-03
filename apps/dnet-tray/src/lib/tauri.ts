@@ -12,6 +12,7 @@ import type { Bridge, Capabilities, NewEndpointInput, Outcome, PreparedServer } 
 import { brutalWarning } from './messages';
 import {
   parseActivity,
+  parseComponents,
   parseEndpoints,
   parsePending,
   parseProfiles,
@@ -175,6 +176,10 @@ export async function createTauriBridge(): Promise<Bridge> {
     },
     removeEndpoint: (id) => call('remove_endpoint', { id }),
     setEndpointEnabled: (id, enabled) => call('set_endpoint_enabled', { id, enabled }),
+
+    async components() {
+      return parseComponents(await invoke('list_components'));
+    },
 
     async profiles() {
       return parseProfiles(await invoke('list_profiles'));

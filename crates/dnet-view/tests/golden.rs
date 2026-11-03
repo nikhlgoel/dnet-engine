@@ -205,3 +205,74 @@ async fn poor_and_unusable_are_told_apart() {
         assert_eq!(view["paths"]["degraded"]["staying"], json!("NoBetterPath"));
     }
 }
+
+/// The map of parts, pinned by a file. The window's own parser reads the same file.
+#[tokio::test]
+async fn the_map_of_parts() {
+    use dnet_core::registry::{
+        ComponentKind::*, ComponentState::*, Evidence, Observation, Registry,
+    };
+    let mut registry = Registry::new();
+    let at = std::time::Duration::from_secs(1);
+    let mut report = |kind, id: &str, state, reason: &str, evidence: Evidence| {
+        registry
+            .report(
+                kind,
+                id,
+                Observation::new(state, reason).with_evidence(evidence),
+                at,
+            )
+            .unwrap();
+    };
+    report(
+        NetworkPath,
+        "wi-fi",
+        Degraded,
+        "Lossy: 8% of probes were lost.",
+        Evidence {
+            latency_ms: Some(180),
+            loss_permille: Some(80),
+            restarts: None,
+        },
+    );
+    report(
+        NetworkPath,
+        "ethernet",
+        Ok,
+        "Answering.",
+        Evidence {
+            latency_ms: Some(12),
+            loss_permille: Some(0),
+            restarts: None,
+        },
+    );
+    report(
+        Session,
+        "session",
+        Ok,
+        "Carrying traffic.",
+        Evidence {
+            latency_ms: None,
+            loss_permille: None,
+            restarts: Some(0),
+        },
+    );
+    report(
+        CaptivePortal,
+        "portal",
+        Blocked,
+        "A sign-in page is in the way.",
+        Evidence::default(),
+    );
+    let wire: Value = serde_json::from_str(&dnet_ipc::componentview::encode_components(
+        &registry.snapshot(),
+        std::time::Duration::from_secs(61),
+        1_730_000_000_000,
+    ))
+    .unwrap();
+    let link = FakeLink::new(move |_| done(wire.clone()));
+    golden(
+        "components",
+        &dnet_view::Bridge::new(link).components().await.unwrap(),
+    );
+}

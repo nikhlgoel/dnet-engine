@@ -90,6 +90,28 @@ impl<L: Link> Bridge<L> {
         }
     }
 
+    /// The live map of parts (T170). An older service that does not know the request is `supported: false`;
+    /// any other refusal, and anything the strict decoder refuses, is an error that repeats nothing.
+    pub async fn components(&self) -> Result<Value, String> {
+        match self.link.call(Request::GetComponents).await {
+            Err(error) => Err(error.to_string()),
+            Ok(Reply::Refused(refusal))
+                if refusal.code == "InvalidRequest"
+                    && refusal.detail.contains("unknown request") =>
+            {
+                Ok(lists::components_unsupported())
+            }
+            Ok(Reply::Refused(refusal)) => Err(refusal_text(&refusal.detail)),
+            Ok(Reply::Done(value)) => {
+                dnet_ipc::componentview::decode_components(&value.to_string())
+                    .map(|reply| lists::components(&reply))
+                    .map_err(|_| {
+                        "The service's list of parts was not what was expected.".to_owned()
+                    })
+            }
+        }
+    }
+
     pub async fn profiles(&self) -> Result<Value, String> {
         match self.link.call(Request::ListProfiles).await {
             Err(error) => Err(error.to_string()),

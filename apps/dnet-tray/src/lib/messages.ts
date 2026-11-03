@@ -217,6 +217,18 @@ export const en = {
       },
     },
     activity: {
+      parts: {
+        title: 'Parts of the system',
+        log: 'What happened',
+        note: 'What each part is doing now, how long it has been so, and why.',
+        unsupported: 'This service is too old to list its parts. Nothing is being claimed about them.',
+        states: { Unknown: 'Not known', Off: 'Off', Starting: 'Starting', Ok: 'Working', Degraded: 'Struggling', Blocked: 'Blocked', Failed: 'Failed' },
+        kinds: { NetworkPath: 'Network', CarrierLeaf: 'Carrier', Session: 'Connection', Endpoint: 'Server', CoreProcess: 'Program', Adapter: 'Adapter', Routes: 'Routes', DnsHandling: 'Name lookups', Guard: 'Guard', CaptivePortal: 'Sign-in page' },
+        for: 'for {age}',
+        loss: '{percent}% lost',
+        latency: '{ms} ms',
+        restarts: 'restarted {count} times',
+      },
       title: 'Activity',
       empty: 'Nothing has happened yet in this session. What the program does, and why, will appear here.',
       note: 'Every automatic change is listed with its reason.',

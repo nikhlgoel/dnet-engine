@@ -169,6 +169,36 @@ describe('every view', () => {
     await screen.findByRole('heading', { level: 1, name: 'Set up your server' });
   });
 
+  it('Activity lists the parts with their state in words, how long, and why, and no violations', async () => {
+    mount({ initial: { state: 'ok' } });
+    await screen.findByRole('heading', { level: 1, name: 'Connected' });
+    await go('Activity');
+    const parts = await screen.findByRole('list', { name: 'Parts of the system' });
+    const items = within(parts).getAllByRole('listitem');
+    expect(items.length).toBeGreaterThan(2);
+    const text = items.map((i) => i.textContent ?? '').join('\n');
+    expect(text).toMatch(/Working/);
+    expect(text).toMatch(/for \d+ (s|min|h)/);
+    expect(await violations()).toEqual([]);
+  });
+
+  it('Activity says plainly when the service is too old to list its parts, and shows no part as fine', async () => {
+    mount({ noComponents: true });
+    await screen.findByRole('switch');
+    await go('Activity');
+    expect(await screen.findByText(/too old to list its parts/)).toBeTruthy();
+    expect(screen.queryByRole('list', { name: 'Parts of the system' })).toBeNull();
+    expect(screen.queryByText(/Working/)).toBeNull();
+  });
+
+  it('Activity shows a failed part with its reason whole', async () => {
+    mount({ initial: { state: 'fail', cause: 'NoUsablePath' } });
+    await screen.findByRole('switch');
+    await go('Activity');
+    const parts = await screen.findByRole('list', { name: 'Parts of the system' });
+    expect(within(parts).getByText('Failed')).toBeTruthy();
+  });
+
   it('Rules says which rules are best effort in the row, not in a tooltip', async () => {
     mount();
     await screen.findByRole('switch');

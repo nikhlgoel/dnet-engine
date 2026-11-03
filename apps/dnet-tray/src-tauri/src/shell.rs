@@ -385,6 +385,12 @@ async fn remove_rule(shell: Shared<'_>, id: String) -> Result<Value, String> {
     Ok(outcome)
 }
 
+/// The live map of parts, read-only (T170).
+#[tauri::command]
+async fn list_components(shell: Shared<'_>) -> Result<Value, String> {
+    shell.bridge.components().await
+}
+
 #[tauri::command]
 async fn list_rules(shell: Shared<'_>) -> Result<Value, String> {
     shell.bridge.rules().await
@@ -483,6 +489,7 @@ pub fn run() {
             finish_server,
             set_endpoint_enabled,
             list_profiles,
+            list_components,
             set_brutal,
             list_rules,
             add_rule,

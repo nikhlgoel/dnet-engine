@@ -775,3 +775,131 @@ async fn the_waiting_list_refuses_what_is_not_a_list() {
         "a change with no deadline is not one this program draws"
     );
 }
+
+// ---------------------------------------------------------------------- the live map of parts (T170)
+
+/// The wire shape is the service's own (`encode_components`), so the test builds the reply with it.
+fn written(
+    parts: &[(
+        dnet_core::registry::ComponentKind,
+        &str,
+        dnet_core::registry::ComponentState,
+        &str,
+    )],
+) -> Value {
+    use dnet_core::registry::{Evidence, Observation, Registry};
+    let mut registry = Registry::new();
+    for (kind, id, state, reason) in parts {
+        registry
+            .report(
+                *kind,
+                id,
+                Observation::new(*state, reason).with_evidence(Evidence::default()),
+                std::time::Duration::from_secs(1),
+            )
+            .unwrap();
+    }
+    serde_json::from_str(&dnet_ipc::componentview::encode_components(
+        &registry.snapshot(),
+        std::time::Duration::from_secs(5),
+        1_730_000_000_000,
+    ))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn the_parts_are_asked_for_read_only_and_shown_with_their_age_and_evidence() {
+    use dnet_core::registry::{ComponentKind::*, ComponentState::*};
+    let link = FakeLink::new(|request| match request {
+        Request::GetComponents => done(written(&[
+            (
+                NetworkPath,
+                "wi-fi",
+                Degraded,
+                "Lossy: 8% of probes were lost.",
+            ),
+            (Session, "session", Ok, "Carrying traffic."),
+        ])),
+        other => panic!("unexpected {other:?}"),
+    });
+    let seen = link.seen.clone();
+    let out = Bridge::new(link).components().await.unwrap();
+    assert!(matches!(seen.lock().unwrap()[0], Request::GetComponents));
+    assert_eq!(out["supported"], json!(true));
+    assert_eq!(out["overall"], json!("Degraded"));
+    let parts = out["parts"].as_array().unwrap();
+    assert_eq!(parts.len(), 2);
+    let wifi = parts.iter().find(|p| p["id"] == "wi-fi").unwrap();
+    assert_eq!(wifi["kind"], json!("NetworkPath"));
+    assert_eq!(wifi["state"], json!("Degraded"));
+    assert_eq!(wifi["reason"], json!("Lossy: 8% of probes were lost."));
+    assert!(wifi["ageSeconds"].is_u64());
+    assert!(
+        wifi.get("latencyMs").is_none(),
+        "a measurement that was not taken is absent, not zero"
+    );
+}
+
+/// An older service has no such request: that is "not supported", which the window shows as such, and never
+/// as "no parts" or "all fine".
+#[tokio::test]
+async fn an_older_service_is_told_apart_from_an_empty_answer() {
+    let link = FakeLink::new(|_| refusal("InvalidRequest", "unknown request"));
+    let old = Bridge::new(link).components().await.unwrap();
+    assert_eq!(old["supported"], json!(false));
+    assert_eq!(old["parts"], json!([]));
+    assert_eq!(
+        old["overall"],
+        json!("Unknown"),
+        "nothing is claimed about parts nobody reported"
+    );
+
+    let link = FakeLink::new(|_| done(written(&[])));
+    let empty = Bridge::new(link).components().await.unwrap();
+    assert_eq!(empty["supported"], json!(true));
+    assert_eq!(empty["parts"], json!([]));
+}
+
+#[tokio::test]
+async fn any_other_refusal_or_an_unreadable_answer_is_an_error_and_repeats_nothing() {
+    let link = FakeLink::new(|_| refusal("InternalError", "the pipe broke; SENTINEL"));
+    assert!(Bridge::new(link).components().await.is_err());
+
+    for broken in [
+        json!({}),
+        json!({ "as_of_unix_ms": 1, "overall": "Ok", "components": [{ "kind": "SENTINEL", "id": "x", "state": "Ok",
+                 "reason": "", "changed_ago_ms": 0 }] }),
+        json!({ "as_of_unix_ms": 1, "overall": "Ok", "components": "SENTINEL" }),
+        json!("SENTINEL"),
+    ] {
+        let link = FakeLink::new(move |_| done(broken.clone()));
+        let err = Bridge::new(link).components().await.unwrap_err();
+        assert!(!err.contains("SENTINEL"), "{err}");
+    }
+}
+
+/// What a part says about itself reaches the window whole, with nothing that could hide or reorder text.
+#[tokio::test]
+async fn a_reason_arrives_whole_and_clean() {
+    use dnet_core::registry::{ComponentKind::*, ComponentState::*};
+    let long = "x".repeat(500);
+    let link = FakeLink::new(move |_| {
+        done(written(&[(
+            Endpoint,
+            "e\u{202e}1",
+            Failed,
+            &format!("{long}\u{200b}\u{7}end"),
+        )]))
+    });
+    let out = Bridge::new(link).components().await.unwrap();
+    let part = &out["parts"][0];
+    assert_eq!(part["id"], json!("e1"));
+    let reason = part["reason"].as_str().unwrap();
+    assert!(
+        reason.ends_with("end") && reason.len() >= 500,
+        "cut or altered: {reason}"
+    );
+    assert!(!reason
+        .chars()
+        .any(|c| c.is_control() || c == '\u{200b}' || c == '\u{202e}'));
+}

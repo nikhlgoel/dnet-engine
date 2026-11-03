@@ -17,6 +17,7 @@
     "allow-finish-server",
     "allow-set-endpoint-enabled",
     "allow-list-profiles",
+    "allow-list-components",
     "allow-set-brutal",
     "allow-list-rules",
     "allow-add-rule",

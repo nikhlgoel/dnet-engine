@@ -8,6 +8,7 @@
  */
 import type {
   ActivityItem,
+  ComponentsView,
   EncryptedDnsSetting,
   EndpointView,
   PendingView,
@@ -16,7 +17,7 @@ import type {
   Snapshot,
 } from './model';
 
-export type { EncryptedDnsSetting, PendingView, ProfileView, RulesView };
+export type { ComponentsView, EncryptedDnsSetting, PendingView, ProfileView, RulesView };
 
 export type Unsubscribe = () => void;
 
@@ -87,6 +88,9 @@ export interface Bridge {
   prepareServer(arch: ServerKind): Promise<Outcome & { prepared?: PreparedServer }>;
   /** Finish it with what the server printed. The service checks it belongs to this setup. */
   finishServer(input: FinishServerInput): Promise<Outcome & { id?: string }>;
+
+  /** The live map of parts. A service too old to know the request answers `supported: false`. */
+  components(): Promise<ComponentsView>;
 
   profiles(): Promise<ProfileView[]>;
   /**
