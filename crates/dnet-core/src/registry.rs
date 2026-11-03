@@ -201,12 +201,17 @@ impl Registry {
     /// The one state that stands for the whole Registry: that of its worst part by `severity`. An
     /// empty Registry is `Unknown`, because nothing has been measured.
     pub fn overall(&self) -> ComponentState {
-        self.components
-            .values()
-            .map(|c| c.state)
-            .max_by_key(|s| severity(*s))
-            .unwrap_or(ComponentState::Unknown)
+        roll_up(self.components.values().map(|c| c.state))
     }
+}
+
+/// The one state that stands for a set of parts: the worst by `severity`, and `Unknown` for no parts at all. A client
+/// that holds only the parts can compute the same summary the service does, and so notice one that does not match.
+pub fn roll_up(states: impl IntoIterator<Item = ComponentState>) -> ComponentState {
+    states
+        .into_iter()
+        .max_by_key(|s| severity(*s))
+        .unwrap_or(ComponentState::Unknown)
 }
 
 /// How much a state should weigh in the roll-up; higher is worse. Every state has its own weight, so
@@ -482,6 +487,39 @@ mod tests {
         assert_eq!(
             r.get(ComponentKind::Adapter, "a").unwrap().state,
             ComponentState::Unknown
+        );
+    }
+
+    #[test]
+    fn roll_up_is_what_overall_uses_and_nothing_rolls_up_to_unknown() {
+        assert_eq!(roll_up([]), ComponentState::Unknown);
+        assert_eq!(
+            roll_up([
+                ComponentState::Ok,
+                ComponentState::Blocked,
+                ComponentState::Off
+            ]),
+            ComponentState::Blocked
+        );
+        let mut r = Registry::new();
+        report(
+            &mut r,
+            ComponentKind::Guard,
+            "g",
+            ComponentState::Degraded,
+            at(1),
+        );
+        report(
+            &mut r,
+            ComponentKind::Routes,
+            "r",
+            ComponentState::Ok,
+            at(1),
+        );
+        assert_eq!(
+            r.overall(),
+            roll_up(r.snapshot().iter().map(|c| c.state)),
+            "a client that holds only the parts can compute the same summary"
         );
     }
 

@@ -17,7 +17,7 @@
 //! **The routing reading is a decision, not proof.** `RoutingPosture` is what the engine decided; nothing at the
 //! operating-system level enforces it yet (README, known limits), and the reading says so.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dnet_core::failure::explain;
 use dnet_core::path::{PathKind, PathRole};
@@ -29,6 +29,7 @@ use dnet_core::registry::{
 use dnet_core::session::FailureCause;
 use dnet_core::telemetry::{PathView, PathsSnapshot};
 use dnet_core::tier::FailoverTier;
+use dnet_ipc::componentview::encode_components;
 use dnet_ipc::protocol::{ConnectionStatus, StateSnapshot};
 
 /// The kinds of part this module reports. A part of one of these kinds that is not in the latest readings is
@@ -266,6 +267,49 @@ pub fn apply(registry: &mut Registry, readings: &[Reading], now: Duration) -> Ve
         });
     }
     applied
+}
+
+/// The service's one Registry, and the clock its times are taken from (time since the service started, so
+/// the wall clock being set backward or forward never moves a part's age).
+pub struct Tracker {
+    registry: Registry,
+    epoch: Instant,
+}
+
+impl Tracker {
+    pub fn new() -> Self {
+        Self {
+            registry: Registry::new(),
+            epoch: Instant::now(),
+        }
+    }
+
+    /// Record what the service knows at `now`. Returns what changed.
+    pub fn observe_at(
+        &mut self,
+        now: Duration,
+        state: &StateSnapshot,
+        paths: &PathsSnapshot,
+    ) -> Vec<Applied> {
+        apply(&mut self.registry, &readings(state, paths), now)
+    }
+
+    /// Write the reply for `GetComponents` from what has been recorded, ages counted back from `now`.
+    pub fn encode(&self, now: Duration, as_of_unix_ms: u64) -> String {
+        encode_components(&self.registry.snapshot(), now, as_of_unix_ms)
+    }
+
+    /// Look at the facts now, record them, and answer.
+    pub fn reply(
+        &mut self,
+        state: &StateSnapshot,
+        paths: &PathsSnapshot,
+        as_of_unix_ms: u64,
+    ) -> String {
+        let now = self.epoch.elapsed();
+        self.observe_at(now, state, paths);
+        self.encode(now, as_of_unix_ms)
+    }
 }
 
 #[cfg(test)]
@@ -578,6 +622,30 @@ mod tests {
     }
 
     #[test]
+    fn the_free_text_a_failure_carries_never_reaches_a_reading() {
+        // `ConfigurationInvalid` and `CoreFailedPersistently` keep their free text in the *detail* of an
+        // explanation; the reading uses only the title. If a title ever began to include the detail, this fails.
+        let marker = "SECRET-DETAIL-MARKER";
+        for cause in [
+            FailureCause::ConfigurationInvalid {
+                detail: marker.to_string(),
+            },
+            FailureCause::CoreFailedPersistently {
+                core: dnet_core::profile::CoreBinding::PrimaryCore,
+            },
+        ] {
+            let mut s = state(ConnectionStatus::Failed);
+            s.failure = Some(cause);
+            for r in readings(&s, &paths(vec![])) {
+                assert!(
+                    !r.reason.contains(marker) && !r.id.contains(marker),
+                    "{r:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn readings_come_ordered_by_kind_then_id() {
         let rs = readings(
             &connected(),
@@ -684,6 +752,107 @@ mod tests {
             T0,
         );
         assert!(reg.get(ComponentKind::Guard, "main").is_some());
+    }
+
+    #[test]
+    fn a_tracker_answers_with_a_reply_a_client_can_read() {
+        let mut tracker = Tracker::new();
+        let wire = tracker.reply(
+            &connected(),
+            &paths(vec![view(
+                1,
+                PathKind::Wifi,
+                PathRole::Carrying,
+                Some(QualityBand::Good),
+            )]),
+            1_700_000_000_000,
+        );
+        let reply = dnet_ipc::componentview::decode_components(&wire)
+            .expect("the service only serves what a client can read");
+        assert_eq!(reply.as_of_unix_ms, 1_700_000_000_000);
+        assert_eq!(reply.overall, ComponentState::Ok);
+        assert!(reply
+            .components
+            .iter()
+            .any(|c| c.kind == ComponentKind::Session && c.state == ComponentState::Ok));
+    }
+
+    #[test]
+    fn a_state_that_stays_the_same_keeps_its_age_across_answers() {
+        let mut tracker = Tracker::new();
+        let facts = (connected(), paths(vec![]));
+        tracker.observe_at(T0, &facts.0, &facts.1);
+        tracker.observe_at(T0 + Duration::from_secs(60), &facts.0, &facts.1);
+        let wire = tracker.encode(T0 + Duration::from_secs(60), 1);
+        let reply = dnet_ipc::componentview::decode_components(&wire).unwrap();
+        let session = reply
+            .components
+            .iter()
+            .find(|c| c.kind == ComponentKind::Session)
+            .unwrap();
+        assert_eq!(
+            session.changed_ago_ms, 60_000,
+            "ok since the first look, not since the last"
+        );
+    }
+
+    #[test]
+    fn a_state_that_changes_restarts_its_age() {
+        let mut tracker = Tracker::new();
+        tracker.observe_at(T0, &connected(), &paths(vec![]));
+        tracker.observe_at(
+            T0 + Duration::from_secs(60),
+            &state(ConnectionStatus::Disconnected),
+            &paths(vec![]),
+        );
+        let wire = tracker.encode(T0 + Duration::from_secs(90), 1);
+        let reply = dnet_ipc::componentview::decode_components(&wire).unwrap();
+        let session = reply
+            .components
+            .iter()
+            .find(|c| c.kind == ComponentKind::Session)
+            .unwrap();
+        assert_eq!(session.state, ComponentState::Off);
+        assert_eq!(session.changed_ago_ms, 30_000);
+    }
+
+    #[test]
+    fn no_reason_the_mapper_can_write_is_longer_than_a_client_will_accept() {
+        let mut every = vec![
+            state(ConnectionStatus::Disconnected),
+            state(ConnectionStatus::Probing),
+            connected(),
+        ];
+        for cause in [
+            FailureCause::NoEndpointReachable,
+            FailureCause::AllProfilesBlocked,
+            FailureCause::CaptivePortalUnsatisfied,
+            FailureCause::InsufficientPrivilege,
+            FailureCause::NoUsablePath,
+        ] {
+            let mut s = state(ConnectionStatus::Failed);
+            s.failure = Some(cause);
+            every.push(s);
+        }
+        for s in &every {
+            for r in readings(
+                s,
+                &paths(vec![view(
+                    1,
+                    PathKind::Cellular,
+                    PathRole::Carrying,
+                    Some(QualityBand::Unusable),
+                )]),
+            ) {
+                assert!(
+                    r.reason.chars().count() <= dnet_ipc::componentview::MAX_REASON_CHARS,
+                    "{} characters: {}",
+                    r.reason.chars().count(),
+                    r.reason
+                );
+                assert!(r.id.chars().count() <= dnet_ipc::componentview::MAX_ID_CHARS);
+            }
+        }
     }
 
     #[test]

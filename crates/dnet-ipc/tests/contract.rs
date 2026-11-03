@@ -84,6 +84,7 @@ fn ipc01_request_classes_match_the_contract_table() {
         GetSession,
         GetPaths,
         GetStats,
+        GetComponents,
         ListEndpoints,
         ListProfiles,
         ListRules,

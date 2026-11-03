@@ -45,6 +45,9 @@ pub(crate) fn is_hostile(c: char) -> bool {
         || matches!(
             c,
             '\u{200e}' | '\u{200f}' | '\u{061c}' | '\u{200b}'..='\u{200d}' | '\u{feff}'
+            // Line and paragraph separators (not controls to Unicode, but they break a line), the soft hyphen,
+            // the invisible operators, and the tag characters: all hide or reshape text.
+            | '\u{2028}' | '\u{2029}' | '\u{00ad}' | '\u{2060}'..='\u{2064}' | '\u{e0000}'..='\u{e007f}'
         )
 }
 
@@ -585,6 +588,24 @@ mod tests {
             Some("Cafe[31m WiFi")
         );
         assert_eq!(clean_name("a\u{202e}b\u{2066}c").as_deref(), Some("abc"));
+        // Characters that are not controls but still hide or break text: line and paragraph separators, the soft
+        // hyphen, the invisible operators, and the tag characters.
+        for c in [
+            '\u{2028}',
+            '\u{2029}',
+            '\u{00ad}',
+            '\u{2060}',
+            '\u{2062}',
+            '\u{2064}',
+            '\u{e0041}',
+        ] {
+            assert_eq!(
+                clean_name(&format!("a{c}b")).as_deref(),
+                Some("ab"),
+                "U+{:04X}",
+                c as u32
+            );
+        }
         assert_eq!(clean_name("   ").as_deref(), None);
         assert_eq!(clean_name("\u{1b}\u{7}").as_deref(), None);
         let long = "x".repeat(500);

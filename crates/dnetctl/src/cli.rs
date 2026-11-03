@@ -42,6 +42,8 @@ pub enum Command {
     Endpoints,
     /// The networks, which one carries the connection, and how good each is.
     Paths,
+    /// Every part of the connection, its state, and why.
+    Components,
     /// What the product did during this connection.
     Stats,
     /// Which versions of the protocol this program and the service speak.
@@ -152,6 +154,7 @@ commands:
   profiles               list the connection profiles
   endpoints              list the configured endpoints
   paths                  show the networks, which one carries the connection, and how good each is
+  components             show every part of the connection, its state, since when, and why
   stats                  show what the product did during this connection (counts, never a comparison)
   version                show this program's version and the service's, and whether they match
   add-endpoint <label>   add a server: --host <address> and --credentials-file <path> (or
@@ -222,6 +225,7 @@ fn command_named(name: &str) -> Option<Command> {
         "profiles" => Command::Profiles,
         "endpoints" => Command::Endpoints,
         "paths" => Command::Paths,
+        "components" => Command::Components,
         "stats" => Command::Stats,
         "version" | "--version" | "-V" => Command::Version,
         // Filled in from the words that follow; `parse` refuses the command if any are missing.
