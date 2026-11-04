@@ -636,7 +636,11 @@ pub(crate) fn require_tool(bin: &str, args: &[&str]) -> Result<()> {
 }
 
 pub(crate) fn run_cmd(bin: &str, args: &[&str], cwd: Option<&Path>) -> Result<()> {
-    let mut cmd = Command::new(bin);
+    let mut cmd = if bin == "powershell" {
+        crate::verify_vendor::windows_powershell()
+    } else {
+        Command::new(bin)
+    };
     cmd.args(args);
     if let Some(dir) = cwd {
         cmd.current_dir(dir);

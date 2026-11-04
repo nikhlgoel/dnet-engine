@@ -18,8 +18,16 @@ fn script(name: &str) -> PathBuf {
     repo_root().join("installer").join(name)
 }
 
+/// Windows PowerShell as a release build on GitHub's runner must start it: without the module path of the
+/// PowerShell 7 that started the build, which breaks its certificate drive.
+fn windows_powershell() -> Command {
+    let mut command = Command::new("powershell");
+    command.env_remove("PSModulePath");
+    command
+}
+
 fn powershell() -> Option<Command> {
-    let mut probe = Command::new("powershell");
+    let mut probe = windows_powershell();
     probe.args([
         "-NoProfile",
         "-ExecutionPolicy",
@@ -30,7 +38,7 @@ fn powershell() -> Option<Command> {
     // Is there a Windows PowerShell at all? Say so and skip, as the other script tests do.
     match probe.output() {
         Ok(_) => {
-            let mut real = Command::new("powershell");
+            let mut real = windows_powershell();
             real.args(["-NoProfile", "-ExecutionPolicy", "Bypass"]);
             Some(real)
         }

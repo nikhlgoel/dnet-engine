@@ -64,9 +64,10 @@ jobs:
     name: Windows installer
     needs: server-cores
     runs-on: windows-latest
-    # The signing key lives in this environment's secrets, which the owner restricts to release tags and to their own
-    # approval (docs/release-signing.md); until then it behaves as an ordinary job.
-    environment: release
+    # A release tag runs in the environment `release`, which holds the signing key and is restricted to release tags
+    # and to the owner's approval; any other run (a branch, a manual dispatch) runs in `release-test`, which has no
+    # secrets and no restriction (docs/release-signing.md).
+    environment: ${{ github.ref_type == 'tag' && 'release' || 'release-test' }}
     permissions:
       contents: write # the draft release
       id-token: write # the attestation
