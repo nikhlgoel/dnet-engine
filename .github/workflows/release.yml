@@ -13,6 +13,11 @@ on:
   push:
     tags: ["v*.*.*"]
   workflow_dispatch:
+    inputs:
+      rehearse_signing:
+        description: "Sign with a throwaway key made on the runner, to exercise the whole signing path without the real key (the installer is then NOT the project's)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -148,13 +153,32 @@ jobs:
             Remove-Item -LiteralPath $pfx -Force -ErrorAction SilentlyContinue
           }
           "DNET_SIGN_THUMBPRINT=$($imported.Thumbprint)" >> $env:GITHUB_ENV
+          "DNET_EXPECT_SHA256=$((Get-Content installer/signing-cert.sha256 -Raw).Trim())" >> $env:GITHUB_ENV
+          'DNET_SIGNING=on' >> $env:GITHUB_ENV
           'signed=true' >> $env:GITHUB_OUTPUT
+
+      # A rehearsal of the above with a key made here and thrown away (only when asked for, never on a tag): it runs
+      # the whole signing path (signing by thumbprint, Tauri's sign command, the check, the install test's comparison
+      # of the installed files) so that the first real release is not its first run. What it builds is NOT signed by the
+      # project's key and says so in its name.
+      - name: Rehearse signing with a throwaway key (manual runs only)
+        if: github.ref_type != 'tag' && inputs.rehearse_signing == true
+        shell: pwsh
+        run: |
+          $c = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=DNet Engine signing rehearsal (throwaway, not the project key)' `
+            -CertStoreLocation Cert:\CurrentUser\My -NotAfter (Get-Date).AddDays(2)
+          $sha = ([System.Security.Cryptography.SHA256]::Create().ComputeHash($c.RawData) | ForEach-Object { $_.ToString('x2') }) -join ''
+          "DNET_SIGN_THUMBPRINT=$($c.Thumbprint)" >> $env:GITHUB_ENV
+          'DNET_SIGN_TIMESTAMP_URL=none' >> $env:GITHUB_ENV
+          "DNET_EXPECT_SHA256=$sha" >> $env:GITHUB_ENV
+          'DNET_SIGNING=on' >> $env:GITHUB_ENV
+          'DNET_REHEARSAL=yes' >> $env:GITHUB_ENV
 
       - name: Stage the payload
         run: cargo xtask stage-installer
 
       - name: Sign the service and the command-line tool
-        if: steps.key.outputs.signed == 'true'
+        if: env.DNET_SIGNING == 'on'
         shell: pwsh
         run: installer/Sign-Files.ps1 target/payload/app/dnetd.exe target/payload/app/dnetctl.exe
 
@@ -169,11 +193,11 @@ jobs:
       # copy in the build folder, which therefore carries no signature. It is checked on the installed files
       # (docs/release-signing.md); the installer's own signature is checked here.
       - name: Check the signatures, and that they are the project's key
-        if: steps.key.outputs.signed == 'true'
+        if: env.DNET_SIGNING == 'on'
         shell: pwsh
         run: |
           $setup = (Get-ChildItem apps/dnet-tray/src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1).FullName
-          installer/Test-Signature.ps1 -CertSha256 (Get-Content installer/signing-cert.sha256 -Raw).Trim() `
+          installer/Test-Signature.ps1 -CertSha256 $env:DNET_EXPECT_SHA256 `
             target/payload/app/dnetd.exe target/payload/app/dnetctl.exe $setup
 
       # The installer is installed on this runner, checked (the service, its recovery, the folders and who may change
@@ -185,7 +209,7 @@ jobs:
         run: testing/Invoke-InstallTest.ps1
 
       - name: Remove the signing key from this runner
-        if: always() && steps.key.outputs.signed == 'true'
+        if: always() && env.DNET_SIGNING == 'on'
         shell: pwsh
         run: Remove-Item -LiteralPath "Cert:\CurrentUser\My\$env:DNET_SIGN_THUMBPRINT" -ErrorAction SilentlyContinue
 
@@ -200,6 +224,7 @@ jobs:
           if ($built.Length -gt 60MB) { throw ("installer is {0:N1} MB; the limit is 60 MB" -f ($built.Length / 1MB)) }
           New-Item -ItemType Directory -Force dist-release/winget | Out-Null
           $name = "DNetEngine-$env:VERSION-x64-setup.exe"
+          if ($env:DNET_REHEARSAL -eq 'yes') { $name = "DNetEngine-$env:VERSION-x64-setup-SIGNING-REHEARSAL-not-the-project-key.exe" }
           Copy-Item $built.FullName "dist-release/$name"
           $sha = (Get-FileHash "dist-release/$name" -Algorithm SHA256).Hash
           [IO.File]::WriteAllText("$PWD/dist-release/SHA256SUMS.txt", "$sha  $name`n")
