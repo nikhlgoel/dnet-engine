@@ -982,7 +982,7 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
 
 **Checkpoint**: Feature complete.
   > **2026-10-26 (not committed): runbook written, not run** (`docs/owner-gates.md`). The screen-reader half (Narrator and NVDA) can run now against the built window; the stranger half waits for T107 and a real provider.
-  > **Found before the pass, 2026-11-03, fixed test first:** in a window narrower than 760 px the dock shows only the icon of each section it is not on, and hid the
+  > **Found before the pass, 2026-11-04, fixed test first:** in a window narrower than 760 px the dock shows only the icon of each section it is not on, and hid the
   > words with `display: none`, which also took the link's name away, so a screen reader would have read five unnamed links. Each link now carries its name
   > (`aria-label`); a component test hides the words and asks for every link by name (red before, green after), and a browser check at the window's minimum
   > width (560 px) found the links by name and no sideways scroll in Servers, Rules or the guide. jsdom does not run container queries, which is why axe never saw it.
@@ -1733,7 +1733,7 @@ own, made by DNet Engine's wizard on Oracle Cloud Always Free (or any Linux serv
   > `dnetctl approve <id>` beside the window, which asks Windows and applies only on a typed `yes`; only the checked change name is handed over (`dnet_view::approver`, 6 tests). `dnet-view` reads and drops (golden `pending.json`, 4 tests),
   > the shell has `list_pending`, `reject_change`, `approve_change` (permissions generated; the shell builds), the web side has the parser, bridge, mock and component (4 component tests with axe, 3 bridge tests,
   > 1 fixture test; 267 web tests pass, 55.6 KB of 150). **Not run:** the real window with a real held change and the Windows prompt (needs the new service installed; the owner's click).
-  > **(a) done 2026-11-03, test first, hand-mutation-checked.** The installed service holds every new server, so the guide's last step and the Servers form
+  > **(a) done 2026-11-04, test first, hand-mutation-checked.** The installed service holds every new server, so the guide's last step and the Servers form
   > met this on every real install. The window has a fifth code, `ApprovalRequired` (`dnet_view::outcome::code_for` mapped it to `Refused` before). The guide
   > says in plain words that the server waits, shows the Approve list in place, drops its copy of the pasted text (the service holds it with the change), and
   > goes on by itself once the server is listed; a dropped or expired change brings the form back with what to do. It reads the waiting list before the
@@ -1744,7 +1744,7 @@ own, made by DNet Engine's wizard on Oracle Cloud Always Free (or any Linux serv
   > dropped, the read order, approved outside the window while hidden); 14 hand mutations each failed the suite. 281 web tests pass, 57.9 KB of 150.
   > **Security review (self):** no new request, wire field or permission; the window shows only what the service listed; the pasted text is dropped as before;
   > the guide's checks read two read-only lists. **Not run:** the real window with the installed service (the owner's click, `LOCAL-COMMANDS.md` 10.8).
-  > **Checked before it is held, 2026-11-03, test first, mutation-checked.** The service held a change without checking it, so a wrong paste, a name in
+  > **Checked before it is held, 2026-11-04, test first, mutation-checked.** The service held a change without checking it, so a wrong paste, a name in
   > use, a program rule or a change asked for while connected reached the Windows prompt and failed only after the person approved it. `hold_change` now
   > refuses at once what applying would refuse now, with the same reason (`refuse_what_cannot_apply`): the configurator's `check_add_endpoint` and
   > `check_add_rule` share their checks with the real adds (`endpoint_for`, `rule_allowed`, `label_taken`) and keep nothing; the guided setup's result is
