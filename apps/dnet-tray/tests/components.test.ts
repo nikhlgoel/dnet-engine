@@ -192,6 +192,10 @@ describe('every view', () => {
     const text = items.map((i) => i.textContent ?? '').join('\n');
     expect(text).toMatch(/Working/);
     expect(text).toMatch(/for \d+ (s|min|h)/);
+    // The kind and the name of a part are two words, not one: "Network Wi-Fi", never "NetworkWi-Fi" (a screen reader reads
+    // the text, and the space inside a span is dropped by the compiler).
+    expect(text).toMatch(/Network [A-Za-z]/);
+    expect(text).not.toMatch(/Network[A-Za-z]/);
     expect(await violations()).toEqual([]);
   });
 

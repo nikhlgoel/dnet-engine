@@ -57,7 +57,7 @@
         <li class={`part ${part.state.toLowerCase()}`}>
           <span class="state">{p.states[part.state]}</span>
           <span class="what">
-            <strong>{p.kinds[part.kind]}<span class="id"> {part.id}</span></strong>
+            <strong>{p.kinds[part.kind]}{' '}<span class="id">{part.id}</span></strong>
             <span>{part.reason}</span>
             <span class="meta num">
               {fill(p.for, { age: age(part.ageSeconds) })}
