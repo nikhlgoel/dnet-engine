@@ -19,6 +19,20 @@ There are two independent checks, and they say different things:
 
 Checking both is stronger than either. The SHA-256 of each installer is also in the release's `SHA256SUMS.txt`.
 
+## The project's key
+
+| | |
+|---|---|
+| Made | 2026-11-04, valid until 2036-11-04 |
+| Algorithm | RSA 3072, SHA-256; the key file is encrypted with AES-256 |
+| SHA-256 fingerprint | `ab484a617207eea3cd885d586c0dbb3cc2db414ca6d017291311e5c8e58f51b1` |
+| Public certificate | `installer/dnet-engine-signing.cer` |
+
+The private key is not in this repository. The owner keeps the key file in their cloud-synced documents, a second copy
+on another drive, and the password apart from both (and in a password manager). The release workflow has it as the
+secrets `SIGN_PFX_BASE64` and `SIGN_PFX_PASSWORD` of the GitHub environment `release`, which only runs for tags
+matching `v*.*.*` and waits for the owner's approval; no other environment or branch can read them.
+
 ## Checking a download
 
 ```powershell

@@ -1044,7 +1044,11 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
   > the installer is to be checked on an install (no 7-Zip here to open it), and the workflow no longer checks the loose copy.
   > **Install test on the owner's PC prepared, not run (needs an administrator shell):** `testing/Invoke-InstallTest.ps1` (refuses without admin, with DNet Engine already present, with a development `dnetd.exe` running or the tray open; checks the service account, start mode, crash recovery, folder
   > permissions, the files, the signatures of the installed files against the installer's signer, wintun's vendor signature, that `dnetctl` reaches the service, then uninstalls and compares routes, name servers and adapters before and after). Parse-checked and its refusal run; the rest unrun.
-  > **Not done:** the real key (the owner runs the ceremony), the two repository secrets, the published fingerprint, a CI run of the signing steps (needs the secrets); the workflow YAML has not been parsed locally (no parser here).
+  > **The real key was made on 2026-11-04 (the owner delegated the ceremony):** fingerprint ab484a617207eea3cd885d586c0dbb3cc2db414ca6d017291311e5c8e58f51b1, valid to 2036-11-04; the key file (AES-256) in the owner's cloud-synced documents and a second copy on another drive of the same disk
+  > (so it guards against deletion, not a disk failure), the 28-character random password in two restricted files apart from the key and **to be copied into a password manager**; signed and checked from the stored files. The GitHub environment `release`
+  > is restricted to `v*.*.*` tags with the owner as required reviewer and holds the two secrets; branch builds run in `release-test`, which has none.
+  > **Still not done:** a CI run of the signing steps on a tag (nothing is tagged), and a check of the tray program inside the installer.
+  > **(superseded) Not done:** the real key (the owner runs the ceremony), the two repository secrets, the published fingerprint, a CI run of the signing steps (needs the secrets); the workflow YAML has not been parsed locally (no parser here).
   > Windows still shows "unknown publisher": the key is not on its list of authorities (SignPath Foundation or a purchased certificate would remove that; see the runbook).
 - [ ] T115 Verify installer size at or below 60 MB (SC-012); if exceeded, reduce bundled artifacts before relaxing the target
 - [ ] T116 Measure idle RSS at or below 150 MB combined and idle CPU below 1% on a four-core machine (SC-013, SC-014)
