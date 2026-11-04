@@ -1760,6 +1760,23 @@ own, made by DNet Engine's wizard on Oracle Cloud Always Free (or any Linux serv
   > **Open:** (b) the read-only detail limit (E4,
   > solutions 3.3); (c) a record of who proposed and approved; (d) the live Windows prompt, the owner's click (`LOCAL-COMMANDS.md` 10.8); (e) the residual in ADR-0008
   > section 12.1: an administrator at the default prompt level can be bypassed by malware that knows how.
+  > **Windows run 2026-11-04 (local session, unelevated; the owner was away, so no Windows prompt was answered).** Ran: 1.1 to 1.4, 1.7 (2288 Rust tests
+  > pass, 0 fail, 14 ignored; `silence_is_unknown_never_unreachable` passes on Windows; 282 web tests, 0 type errors, 57.9 KB gzipped), 4.1, and against the
+  > development service from 4.2: 10.8 (a new server waits, with an id, and the list is unchanged), 10.10 (a made-up id is refused by both commands), a
+  > name already in use refused at once with nothing left waiting (10.11's check, with the existing `harness` label), then the test change was dropped.
+  > **Not run:** the Windows prompt itself and 10.12 (the window); both need the owner. **Found:** Brutal (`brutal-on --accept-warning`) takes effect at once,
+  > it is not held for approval (undone with `brutal-off`); the service reports `Failed: the connection engine is missing from the installation` for a
+  > development service run from `target\debug`; `LOCAL-COMMANDS.md` 5.1 used `198.18.0.0/16`, which the fake-IP pool refuses on purpose (now `203.0.113.0/24`)
+  > and 7.1 did not say it needs 8.3 first (`target\server-cores\server-pins.json`; now said). Installer (7.1, 7.2): payload 16 files, 53.7 MB; setup 14.9 MB
+  > (limit 60), SHA-256 26352F2F893045677F357096FCD84C2F089A852EC0BCB5C1C9C8BF5B2E710E03; not installed (7.3 onwards need the VM).
+  > **10.12 and the admin tests, 2026-11-04 (owner present).** 10.12 passed in the real window: the new server waited for approval with no red error, Approve raised
+  > the Windows prompt and the second window, `yes` applied it, and it was listed with nothing waiting. **Found:** a development window cannot start Approve unless
+  > `dnetctl.exe` sits beside `dnet-tray.exe` (`shell.rs` `run_approver` looks only there; the installed layout has both), and the failure shows only as "could not be
+  > started", which does not say where it looked; `remove-endpoint` takes the uuid, not the label. Admin run: 1.5 12 passed; 2.1 passes (the trace session is taken back;
+  > the closing `logman query` exits non-zero on purpose); 2.2 in an elevated shell fails `t039_unprivileged_client_cannot_alter_routing` only because the client is
+  > elevated (passes unelevated, 1.4); cause not traced. **Explained:** the `harness` endpoint was disabled by the owner in the Servers list (only a client request can disable one; the service never does).
+  > The development service reports `Failed: the connection engine is missing from the installation` because it looks for the cores beside `dnetd.exe` (`Layout::installed`)
+  > and a development build has them in `vendor\`; the message is right for an installed copy and misleading in a development folder.
 - [ ] T161 [US1] Guard v2 (ADR-0006 P3; `docs/research/2026-10-31-solutions.md` section 4): persistent filters tied to the service, the five yes/no lab checks
   > Waits for the owner's approval of P3 (F2) and the lab run (S4).
 - [~] T162 [US1] Power and session awareness (solutions section 6): power events, user-presence setting, tick-gap detector

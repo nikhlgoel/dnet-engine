@@ -59,7 +59,7 @@ run 1.8 "cargo audit"
 run 2.1 "logman create trace DNetEngineAttribution -rt -ets; cargo test -p dnet-etw -- --ignored; logman query DNetEngineAttribution -ets"
 ```
 
-2.2 Control pipe and client: identity and owner checks on a real pipe (admin)
+2.2 Control pipe and client: identity and owner checks on a real pipe (normal shell, NOT admin: `t039_unprivileged_client_cannot_alter_routing` needs an unprivileged client and fails in an elevated one)
 ```powershell
 run 2.2 "cargo test -p dnet-ipc; cargo test -p dnetctl"
 ```
@@ -132,7 +132,7 @@ run 4.6 "taskkill /im dnetd.exe /f"
 
 5.1 Add, list and remove a rule through dnetctl, with the service from 4.2 running (admin)
 ```powershell
-run 5.1 ".\target\debug\dnetctl.exe rules; .\target\debug\dnetctl.exe add-rule --suffix example.com --bypass; .\target\debug\dnetctl.exe rules; .\target\debug\dnetctl.exe add-rule --cidr 198.18.0.0/16 --tunnel; .\target\debug\dnetctl.exe --json rules"
+run 5.1 ".\target\debug\dnetctl.exe rules; .\target\debug\dnetctl.exe add-rule --suffix example.com --bypass; .\target\debug\dnetctl.exe rules; .\target\debug\dnetctl.exe add-rule --cidr 203.0.113.0/24 --tunnel; .\target\debug\dnetctl.exe --json rules"
 ```
 
 5.2 Remove the rule added in 5.1 (replace <id> with the RULE column from 5.1)
@@ -159,7 +159,7 @@ run 6.2 "cargo clippy -p dnetd -p xtask --all-targets -- -D warnings; cargo run 
 
 ## 7. New: the installer (T114). Sections 7.3 onwards on a Windows 11 VM with a snapshot
 
-7.1 Stage the payload (needs 1.1 done once; verifies, builds release `dnetd`/`dnetctl`, copies)
+7.1 Stage the payload (needs 1.1 and 8.3 done once: 8.3 writes `target\server-cores\server-pins.json`, which the installer ships; verifies, builds release `dnetd`/`dnetctl`, copies)
 ```powershell
 run 7.1 "cargo run -p xtask -- stage-installer"
 ```
@@ -318,7 +318,7 @@ Then approve it yourself, in the same window: `dnetctl approve <id>` opens a sec
 ```powershell
 run 10.9 ".\target\debug\dnetctl.exe pending; .\target\debug\dnetctl.exe endpoints"
 ```
-The server should now be listed and nothing waiting. Keep it for 10.11, then remove it with `dnetctl remove-endpoint <id>` (removing needs no approval).
+The server should now be listed and nothing waiting. Keep it for 10.11, then remove it with `dnetctl remove-endpoint <uuid>` (removing needs no approval; the uuid, not the name, is in `dnetctl --json endpoints`).
 
 10.10 A made-up id is refused by both commands, and nothing is waiting (nothing to click)
 ```powershell
@@ -330,7 +330,7 @@ run 10.10 ".\target\debug\dnetctl.exe approve zz99; .\target\debug\dnetctl.exe r
 run 10.11 ".\target\debug\dnetctl.exe add-endpoint uactest --host <ip> --credentials-file <file>; .\target\debug\dnetctl.exe pending"
 ```
 
-10.12 The same in the window (no admin; one Windows prompt). Open the window, Servers, "Add a server you already have": a new name, `<ip>`, the file, "Add server". The page must say "The new server waits for your approval above" with no red error, and list it under "Waiting for your approval". Press Approve, answer Windows, type `yes`: the server appears in the list and the notice goes away. Nothing to log: tell me what you saw, and remove the server afterwards.
+10.12 The same in the window (no admin; one Windows prompt). Approve starts `dnetctl.exe` from the folder the window runs in, so for a development window first copy it there: `Copy-Item target\debug\dnetctl.exe apps\dnet-tray\src-tauri\target\debug\ -Force` (the installed program has them side by side). Open the window, Servers, "Add a server you already have": a new name, `<ip>`, the file, "Add server". The page must say "The new server waits for your approval above" with no red error, and list it under "Waiting for your approval". Press Approve, answer Windows, type `yes`: the server appears in the list and the notice goes away. Nothing to log: tell me what you saw, and remove the server afterwards.
 
 ## 11. Lab check: does the core match a rule by program on Windows? (not runnable yet)
 
