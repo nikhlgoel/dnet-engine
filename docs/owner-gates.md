@@ -211,6 +211,8 @@ account (card and phone), and a release build's `server-pins.json` beside `dnetd
 4. Paste the result back. The server must appear in Servers.
 5. Turn the connection on. **Pass:** connected through the new server, `dnetctl status` shows it.
 
+**Speed, before choosing the shape:** Oracle's own Always Free list says the AMD `VM.Standard.E2.1.Micro` has **up to 50 Mbps** of internet bandwidth, so it cannot show more than that. The Ampere A1 shape's bandwidth scales with its OCPUs and Oracle gives no figure; an unofficial listing implies about 1 Gbps per OCPU (unverified). Measure the throughput through the tunnel (`curl` of a large file from the server's origin on the tunnel address) and write the result next to the shape used. The Arm server programs have been built but never run (no Arm machine): treat the first Arm run as a test of that too.
+
 **Also check, on that server** (`ssh` in): `systemctl list-timers` shows `dnet-keepalive.timer` and `dnet-housekeeping.timer`;
 `journalctl --disk-usage` is below 100 MB; `df -h /` shows no growth after a week; the core log level is `warn`
 (`grep level /var/lib/dnet/primary/server.json`).

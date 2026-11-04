@@ -18,6 +18,14 @@ import words from '../../../../crates/dnet-view/words.json';
 export { brutalWarning, disclosure, words };
 
 export const en = {
+  window: {
+    label: 'Window',
+    title: 'DNet Engine',
+    minimize: 'Minimize',
+    maximize: 'Maximize',
+    restore: 'Restore',
+    close: 'Close',
+  },
   state: {
     off: words.off,
     probe: words.probe,
@@ -168,6 +176,7 @@ export const en = {
         cancel: 'Cancel',
       },
       held: 'The new server waits for your approval above. Nothing is added until you approve it.',
+      heldOn: 'Turning this server on waits for your approval above. Nothing changes until you approve it.',
     },
     pending: {
       title: 'Waiting for your approval',

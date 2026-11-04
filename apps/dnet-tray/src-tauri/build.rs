@@ -25,6 +25,11 @@ const COMMANDS: &[&str] = &[
     "set_encrypted_dns",
     "check_updates",
     "open_login_page",
+    "window_minimize",
+    "window_toggle_maximize",
+    "window_start_drag",
+    "window_close",
+    "window_ready",
 ];
 
 fn main() {

@@ -41,6 +41,10 @@ struct Shell {
     grace: Mutex<Grace>,
     /// Whether the window is on screen. Nothing is sent to it while it is not.
     visible: AtomicBool,
+    /// The page has drawn its own title bar. The window has no system frame, so if this does not become true soon
+    /// after the window is made, the frame is given back (a page that failed to start must not leave a window that
+    /// cannot be moved or closed).
+    page_ready: AtomicBool,
     /// Wakes the state loop early: the service said something, or the person asked for something.
     wake: tokio::sync::Notify,
     tray: Mutex<Option<TrayParts>>,
@@ -56,6 +60,7 @@ impl Shell {
             backlog: Mutex::new(Backlog::new()),
             grace: Mutex::new(Grace::new()),
             visible: AtomicBool::new(false),
+            page_ready: AtomicBool::new(false),
             wake: tokio::sync::Notify::new(),
             tray: Mutex::new(None),
             text: Mutex::new(None),
@@ -161,8 +166,12 @@ fn open_window(app: &AppHandle) {
         return;
     }
     // Created hidden and shown when the page has loaded, so there is no blank frame (R2).
+    shell.page_ready.store(false, Ordering::Relaxed);
     let built = WebviewWindowBuilder::new(app, WINDOW, WebviewUrl::App("index.html".into()))
         .title("DNet Engine")
+        // No system frame: the page draws the title bar and the edge (ADR-0007 R4 keeps what it may ask of the
+        // window to the four commands below).
+        .decorations(false)
         .inner_size(960.0, 660.0)
         .min_inner_size(560.0, 420.0)
         .visible(false)
@@ -173,12 +182,34 @@ fn open_window(app: &AppHandle) {
         })
         .build();
     match built {
-        Ok(_) => shell.wake.notify_one(),
+        Ok(_) => {
+            shell.wake.notify_one();
+            watch_page(app.clone());
+        }
         Err(error) => {
             shell.visible.store(false, Ordering::Relaxed);
             eprintln!("could not open the window: {error}");
         }
     }
+}
+
+/// How long a new window has to say its title bar is drawn before the system frame is given back.
+const PAGE_READY_WITHIN: Duration = Duration::from_secs(10);
+
+/// Give the window its system frame back if its page never says it is up: the window has none of its own, and a
+/// page that failed to start would otherwise leave it with no way to move or close it.
+fn watch_page(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(PAGE_READY_WITHIN).await;
+        let shell = app.state::<Arc<Shell>>();
+        if shell.page_ready.load(Ordering::Relaxed) {
+            return;
+        }
+        if let Some(window) = app.get_webview_window(WINDOW) {
+            eprintln!("the window's page did not start; giving the window its system frame back");
+            let _ = window.set_decorations(true);
+        }
+    });
 }
 
 /// The window was closed: hide it, send it nothing, and let the web view go if nobody wants it back (R2).
@@ -449,6 +480,52 @@ fn run_approver(args: &[String]) -> Option<i32> {
     command.status().ok()?.code()
 }
 
+// ---------------------------------------------------------------------------------------- the window's frame
+//
+// The page draws its own title bar, so it needs four things from the window and no more. Each acts on this
+// program's own window and takes no argument.
+
+#[tauri::command]
+fn window_minimize(app: AppHandle) {
+    if let Some(window) = app.get_webview_window(WINDOW) {
+        let _ = window.minimize();
+    }
+}
+
+#[tauri::command]
+fn window_toggle_maximize(app: AppHandle) {
+    if let Some(window) = app.get_webview_window(WINDOW) {
+        let maximized = window.is_maximized().unwrap_or(false);
+        let _ = if maximized {
+            window.unmaximize()
+        } else {
+            window.maximize()
+        };
+    }
+}
+
+#[tauri::command]
+fn window_start_drag(app: AppHandle) {
+    if let Some(window) = app.get_webview_window(WINDOW) {
+        let _ = window.start_dragging();
+    }
+}
+
+/// Asks to close, which is what the system's own button did: the close handler hides the window and lets the web
+/// view go after its grace (R2). The tray keeps running.
+#[tauri::command]
+fn window_close(app: AppHandle) {
+    if let Some(window) = app.get_webview_window(WINDOW) {
+        let _ = window.close();
+    }
+}
+
+/// The page has drawn its title bar: the system frame is not needed (see `watch_page`).
+#[tauri::command]
+fn window_ready(shell: Shared<'_>) {
+    shell.page_ready.store(true, Ordering::Relaxed);
+}
+
 #[tauri::command]
 async fn set_encrypted_dns(shell: Shared<'_>, block: bool) -> Result<Value, String> {
     Ok(shell.bridge.set_encrypted_dns(block).await)
@@ -500,12 +577,26 @@ pub fn run() {
             set_encrypted_dns,
             check_updates,
             open_login_page,
+            window_minimize,
+            window_toggle_maximize,
+            window_start_drag,
+            window_close,
+            window_ready,
         ])
         .on_window_event(|window, event| {
             if window.label() == WINDOW {
-                if let WindowEvent::CloseRequested { api, .. } = event {
-                    api.prevent_close();
-                    close_window(window.app_handle());
+                match event {
+                    WindowEvent::CloseRequested { api, .. } => {
+                        api.prevent_close();
+                        close_window(window.app_handle());
+                    }
+                    // The page draws a Maximize or a Restore button; it is told which, whoever changed it (the
+                    // title bar, a keyboard shortcut, or snapping the window to an edge).
+                    WindowEvent::Resized(_) => {
+                        let maximized = window.is_maximized().unwrap_or(false);
+                        let _ = window.emit_to(WINDOW, "dnet:window", maximized);
+                    }
+                    _ => {}
                 }
             }
         })

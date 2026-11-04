@@ -27,6 +27,11 @@
     "allow-approve-change",
     "allow-set-encrypted-dns",
     "allow-check-updates",
-    "allow-open-login-page"
+    "allow-open-login-page",
+    "allow-window-minimize",
+    "allow-window-toggle-maximize",
+    "allow-window-start-drag",
+    "allow-window-close",
+    "allow-window-ready"
   ]
 }

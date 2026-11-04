@@ -4,6 +4,7 @@ import './app.css';
 import { mount } from 'svelte';
 import App from './App.svelte';
 import { isTauri } from './lib/bridge';
+import { createTauriChrome } from './lib/chrome';
 import { createMockBridge } from './lib/mock';
 
 async function bridge() {
@@ -23,4 +24,5 @@ async function bridge() {
 
 const target = document.getElementById('app');
 if (target === null) throw new Error('the page has no #app element');
-mount(App, { target, props: { bridge: await bridge() } });
+// Inside the real app the system frame is off, so the page draws the window's own; a browser tab keeps the browser's.
+mount(App, { target, props: { bridge: await bridge(), chrome: isTauri() ? createTauriChrome() : null } });

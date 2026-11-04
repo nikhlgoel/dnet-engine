@@ -348,8 +348,16 @@ export function createMockBridge(options: MockOptions = {}): MockController {
     async setEndpointEnabled(id, enabled) {
       const blocked = idleOnly();
       if (blocked) return blocked;
-      if (!endpoints.some((e) => e.id === id)) return refuse('there is no endpoint with that id');
-      endpoints = endpoints.map((e) => (e.id === id ? { ...e, enabled } : e));
+      const target = endpoints.find((e) => e.id === id);
+      if (!target) return refuse('there is no endpoint with that id');
+      const apply = () => {
+        endpoints = endpoints.map((e) => (e.id === id ? { ...e, enabled } : e));
+        return id;
+      };
+      // As the service does: turning a server on sends traffic somewhere, so it waits for approval; turning one off
+      // does not.
+      if (enabled && !target.enabled) return applyOrHold(`Turning on the server "${target.label}"`, apply);
+      apply();
       return { ok: true };
     },
 

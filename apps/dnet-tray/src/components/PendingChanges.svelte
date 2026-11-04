@@ -25,6 +25,8 @@
   /** The change being approved or dropped now; the others wait their turn. */
   let busy = $state<string | null>(null);
   let approving = $state(false);
+  /** What became of the last change is news when it went through; anything else is a problem and is announced as one. */
+  const calm = $derived(approving || message === t.approved || message === t.dropped);
 
   async function load(): Promise<void> {
     try {
@@ -73,7 +75,10 @@
   }
 </script>
 
-{#if items.length > 0 || message}
+{#if items.length === 0 && message}
+  <!-- Nothing waits any more: only what became of the last change is said, not a card that says things wait. -->
+  <p class="notice" role={calm ? 'status' : 'alert'}>{message}</p>
+{:else if items.length > 0}
   <section class="card pending" aria-labelledby="pending-title">
     <h2 id="pending-title">{t.title}</h2>
     {#if items.length > 0}
@@ -104,7 +109,7 @@
       </ul>
     {/if}
     {#if message}
-      <p class="notice" role={approving ? 'status' : 'alert'}>{message}</p>
+      <p class="notice" role={calm ? 'status' : 'alert'}>{message}</p>
     {/if}
   </section>
 {/if}

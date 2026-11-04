@@ -470,6 +470,44 @@ describe('Changes waiting for approval (T160)', () => {
     expect(await bridge.pending()).toEqual([]);
   });
 
+  it('turning a server on that is held for approval is said to be waiting, not shown as a command-line refusal, and works once approved', async () => {
+    const bridge = mount({
+      holdChanges: true,
+      endpoints: [{ id: 'e1', label: 'harness', address: '203.0.113.10:51820', enabled: false, health: 'Unknown' }],
+    });
+    await go('Servers');
+    await fireEvent.click(await screen.findByRole('button', { name: 'Use' }));
+    const notice = await screen.findByText(/waits for your approval above/);
+    expect(notice.getAttribute('role')).toBe('status');
+    const alerts = screen.queryAllByRole('alert').map((a) => a.textContent ?? '');
+    expect(alerts.join(' ')).not.toMatch(/waits for approval|dnetctl/);
+    expect(await bridge.endpoints()).toContainEqual(expect.objectContaining({ label: 'harness', enabled: false }));
+
+    await fireEvent.click(await screen.findByRole('button', { name: /^Approve: Turning on the server "harness"/ }));
+    expect(await screen.findByText('In use')).toBeTruthy();
+    expect(screen.queryByText(/waits for your approval above/)).toBeNull();
+    expect(screen.queryAllByRole('alert').map((a) => (a.textContent ?? '').trim()).filter(Boolean)).toEqual([]);
+    expect(await bridge.endpoints()).toContainEqual(expect.objectContaining({ label: 'harness', enabled: true }));
+  });
+
+  it('turning a server off is not held, and nothing says it waits', async () => {
+    const bridge = mount({ holdChanges: true });
+    await go('Servers');
+    await fireEvent.click(await screen.findByRole('button', { name: 'Don’t use' }));
+    await waitFor(async () => expect(await bridge.endpoints()).toContainEqual(expect.objectContaining({ enabled: false })));
+    expect(screen.queryByText(/waits for your approval/)).toBeNull();
+    expect(screen.queryAllByRole('alert').map((a) => (a.textContent ?? '').trim()).filter(Boolean)).toEqual([]);
+  });
+
+  it('once a change is approved, nothing is said to be waiting: the card that said so is gone', async () => {
+    const bridge = mount();
+    bridge.hold('Adding the server "home" at 203.0.113.9');
+    await go('Servers');
+    await fireEvent.click(await screen.findByRole('button', { name: /^Approve: Adding the server "home"/ }));
+    expect(await screen.findByText('Approved and applied.')).toBeTruthy();
+    expect(screen.queryByRole('heading', { level: 2, name: 'Waiting for your approval' })).toBeNull();
+  });
+
   it('drops a waiting change without applying it', async () => {
     const bridge = mount();
     const id = bridge.hold('Sending example.com around the tunnel');

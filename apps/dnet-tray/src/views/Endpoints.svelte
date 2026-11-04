@@ -18,8 +18,8 @@
   let credentials = $state('');
   let busy = $state(false);
   let failedToLoad = $state(false);
-  /** A server this view asked to add waits for the person's approval (T160); how many times it has asked. */
-  let held = $state(false);
+  /** What this view asked for waits for the person's approval (T160), in words: which, if any. How many times it has asked. */
+  let held = $state<string | null>(null);
   let asked = $state(0);
 
   // Endpoints change only while disconnected: the engine and what it drives were built from the endpoints of
@@ -70,7 +70,7 @@
       // Not refused: the service holds the server, with the details from the file, until the person approves it
       // in the list above. The form's copy of the file is dropped now, as on success.
       close();
-      held = true;
+      held = t.held;
       asked += 1;
     } else {
       error = outcome.reason;
@@ -79,13 +79,17 @@
 
   /** A waiting change was approved or dropped in the list: the servers are read again. */
   async function settled(): Promise<void> {
-    held = false;
+    held = null;
     await load();
   }
 
   async function toggle(e: EndpointView): Promise<void> {
     const outcome = await app.bridge.setEndpointEnabled(e.id, !e.enabled);
-    error = outcome.ok ? null : outcome.reason;
+    // Turning a server on that is held for approval was not refused: it waits in the list above (T160).
+    const waits = !outcome.ok && outcome.code === 'ApprovalRequired';
+    error = outcome.ok || waits ? null : outcome.reason;
+    held = waits ? t.heldOn : null;
+    if (waits) asked += 1;
     await load();
   }
 
@@ -107,7 +111,7 @@
   <PendingChanges {app} {asked} onsettled={settled} />
 
   {#if held}
-    <p class="notice" role="status">{t.held}</p>
+    <p class="notice" role="status">{held}</p>
   {/if}
   {#if locked}
     <p class="notice">{en.errors.disconnectFirst}</p>
@@ -171,7 +175,7 @@
         disabled={locked}
         onclick={() => {
           adding = true;
-          held = false;
+          held = null;
         }}>{t.add}</button
       >
       <button type="button" class="btn" disabled={locked} onclick={() => app.go('wizard')}>{t.setup}</button>
