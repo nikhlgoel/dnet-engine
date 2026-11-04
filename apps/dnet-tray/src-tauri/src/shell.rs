@@ -552,6 +552,25 @@ pub fn run() {
     };
     let shell = Arc::new(Shell::new(Arc::new(PipeLink::with_trust(trust))));
 
+    // One tray per person: a second copy asks the first to open its window and ends (`single`). If the name is held by
+    // something that does not answer, this copy starts anyway: a second tray is a smaller fault than none.
+    let pipe = crate::single::pipe_name();
+    let mut listener = match tauri::async_runtime::block_on(async { crate::single::acquire(&pipe) })
+    {
+        Ok(crate::single::Role::First(listener)) => Some(listener),
+        Ok(crate::single::Role::Second) => {
+            if tauri::async_runtime::block_on(crate::single::tell_first(&pipe)).is_ok() {
+                return;
+            }
+            eprintln!("another copy owns the tray's pipe but did not answer; starting anyway");
+            None
+        }
+        Err(error) => {
+            eprintln!("could not set up the one-tray guard ({error}); starting anyway");
+            None
+        }
+    };
+
     let app = tauri::Builder::default()
         .manage(shell.clone())
         .invoke_handler(tauri::generate_handler![
@@ -604,9 +623,18 @@ pub fn run() {
             build_tray(app, &shell)?;
             tauri::async_runtime::spawn(watch_state(app.handle().clone(), shell.clone()));
             tauri::async_runtime::spawn(follow_events(app.handle().clone(), shell.clone()));
-            // `--open` starts with the window showing, for a person starting it from a shortcut and for tests.
-            if std::env::args().any(|a| a == "--open") {
+            // The window opens when a person starts the program (a shortcut, the installer's last page, a second copy
+            // asking); only the login start (`--background`) leaves the tray alone.
+            if crate::single::shows_window(std::env::args()) {
                 open_window(app.handle());
+            }
+            if let Some(mut listener) = listener.take() {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    while listener.wait().await.is_ok() {
+                        open_window(&handle);
+                    }
+                });
             }
             Ok(())
         })

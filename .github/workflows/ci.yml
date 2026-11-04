@@ -135,6 +135,8 @@ jobs:
         working-directory: apps/dnet-tray
       - run: cargo fmt --manifest-path apps/dnet-tray/src-tauri/Cargo.toml --check
       - run: cargo clippy --manifest-path apps/dnet-tray/src-tauri/Cargo.toml --all-targets -- -D warnings
+      # The one-tray guard (a per-user named pipe) is tested for real on the runner.
+      - run: cargo test --manifest-path apps/dnet-tray/src-tauri/Cargo.toml
       - run: cargo build --manifest-path apps/dnet-tray/src-tauri/Cargo.toml --release
 
   coverage:
