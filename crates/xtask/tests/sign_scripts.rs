@@ -81,8 +81,16 @@ struct Throwaway {
     sha256: String,
 }
 
+/// Certificates are made one at a time: six tests making them at once in the same store made PowerShell's
+/// `New-SelfSignedCertificate` fail now and then on a busy runner (a method-overload error), and the tests then failed
+/// for a reason that has nothing to do with signing.
+static MAKING_A_CERTIFICATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 impl Throwaway {
     fn new(tag: &str) -> Throwaway {
+        let _one_at_a_time = MAKING_A_CERTIFICATE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let subject = format!("CN=dnet-sign-test-{}-{tag}", std::process::id());
         let out = powershell()
             .expect("PowerShell")
