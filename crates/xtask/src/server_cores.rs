@@ -120,6 +120,7 @@ fn build_core(src: &GoSource, out: &Path) -> Result<PinnedCore> {
         );
     }
 
+    crate::fetch_vendor::warm_go_cache(&work);
     let mut built = Vec::new();
     for arch in ARCHES {
         let file = asset_name(src.dest, arch);
