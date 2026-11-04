@@ -31,10 +31,10 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: stable
       - name: The version
@@ -47,11 +47,11 @@ jobs:
           echo "version=$v" >> "$GITHUB_OUTPUT"
       - name: Build
         run: cargo xtask build-server-cores --base-url "https://github.com/${{ github.repository }}/releases/download/v${{ steps.version.outputs.version }}/"
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@v4
         with:
           subject-path: target/server-cores/*-linux-*
         # (needs id-token and attestations permissions, set below)
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: server-cores
           path: target/server-cores/
@@ -69,17 +69,17 @@ jobs:
       id-token: write # the attestation
       attestations: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # The cores are built from their pinned commits; the Go toolchain they declare is fetched as needed.
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: stable
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v5
         with:
           version: 12.4.2
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: pnpm
@@ -97,7 +97,7 @@ jobs:
           }
           "version=$cargo" >> $env:GITHUB_OUTPUT
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: server-cores
           path: target/server-cores
@@ -140,11 +140,11 @@ jobs:
           }
           ("{0}: {1:N1} MB, SHA-256 {2}" -f $name, ($built.Length / 1MB), $sha) | Write-Output
 
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@v4
         with:
           subject-path: dist-release/*.exe
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: installer-${{ steps.version.outputs.version }}
           path: dist-release/

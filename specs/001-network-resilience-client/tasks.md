@@ -1831,6 +1831,12 @@ own, made by DNet Engine's wizard on Oracle Cloud Always Free (or any Linux serv
   > cases, red then green, one mutation caught). With both fixed, the jobs that had been skipped behind them ran for the first time and passed (window shell build and clippy, coverage at or above 80%). **Result, run on commit 92daab3: every job green** except
   > the simulated-network job, which the workflow keeps disabled on purpose. PR #1 was merged into `master` the same day (merge commit), which also starts the website's workflow. The "Node.js 20 is deprecated" notice on the checkout action is a warning to act on
   > before the runners force the change (not done).
+  > **Node 20 notice acted on, 2026-11-04.** The runner warns that `actions/checkout@v4`, `actions/setup-node@v4` and `pnpm/action-setup@v4` target Node 20 and are forced onto 24. Read `runs.using` in each
+  > action's own `action.yml` at its tag (not from memory): checkout v5 to v7, setup-node v5 to v7, pnpm/action-setup v5 and v6, setup-go v6 and v7, upload-artifact v6 and v7, download-artifact v7 and v8, deploy-pages v5,
+  > configure-pages v6 are `node24`; v4 of pnpm/action-setup, v5 of setup-go, v4 of deploy-pages and v5 of configure-pages are `node20`; upload-pages-artifact v5 and attest-build-provenance v4 are composites that call
+  > upload-artifact v7 and `actions/attest` v4.2.1 (node24); rust-cache v2 is already node24; dtolnay/rust-toolchain and taiki-e/install-action are composites. Moved to: checkout v6, setup-node v6, pnpm/action-setup v5,
+  > setup-go v6, upload-artifact v7, download-artifact v8, attest-build-provenance v4, deploy-pages v5, configure-pages v6, upload-pages-artifact v5. **Not yet confirmed:** the PR's CI run on this change (it exercises
+  > `ci.yml` and `pages.yml` only; `release.yml` runs on a tag, so its artifact and attestation steps are unexercised until a release).
 - [~] T174 [US1] The website's footer and sections, then shrink the known limits (the owner's request, 2026-11-04)
   > Asked after the second website upgrade went live (`https://nikhlgoel.github.io/dnet-engine/`, source in `site/`). **(1) The footer, "Known limits", "Where it stands" and the "what it does" rows still look plain.** Upgrade them: the limits as a short list that says, for each, why it
   > exists, what is being done about it and its state; the status as three visible groups with counts before any detail; a real footer (the project, the documents, the licence, the name note) instead of a line of links. **(2) Make the limits themselves smaller where it can be done,**
