@@ -46,7 +46,7 @@ use dnet_core::health::ProbeOutcome as EndpointProbeOutcome;
 use dnet_core::ids::{EndpointId, ProfileId};
 use dnet_core::posture::RoutingPosture;
 use dnet_core::probe::{ProfileProbe, RaceDecision};
-use dnet_core::profile::ProfileKind;
+use dnet_core::profile::{CoreBinding, ProfileKind};
 use dnet_core::reprobe::LiveCheck;
 use dnet_core::session::FailureCause;
 use dnet_core::tier::FailoverTier;
@@ -54,6 +54,7 @@ use dnet_ipc::protocol::{
     ActiveEndpoint, ActiveProfile, ConnectionStatus, IpcError, StateSnapshot, Warning,
 };
 use dnet_ipc::wire::EventBus;
+use dnet_supervisor::runtime::CoreHealth;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
@@ -106,6 +107,12 @@ pub trait Effects: Send + Sync + 'static {
         _endpoint: EndpointId,
     ) -> impl Future<Output = bool> + Send {
         async { false }
+    }
+
+    /// What is known about each transport process now, for the live map (T170). The default speaks for none, so a
+    /// host that cannot tell leaves the processes out of the map instead of showing them as fine.
+    fn core_health(&self) -> impl Future<Output = Vec<(CoreBinding, CoreHealth)>> + Send {
+        async { Vec::new() }
     }
 
     /// One check that the carrying profile still moves traffic.
@@ -229,6 +236,11 @@ impl Handle {
     /// The networks being watched and how good each is, or `None` when nothing is connected.
     pub fn paths(&self) -> Option<dnet_core::telemetry::PathsSnapshot> {
         self.telemetry.paths()
+    }
+
+    /// What the runtime last said about each transport process (T170); empty when it speaks for none.
+    pub fn cores(&self) -> Vec<(CoreBinding, CoreHealth)> {
+        self.telemetry.cores()
     }
 
     /// What the product did during this connection, or `None` when nothing is connected.
@@ -365,6 +377,7 @@ pub fn spawn<E: Effects>(engine: Engine, effects: Arc<E>, bus: EventBus, timing:
         message_tx.clone(),
         timing,
     ));
+    tokio::spawn(watch_cores(Arc::downgrade(&effects), telemetry.clone()));
     let actor = Actor {
         engine,
         effects,
@@ -385,6 +398,23 @@ pub fn spawn<E: Effects>(engine: Engine, effects: Arc<E>, bus: EventBus, timing:
         state,
         connecting,
         telemetry,
+    }
+}
+
+/// How often the transport processes are looked at (T170). A read of whether a process has exited does not wait.
+const CORE_WATCH_EVERY: Duration = Duration::from_secs(1);
+
+/// Publish what the effects say about the transport processes, once a second, until the effects are gone. It holds
+/// them weakly, so it never keeps a replaced orchestrator's effects alive.
+async fn watch_cores<E: Effects>(effects: std::sync::Weak<E>, telemetry: Telemetry) {
+    let mut tick = tokio::time::interval(CORE_WATCH_EVERY);
+    loop {
+        tick.tick().await;
+        let Some(effects) = effects.upgrade() else {
+            telemetry.publish_cores(Vec::new());
+            return;
+        };
+        telemetry.publish_cores(effects.core_health().await);
     }
 }
 
@@ -847,6 +877,13 @@ mod tests {
         tunnels: Mutex<VecDeque<Result<(), FailureCause>>>,
         checks: Mutex<VecDeque<LiveCheck>>,
         calls: Mutex<Vec<String>>,
+        /// What the fake says about the transport processes.
+        cores: Mutex<
+            Vec<(
+                dnet_core::profile::CoreBinding,
+                dnet_supervisor::runtime::CoreHealth,
+            )>,
+        >,
         /// A race waits for cancellation before answering, to let a test act while it runs.
         hold_race: AtomicBool,
         race_cancelled: AtomicBool,
@@ -949,6 +986,7 @@ mod tests {
                 tunnels: Mutex::new(VecDeque::new()),
                 checks: Mutex::new(VecDeque::new()),
                 calls: Mutex::new(Vec::new()),
+                cores: Mutex::new(Vec::new()),
                 hold_race: AtomicBool::new(false),
                 race_cancelled: AtomicBool::new(false),
                 stop_delay: Mutex::new(Duration::ZERO),
@@ -972,6 +1010,14 @@ mod tests {
     impl Effects for Script {
         fn environment(&self) -> Environment {
             self.environment.lock().unwrap().clone()
+        }
+        async fn core_health(
+            &self,
+        ) -> Vec<(
+            dnet_core::profile::CoreBinding,
+            dnet_supervisor::runtime::CoreHealth,
+        )> {
+            self.cores.lock().unwrap().clone()
         }
         async fn reach(&self, endpoints: &[Endpoint]) -> Vec<Reach> {
             let delay = *self.reach_delay.lock().unwrap();
@@ -2122,5 +2168,51 @@ mod tests {
         let calls = rig.script.calls();
         assert!(!calls.iter().any(|c| c.starts_with("move")), "{calls:?}");
         assert!(calls.iter().any(|c| c == "stop"), "{calls:?}");
+    }
+
+    // ---------------------------------------------------------------------------- the transport processes (T170)
+
+    #[tokio::test(start_paused = true)]
+    async fn what_the_effects_say_about_the_cores_is_published_and_follows_changes() {
+        use dnet_core::profile::CoreBinding::PrimaryCore;
+        use dnet_supervisor::runtime::CoreHealth::{Exited, Running};
+        let r = rig();
+        // Nothing said, nothing published.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(r.handle.cores().is_empty());
+
+        *r.script.cores.lock().unwrap() = vec![(PrimaryCore, Running)];
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert_eq!(r.handle.cores(), vec![(PrimaryCore, Running)]);
+
+        *r.script.cores.lock().unwrap() = vec![(PrimaryCore, Exited { code: Some(1) })];
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert_eq!(
+            r.handle.cores(),
+            vec![(PrimaryCore, Exited { code: Some(1) })]
+        );
+
+        // A core that is no longer spoken for leaves the published list.
+        r.script.cores.lock().unwrap().clear();
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(r.handle.cores().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_core_poller_does_not_keep_the_effects_alive() {
+        let script = Script::new();
+        let weak = Arc::downgrade(&script);
+        let r = rig_with(Arc::clone(&script), vec![endpoint("home")]);
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        // The actor holds a sender to its own channel, so only retiring ends it (as the service does when it
+        // replaces an orchestrator).
+        r.handle.retire();
+        drop(r);
+        drop(script);
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert!(
+            weak.upgrade().is_none(),
+            "something still holds the effects after the orchestrator ended"
+        );
     }
 }

@@ -9,6 +9,18 @@ use dnet_core::profile::CoreBinding;
 
 use crate::error::SupervisorError;
 
+/// What a runtime can say about one core right now (T170). The live map reads it; nothing here changes a core.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreHealth {
+    /// The runtime has nothing to say: the core was never started, was stopped on purpose, or the runtime
+    /// cannot tell. It is never shown as fine.
+    Unknown,
+    /// Started and, as of this reading, still running.
+    Running,
+    /// It ended without being stopped. `code` is its exit code, when the system gave one.
+    Exited { code: Option<i32> },
+}
+
 /// The privileged operations supervision performs, in the order it performs them.
 ///
 /// Async because spawning waits for readiness and killing waits for exit. Used only
@@ -37,6 +49,12 @@ pub trait CoreRuntime {
     /// that needs it (confirming who listens on the core's control port) refuse instead of guess.
     async fn core_pid(&self, _core: CoreBinding) -> Option<u32> {
         None
+    }
+
+    /// Whether a core is running now, read without waiting. The default says nothing (`Unknown`), so a runtime
+    /// that cannot tell makes the map leave the core out instead of showing it as fine.
+    async fn core_health(&self, _core: CoreBinding) -> CoreHealth {
+        CoreHealth::Unknown
     }
 
     /// Replay every outstanding undo record, restoring routing/DNS/adapter state

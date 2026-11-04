@@ -343,10 +343,13 @@ impl DnetService {
             .as_ref()
             .and_then(|o| o.paths())
             .unwrap_or_default();
-        self.components
+        let cores = orchestrator.as_ref().map(|o| o.cores()).unwrap_or_default();
+        let mut tracker = self
+            .components
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .refresh(&snapshot, &paths);
+            .unwrap_or_else(PoisonError::into_inner);
+        tracker.set_cores(cores);
+        tracker.refresh(&snapshot, &paths);
     }
 
     /// Keep the parts' states recorded once a second for as long as the service exists (T170). It holds the service

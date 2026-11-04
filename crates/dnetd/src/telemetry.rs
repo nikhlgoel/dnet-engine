@@ -15,8 +15,10 @@
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
 
+use dnet_core::profile::CoreBinding;
 use dnet_core::session::ConnectionEvent;
 use dnet_core::telemetry::{PathsSnapshot, SessionStats, StatsSummary};
+use dnet_supervisor::runtime::CoreHealth;
 
 #[derive(Default)]
 struct Inner {
@@ -24,6 +26,8 @@ struct Inner {
     attempt: u64,
     paths: Option<PathsSnapshot>,
     stats: SessionStats,
+    /// What the runtime last said about each transport process (T170).
+    cores: Vec<(CoreBinding, CoreHealth)>,
 }
 
 /// Shared between the watch loop, the orchestrator and the control pipe.
@@ -64,6 +68,17 @@ impl Telemetry {
     /// The networks being watched, or `None` when nothing is.
     pub fn paths(&self) -> Option<PathsSnapshot> {
         self.lock().paths.clone()
+    }
+
+    /// What the runtime says about each transport process now. Replaces the last reading whole, so a process
+    /// no longer spoken for leaves the list.
+    pub fn publish_cores(&self, cores: Vec<(CoreBinding, CoreHealth)>) {
+        self.lock().cores = cores;
+    }
+
+    /// The last reading of the transport processes; empty when nothing has spoken for any.
+    pub fn cores(&self) -> Vec<(CoreBinding, CoreHealth)> {
+        self.lock().cores.clone()
     }
 
     /// A connection came up.

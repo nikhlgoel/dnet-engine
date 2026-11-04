@@ -59,7 +59,7 @@ run 1.8 "cargo audit"
 run 2.1 "logman create trace DNetEngineAttribution -rt -ets; cargo test -p dnet-etw -- --ignored; logman query DNetEngineAttribution -ets"
 ```
 
-2.2 Control pipe and client: identity and owner checks on a real pipe (normal shell, NOT admin: `t039_unprivileged_client_cannot_alter_routing` needs an unprivileged client and fails in an elevated one)
+2.2 Control pipe and client: identity and owner checks on a real pipe (admin or not, but **stop the development service first (4.6)**: these tests use the real pipe's name, so a running `dnetd` answers them and `t039_unprivileged_client_cannot_alter_routing`, `silent_clients_are_let_go_...`, `t125_...` and `session_e2e` fail)
 ```powershell
 run 2.2 "cargo test -p dnet-ipc; cargo test -p dnetctl"
 ```

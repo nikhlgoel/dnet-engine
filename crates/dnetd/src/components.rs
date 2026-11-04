@@ -6,9 +6,9 @@
 //! without Windows.
 //!
 //! **What is reported, and what is not (yet).** Network paths, the connection, the endpoint carrying it, the
-//! routing decision and a sign-in page in the way. Not yet: the transport processes, the adapter, name-server
-//! handling, the guard and each carrier, because nothing in these two snapshots says how they are doing, and a
-//! part with no facts must be absent rather than shown as fine.
+//! routing decision, a sign-in page in the way, and each transport process the runtime can speak for. Not yet:
+//! the adapter, name-server handling, the guard and each carrier, because nothing the service holds says how they
+//! are doing, and a part with no facts must be absent rather than shown as fine.
 //!
 //! **Nothing sensitive.** A reading carries an opaque id and words about the part's state. It never carries an
 //! endpoint's label or address or a network's name: those are what the diagnostics bundle redacts, and this feeds
@@ -24,6 +24,7 @@ use tokio::time::Instant;
 use dnet_core::failure::explain;
 use dnet_core::path::{PathKind, PathRole};
 use dnet_core::posture::RoutingPosture;
+use dnet_core::profile::CoreBinding;
 use dnet_core::quality::QualityBand;
 use dnet_core::registry::{
     ComponentKind, ComponentState, Evidence, Observation, Registry, StateChange,
@@ -33,15 +34,17 @@ use dnet_core::telemetry::{PathView, PathsSnapshot};
 use dnet_core::tier::FailoverTier;
 use dnet_ipc::componentview::encode_components;
 use dnet_ipc::protocol::{ConnectionStatus, StateSnapshot};
+use dnet_supervisor::runtime::CoreHealth;
 
 /// The kinds of part this module reports. A part of one of these kinds that is not in the latest readings is
 /// gone (a network that was unplugged) and is removed; a part of any other kind belongs to someone else.
-pub const OWNED_KINDS: [ComponentKind; 5] = [
+pub const OWNED_KINDS: [ComponentKind; 6] = [
     ComponentKind::NetworkPath,
     ComponentKind::Session,
     ComponentKind::Endpoint,
     ComponentKind::Routes,
     ComponentKind::CaptivePortal,
+    ComponentKind::CoreProcess,
 ];
 
 /// One part's account of itself.
@@ -54,9 +57,25 @@ pub struct Reading {
     pub evidence: Evidence,
 }
 
-/// The readings for the facts the service holds now, ordered by kind and id.
+/// The readings for the facts the service holds now, ordered by kind and id, with no word on the transport
+/// processes.
 pub fn readings(state: &StateSnapshot, paths: &PathsSnapshot) -> Vec<Reading> {
+    readings_with_cores(state, paths, &[])
+}
+
+/// The same, with what the runtime says about each transport process. A process the runtime cannot speak for
+/// (`CoreHealth::Unknown`) is left out: a part with no facts must be absent, not shown as fine.
+pub fn readings_with_cores(
+    state: &StateSnapshot,
+    paths: &PathsSnapshot,
+    cores: &[(CoreBinding, CoreHealth)],
+) -> Vec<Reading> {
     let mut out = vec![session_reading(state), routes_reading(state)];
+    out.extend(
+        cores
+            .iter()
+            .filter_map(|(core, health)| core_reading(*core, *health)),
+    );
     if let Some(endpoint) = &state.active_endpoint {
         out.extend(endpoint_reading(state.status, &endpoint.id));
     }
@@ -77,6 +96,34 @@ pub fn readings(state: &StateSnapshot, paths: &PathsSnapshot) -> Vec<Reading> {
     );
     out.sort_by(|a, b| (a.kind, &a.id).cmp(&(b.kind, &b.id)));
     out
+}
+
+/// A transport process, named by role and never by what it is built from (the branding rule).
+fn core_reading(core: CoreBinding, health: CoreHealth) -> Option<Reading> {
+    let (id, name) = match core {
+        CoreBinding::PrimaryCore => ("primary", "primary"),
+        CoreBinding::AmneziaWgCore => ("amneziawg", "AmneziaWG"),
+    };
+    let (state, reason) = match health {
+        CoreHealth::Unknown => return None,
+        CoreHealth::Running => (
+            ComponentState::Ok,
+            format!("The {name} transport process is running"),
+        ),
+        CoreHealth::Exited { code } => {
+            // Windows writes a crash as a hexadecimal status (0xC0000005), not as the signed number it arrives as.
+            let how = match code {
+                Some(code) if code < 0 => format!("exit code 0x{:08X}", code as u32),
+                Some(code) => format!("exit code {code}"),
+                None => "no exit code".to_owned(),
+            };
+            (
+                ComponentState::Failed,
+                format!("The {name} transport process stopped unexpectedly ({how})"),
+            )
+        }
+    };
+    Some(reading(ComponentKind::CoreProcess, id, state, reason))
 }
 
 fn reading(kind: ComponentKind, id: &str, state: ComponentState, reason: String) -> Reading {
@@ -276,6 +323,8 @@ pub fn apply(registry: &mut Registry, readings: &[Reading], now: Duration) -> Ve
 pub struct Tracker {
     registry: Registry,
     epoch: Instant,
+    /// What the runtime last said about each transport process.
+    cores: Vec<(CoreBinding, CoreHealth)>,
 }
 
 impl Tracker {
@@ -283,7 +332,14 @@ impl Tracker {
         Self {
             registry: Registry::new(),
             epoch: Instant::now(),
+            cores: Vec::new(),
         }
+    }
+
+    /// Replace what is known about the transport processes. A process left out is gone from the map at the next
+    /// observation.
+    pub fn set_cores(&mut self, cores: Vec<(CoreBinding, CoreHealth)>) {
+        self.cores = cores;
     }
 
     /// Record what the service knows at `now`. Returns what changed.
@@ -293,7 +349,11 @@ impl Tracker {
         state: &StateSnapshot,
         paths: &PathsSnapshot,
     ) -> Vec<Applied> {
-        apply(&mut self.registry, &readings(state, paths), now)
+        apply(
+            &mut self.registry,
+            &readings_with_cores(state, paths, &self.cores),
+            now,
+        )
     }
 
     /// Write the reply for `GetComponents` from what has been recorded, ages counted back from `now`.
@@ -878,5 +938,127 @@ mod tests {
         let applied = apply(&mut reg, &readings(&connected(), &paths(vec![])), T0);
         assert!(applied.is_empty(), "nothing new fits");
         assert_eq!(reg.len(), dnet_core::registry::MAX_COMPONENTS);
+    }
+
+    // ------------------------------------------------------------------------- the transport processes (T170)
+
+    use dnet_core::profile::CoreBinding;
+    use dnet_supervisor::runtime::CoreHealth;
+
+    fn core_readings(cores: &[(CoreBinding, CoreHealth)]) -> Vec<Reading> {
+        readings_with_cores(&connected(), &paths(vec![]), cores)
+    }
+
+    #[test]
+    fn a_running_core_reads_ok() {
+        let rs = core_readings(&[(CoreBinding::PrimaryCore, CoreHealth::Running)]);
+        let r = find(&rs, ComponentKind::CoreProcess, "primary");
+        assert_eq!(r.state, ComponentState::Ok);
+        assert_eq!(r.reason, "The primary transport process is running");
+    }
+
+    #[test]
+    fn a_core_that_exited_reads_failed_and_says_how() {
+        let rs = core_readings(&[(
+            CoreBinding::AmneziaWgCore,
+            CoreHealth::Exited { code: Some(3) },
+        )]);
+        let r = find(&rs, ComponentKind::CoreProcess, "amneziawg");
+        assert_eq!(r.state, ComponentState::Failed);
+        assert_eq!(
+            r.reason,
+            "The AmneziaWG transport process stopped unexpectedly (exit code 3)"
+        );
+        let rs = core_readings(&[(CoreBinding::PrimaryCore, CoreHealth::Exited { code: None })]);
+        assert!(find(&rs, ComponentKind::CoreProcess, "primary")
+            .reason
+            .ends_with("(no exit code)"));
+    }
+
+    #[test]
+    fn a_crash_code_is_shown_as_windows_writes_it() {
+        let rs = core_readings(&[(
+            CoreBinding::PrimaryCore,
+            CoreHealth::Exited {
+                code: Some(-1_073_741_819),
+            },
+        )]);
+        assert_eq!(
+            find(&rs, ComponentKind::CoreProcess, "primary").reason,
+            "The primary transport process stopped unexpectedly (exit code 0xC0000005)"
+        );
+    }
+
+    #[test]
+    fn a_core_nobody_can_speak_for_is_absent_not_shown_as_fine() {
+        let rs = core_readings(&[(CoreBinding::PrimaryCore, CoreHealth::Unknown)]);
+        assert!(!kinds(&rs).contains(&ComponentKind::CoreProcess), "{rs:#?}");
+    }
+
+    #[test]
+    fn without_cores_the_readings_are_what_they_were() {
+        assert_eq!(readings(&connected(), &paths(vec![])), core_readings(&[]));
+    }
+
+    #[test]
+    fn no_core_reading_names_the_primary_cores_vendor() {
+        let rs = core_readings(&[
+            (CoreBinding::PrimaryCore, CoreHealth::Running),
+            (
+                CoreBinding::AmneziaWgCore,
+                CoreHealth::Exited { code: Some(1) },
+            ),
+        ]);
+        for r in rs.iter().filter(|r| r.kind == ComponentKind::CoreProcess) {
+            let text = format!("{} {}", r.id, r.reason).to_lowercase();
+            // Built at runtime: the branding lint reads this file for the names themselves.
+            let banned = [
+                ["sing", "-box"].concat(),
+                ["sing", "box"].concat(),
+                ["sager", "net"].concat(),
+                ["wire", "guard"].concat(),
+                ["win", "tun"].concat(),
+            ];
+            for banned in banned {
+                assert!(!text.contains(&banned), "{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_core_that_goes_away_is_removed_from_the_map() {
+        let mut tracker = Tracker::new();
+        tracker.set_cores(vec![(CoreBinding::PrimaryCore, CoreHealth::Running)]);
+        tracker.observe_at(T0, &connected(), &paths(vec![]));
+        assert!(tracker
+            .registry
+            .get(ComponentKind::CoreProcess, "primary")
+            .is_some());
+        tracker.set_cores(vec![]);
+        tracker.observe_at(T0 + Duration::from_secs(1), &connected(), &paths(vec![]));
+        assert!(tracker
+            .registry
+            .get(ComponentKind::CoreProcess, "primary")
+            .is_none());
+    }
+
+    #[test]
+    fn a_core_that_dies_turns_failed_in_the_map() {
+        let mut tracker = Tracker::new();
+        tracker.set_cores(vec![(CoreBinding::PrimaryCore, CoreHealth::Running)]);
+        tracker.observe_at(T0, &connected(), &paths(vec![]));
+        tracker.set_cores(vec![(
+            CoreBinding::PrimaryCore,
+            CoreHealth::Exited { code: Some(1) },
+        )]);
+        let applied = tracker.observe_at(T0 + Duration::from_secs(5), &connected(), &paths(vec![]));
+        assert!(applied
+            .iter()
+            .any(|a| a.kind == ComponentKind::CoreProcess && a.change.is_some()));
+        let part = tracker
+            .registry
+            .get(ComponentKind::CoreProcess, "primary")
+            .unwrap();
+        assert_eq!(part.state, ComponentState::Failed);
     }
 }

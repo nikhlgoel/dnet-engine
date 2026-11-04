@@ -26,4 +26,4 @@ pub mod windows_runtime;
 
 pub use error::SupervisorError;
 pub use restart::{RestartDecision, RestartPolicy};
-pub use runtime::CoreRuntime;
+pub use runtime::{CoreHealth, CoreRuntime};
