@@ -57,7 +57,9 @@ application repeats this and requires it to be acknowledged.
 
 ## Status
 
-Early. The engine runs; the application around it does not exist yet.
+Early. The engine, a window, a guided server setup and a Windows installer exist and are tested; they have not yet run
+together across a real network, and no release has been published. "Tested" below means tests, a simulated hostile
+network and, where it says so, a clean Windows machine; it never means a live network.
 
 | Part | State |
 |---|---|
@@ -68,11 +70,13 @@ Early. The engine runs; the application around it does not exist yet.
 | Destination rules, and blocking programs' own encrypted name lookups so those rules apply | Built and tested; not yet met a real network |
 | Noticing a sign-in page in the way (a captive portal) and saying so rather than blaming the server | Built and tested against stand-ins; not yet met a real one |
 | Signed updates to the connection methods | Built and tested; switched off until the publisher's keys exist; fetching is built but has not met the real hosts |
-| Tray icon and window (status, endpoints, rules, activity, settings, first-run notice, about) | Built and tested, and run against a real running service on one machine; not yet used on a real network, and the icons are placeholders |
-| First-run server-setup wizard | A screen that says setting up a server is not available in this build; the steps behind it are not built |
-| Setting up a server in your own cloud account | The engine is built and tested against a stand-in provider; no real provider is connected and nothing calls it yet |
+| Tray icon and window, drawn with its own title bar (status, servers, rules, activity, settings, first-run notice, about) | Built and tested (300+ tests, accessibility checks), and run against a real running service on one machine; not yet used on a real network or under a screen reader, and the icons are placeholders |
+| Step-by-step server setup in the window: make a server on Oracle Cloud's free tier, or on any Ubuntu or Debian server, by following the steps; it never asks for a cloud password or key | Built and tested against the program's own stand-in; the wording of each provider's console is not verified against the live pages, and it has not been run against a real server |
+| Setting up a server through a cloud provider's own programming interface | Built and tested against a stand-in provider only; no real provider is connected and nothing calls it |
 | Rules by program | Designed and partly built; not connected to the service |
-| Installer | Not built |
+| Windows installer | Builds (about 15 MB), and was installed, checked and uninstalled on a clean Windows machine in the release build: the service runs as the system account, starts by itself and is restarted after a crash, ordinary users cannot change its folders, and the network is exactly as before after the uninstall. Not yet installed on a person's own computer. |
+| Release signing | Releases are signed with the project's own key and attested; Windows does not trust that key, so it will say "unknown publisher". See [`docs/release-signing.md`](docs/release-signing.md) for what that does and does not give |
+| Keeping traffic in the tunnel at the operating-system level (the kill switch) | Decided, not built; today it is the service's own decision and nothing in Windows enforces it |
 
 [`specs/001-network-resilience-client/tasks.md`](specs/001-network-resilience-client/tasks.md) is the
 authoritative, dated delivery status.

@@ -99,6 +99,14 @@ would still pass against the old fingerprint. That follows from the design; the 
 step that signs runs the whole dependency tree (cargo build scripts, the web build) in a job that can use the imported
 key, which is why the lockfiles are frozen and dependency install scripts are off.
 
+## Rehearsing without the real key
+
+Run the release workflow by hand on any branch with `rehearse_signing` ticked. It makes a throwaway key on the runner
+and runs the whole path with it: signing by thumbprint, Tauri signing the tray program and the installer, the
+check against the expected fingerprint, and the install test's comparison of the installed files with the installer's
+signer. What it builds is named `...-SIGNING-REHEARSAL-not-the-project-key.exe` and is not for anyone to use. A release
+tag never rehearses and never runs without its own approval.
+
 ## Later: a certificate Windows trusts
 
 Not needed to test. When the program is stable, two routes remove the warning: the **SignPath Foundation**
