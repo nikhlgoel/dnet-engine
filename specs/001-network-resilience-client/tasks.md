@@ -1062,6 +1062,11 @@ Rust workspace per [plan.md](./plan.md) §Project Structure: `crates/<name>/`, `
   > unsigned, the packed one is signed). Two problems the first runs found: Windows PowerShell started from PowerShell 7 broke the signature check (fixed, `windows_powershell`); a transient Go module proxy error stopped a core build (now retried, `warm_go_cache`).
   > **Not shown by this:** the same on a person's own computer (its network, its antivirus, an upgrade over an older install), a connection through the installed service, the crash kill test (7.7), restart (7.5, 7.6), sleep (7.10), a second ordinary user (7.9), and a run with the real key on a tag
   > (the release environment waits for the owner's approval). Still open: T114's own acceptance on a VM with a snapshot is replaced here by a runner for the install-and-remove half only.
+  > **On the owner's own computer, 2026-11-04 (a restore point was made first):** the installer built from the working tree (14.9 MB, SHA-256 27E1C538…43BE, signed by the project's key; Windows
+  > says "unknown publisher", as expected) installed in 4 s with exit 0, and `testing/Invoke-InstallTest.ps1` passed every check: service LocalSystem, automatic, running, crash recovery, folder
+  > permissions, the Run key, `dnetd`, `dnetctl` and `dnet-tray` signed by the installer's signer, `wintun.dll` keeping its vendor's signature, `dnetctl` reaching the service. The installed tray,
+  > started once with `--background` and twice by hand, left one process and one window. The installed service reported `Failed: endpoint 'harness' has no measurement origin`: a leftover of the
+  > development endpoint in `C:\ProgramData\DNet Engine`, not an installer fault. **Not checked on this computer:** uninstall, an upgrade over an older install, antivirus behaviour, a screen reader.
 - [ ] T115 Verify installer size at or below 60 MB (SC-012); if exceeded, reduce bundled artifacts before relaxing the target
 - [ ] T116 Measure idle RSS at or below 150 MB combined and idle CPU below 1% on a four-core machine (SC-013, SC-014)
   > **Define both states (T142, proposed SC-013 rewording):** idle with the window **closed**, combined **private** memory; and with the window open. Method: `testing/spike-ui/Measure-Footprint.ps1`. Baseline from the spike: 3.5 MB closed, 94 MB open (floor; a real UI adds heap). Proposed limits: ≤ 150 MB closed combined with the cores, ≤ 300 MB open, window open → loaded ≤ 600 ms.
@@ -1824,7 +1829,13 @@ own, made by DNet Engine's wizard on Oracle Cloud Always Free (or any Linux serv
   > The development service reports `Failed: the connection engine is missing from the installation` because it looks for the cores beside `dnetd.exe` (`Layout::installed`)
   > and a development build has them in `vendor\`; the message is right for an installed copy and misleading in a development folder.
 - [ ] T161 [US1] Guard v2 (ADR-0006 P3; `docs/research/2026-10-31-solutions.md` section 4): persistent filters tied to the service, the five yes/no lab checks
-  > Waits for the owner's approval of P3 (F2) and the lab run (S4).
+  > **P3 approved 2026-11-04 by the owner's delegation (ADR-0006 §5a, seven conditions).** Done: `dnet_core::guard` (pure; the rule set as data: `Guard::build`, `filters`, `leaks`, `verify`; 34 tests, and
+  > nine deliberate breaks each made at least one fail; "local" is the built-in bypass list, one source for the guard and the rules). An independent review found that the first version's
+  > `leaks` could not see a well-formed permit nobody asked for, and accepted network-share paths and broad accounts: fixed by `verify` (the plan's list against the installed one, both ways),
+  > strict paths and accounts, and a `Guard` only a passing plan can make. **Residual, written in the module:** the IPv4 address request and IPv6 neighbour discovery are not scoped by
+  > address; the lab measures them. **Not built:** the applier (the
+  > Windows firewall engine, a provider tied to the service, `guard-release`, the removal paths) and the five lab checks (S4), which need a virtual machine with a snapshot, not the
+  > owner's computer. The task stays open: the site's "not built yet" depends on it (`site_facts.rs`).
 - [~] T162 [US1] Power and session awareness (solutions section 6): power events, user-presence setting, tick-gap detector
   > **Tick-gap detector done 2026-11-01** (the ground truth in solutions section 6), test first, mutation-checked, not committed. `dnet_core::tick_gap::TickGap` is pure: it is given a
   > monotonic and a wall reading each tick and reports a gap when either shows more than period + 5 s (the wall clock because the monotonic clock may not count

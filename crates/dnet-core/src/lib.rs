@@ -19,6 +19,7 @@ pub mod failover;
 pub mod failure;
 pub mod fakeip;
 pub mod feed;
+pub mod guard;
 pub mod health;
 pub mod hostname;
 pub mod ids;
