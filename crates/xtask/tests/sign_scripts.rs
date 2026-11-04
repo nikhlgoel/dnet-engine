@@ -92,25 +92,30 @@ impl Throwaway {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let subject = format!("CN=dnet-sign-test-{}-{tag}", std::process::id());
-        let out = powershell()
-            .expect("PowerShell")
-            .arg("-Command")
-            .arg(format!(
-                "$c = New-SelfSignedCertificate -Type CodeSigningCert -Subject '{subject}' \
-                 -CertStoreLocation Cert:\\CurrentUser\\My -NotAfter (Get-Date).AddDays(2); \
-                 $c.Thumbprint; \
-                 ([System.Security.Cryptography.SHA256]::Create().ComputeHash($c.RawData) | ForEach-Object {{ $_.ToString('x2') }}) -join ''"
-            ))
-            .output()
-            .expect("make a certificate");
-        let printed = String::from_utf8_lossy(&out.stdout).to_string();
-        let mut lines = printed.lines().map(str::trim).filter(|l| !l.is_empty());
-        let thumbprint = lines
-            .next()
-            .unwrap_or_else(|| panic!("no certificate: {}", text(&out)))
-            .to_string();
-        let sha256 = lines.next().expect("no fingerprint").to_string();
-        Throwaway { thumbprint, sha256 }
+        // The system's certificate enrolment now and then answers "access denied" (0x80070005) to a request that is
+        // fine, on a busy machine; a second try nearly always works, so three are made before the test gives up.
+        let mut last = String::new();
+        for attempt in 1..=3 {
+            let out = powershell()
+                .expect("PowerShell")
+                .arg("-Command")
+                .arg(format!(
+                    "$c = New-SelfSignedCertificate -Type CodeSigningCert -Subject '{subject}'                      -CertStoreLocation Cert:\\CurrentUser\\My -NotAfter (Get-Date).AddDays(2);                      if ($null -eq $c) {{ exit 3 }};                      $c.Thumbprint;                      ([System.Security.Cryptography.SHA256]::Create().ComputeHash($c.RawData) | ForEach-Object {{ $_.ToString('x2') }}) -join ''"
+                ))
+                .output()
+                .expect("make a certificate");
+            let printed = String::from_utf8_lossy(&out.stdout).to_string();
+            let mut lines = printed.lines().map(str::trim).filter(|l| !l.is_empty());
+            if let (Some(thumbprint), Some(sha256)) = (lines.next(), lines.next()) {
+                return Throwaway {
+                    thumbprint: thumbprint.to_string(),
+                    sha256: sha256.to_string(),
+                };
+            }
+            last = text(&out);
+            std::thread::sleep(std::time::Duration::from_millis(500 * attempt));
+        }
+        panic!("no certificate after three tries: {last}");
     }
 }
 
