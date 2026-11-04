@@ -173,7 +173,7 @@ pub fn explain(cause: &FailureCause) -> Explanation {
         FailureCause::ConfigurationInvalid { detail } => (
             "The configuration cannot be used",
             detail.clone(),
-            "Correct the setting named above in the endpoint or profile settings, then try again.",
+            "Fix the problem described above; if you have no server yet, add one. Then try again.",
         ),
     };
     Explanation {
@@ -399,6 +399,18 @@ mod tests {
             detail: "the endpoint address is empty".into(),
         });
         assert!(e.detail.contains("the endpoint address is empty"));
+    }
+
+    #[test]
+    fn a_configuration_problem_tells_a_person_who_has_no_server_what_to_do() {
+        // First run: no endpoint exists, so no setting is named. The one remedy for every configuration problem must
+        // still make sense there.
+        let e = explain(&FailureCause::ConfigurationInvalid {
+            detail: "no endpoint is configured; add one before connecting".into(),
+        });
+        let action = e.action.to_lowercase();
+        assert!(action.contains("no server yet"), "{}", e.action);
+        assert!(!action.contains("named above"), "{}", e.action);
     }
 
     #[test]

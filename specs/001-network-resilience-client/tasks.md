@@ -1953,6 +1953,11 @@ own, made by DNet Engine's wizard on Oracle Cloud Always Free (or any Linux serv
   > 3 in `tunnel`, 2 in `orchestrator`; mutations caught. Review: `ecc:rust-reviewer` (found a branding-lint failure in a test literal, the stale reading during start or stop, the signed exit code, a timing-sensitive test; all fixed) and
   > `ecc:security-reviewer` (no findings: the only variable data in a reading is an exit code; nothing can start, stop or signal a core or change routing, DNS or undo; two readings at most; the pipe's trust model is unchanged; one caution: a part is absent while a connect or disconnect is under way, so a client must not read absent as fine). **Still open:** nothing acts on an exited core (no restart, no reconnect): the map now tells the truth, and the response (reconnect through the existing failure path, fail closed) needs a decision;
   > the real window and `dnetctl components` have not shown a core yet (needs the dev service restarted with the cores beside it).
+  > **Finding, 2026-11-04, not built because it needs a design choice:** nothing acts on a transport process that has exited (read in the code, not shown against a live crash). It is noticed only through the
+  > live checks (every 5 s; a block after 3 failures in a row, so about 15 s), and the engine then treats it as a block: the profile takes the retry wait of `reprobe.rs` (60 s, up to 15 min), and if no other
+  > profile is left the connection fails with `AllProfilesBlocked`. Nothing leaks meanwhile (with no core, nothing carries traffic), so this is recovery speed and wording, not safety. The question: a crash
+  > is not censorship, so should a core that exits be restarted once on the same endpoint before any profile is called blocked, and after how many exits in how long is it blocked? `CoreRuntime::core_health`
+  > already gives the signal (`Exited { code }`); the missing parts are an engine input for it (not a `LiveCheck` variant, which would mark the profile blocked) and that policy, test first, in `dnet-core`.
 
 ## Dependencies
 
