@@ -451,6 +451,38 @@ describe('theme and motion', () => {
   });
 });
 
+describe('A page that needs the connection off says so and lets it be turned off there', () => {
+  it('Servers: the note has a Disconnect button, and pressing it unlocks the page', async () => {
+    const bridge = mount({ initial: { state: 'ok', networks: 'two' } });
+    await go('Servers');
+    expect(await screen.findByText(/Disconnect before changing endpoints/)).toBeTruthy();
+    const add = screen.getByRole('button', { name: 'Add a server you already have' }) as HTMLButtonElement;
+    expect(add.disabled).toBe(true);
+    const stabilize = vi.spyOn(bridge, 'stabilize');
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Disconnect now' }));
+    expect(stabilize.mock.calls[0]?.[0]).toBe(false);
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Add a server you already have' }) as HTMLButtonElement).disabled).toBe(false));
+    expect(screen.queryByText(/Disconnect before changing endpoints/)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Disconnect now' })).toBeNull();
+  });
+
+  it('Rules and Settings say it the same way', async () => {
+    mount({ initial: { state: 'ok', networks: 'two' } });
+    await go('Rules');
+    expect(await screen.findByRole('button', { name: 'Disconnect now' })).toBeTruthy();
+    await go('Settings');
+    expect((await screen.findAllByRole('button', { name: 'Disconnect now' })).length).toBeGreaterThan(0);
+  });
+
+  it('nothing offers to disconnect when nothing is connected', async () => {
+    mount({ initial: { state: 'off', networks: 'two' } });
+    await go('Servers');
+    await screen.findByRole('button', { name: 'Add a server you already have' });
+    expect(screen.queryByRole('button', { name: 'Disconnect now' })).toBeNull();
+  });
+});
+
 describe('Changes waiting for approval (T160)', () => {
   it('lists a waiting change in the Servers view with what it does, and approving it removes it', async () => {
     const bridge = mount();

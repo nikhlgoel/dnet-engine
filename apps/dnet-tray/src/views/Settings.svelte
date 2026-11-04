@@ -1,4 +1,5 @@
 <script lang="ts">
+  import DisconnectNote from '../components/DisconnectNote.svelte';
   import { onMount } from 'svelte';
   import type { AppState } from '../lib/app.svelte';
   import Consent from '../components/Consent.svelte';
@@ -146,7 +147,7 @@
     </label>
     <p class="help">{block ? dns.onHelp : dns.offHelp}</p>
     {#if connected}
-      <p class="help">{en.errors.disconnectFirst}</p>
+      <DisconnectNote {app} />
     {/if}
     {#if consequence}
       <p class="notice">{consequence}</p>
@@ -176,7 +177,7 @@
           </label>
         {/if}
         {#if connected}
-          <p class="help">{en.errors.disconnectFirst}</p>
+          <DisconnectNote {app} />
         {/if}
       {/if}
       {#if brutalError}

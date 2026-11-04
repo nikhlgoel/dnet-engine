@@ -1,4 +1,5 @@
 <script lang="ts">
+  import DisconnectNote from '../components/DisconnectNote.svelte';
   import type { AppState } from '../lib/app.svelte';
   import type { PreparedServer, ServerKind } from '../lib/bridge';
   import PendingChanges from '../components/PendingChanges.svelte';
@@ -188,6 +189,13 @@
             {#if option.recommended}<span class="badge">{t.recommended}</span>{/if}
           </div>
           <p>{option.summary}</p>
+          <!-- The way to start comes before the long comparison, so nobody has to scroll to find it. -->
+          {#if option.available}
+            <button type="button" class="btn primary" onclick={() => (phase = 'provider')}>{t.useServer}</button>
+          {:else}
+            <button type="button" class="btn" disabled>{t.useWithout}</button>
+            <p class="help">{t.notYet}</p>
+          {/if}
           <h4>{t.whatYouGet}</h4>
           <ul class="features">
             {#each option.features as feature (feature.text)}
@@ -201,12 +209,6 @@
           <ul>{#each option.pros as line (line)}<li>{line}</li>{/each}</ul>
           <h4>{t.otherSides}</h4>
           <ul>{#each option.cons as line (line)}<li>{line}</li>{/each}</ul>
-          {#if option.available}
-            <button type="button" class="btn primary" onclick={() => (phase = 'provider')}>{t.useServer}</button>
-          {:else}
-            <button type="button" class="btn" disabled>{t.useWithout}</button>
-            <p class="help">{t.notYet}</p>
-          {/if}
         </section>
       {/each}
     </div>
@@ -221,7 +223,10 @@
           aria-pressed={guideId === g.id}
           onclick={() => choose(g.id)}
         >
-          <strong class="disp">{g.name}</strong>
+          <span class="head">
+            <strong class="disp">{g.name}</strong>
+            {#if guideId === g.id}<span class="badge">{t.chosen}</span>{/if}
+          </span>
           <span>{g.summary}</span>
         </button>
       {/each}
@@ -305,7 +310,7 @@
       <p class="notice" role="status">{t.held}</p>
       <PendingChanges {app} onsettled={() => void settle()} />
     {:else if step.action === 'paste'}
-      {#if connected}<p class="notice">{t.disconnectFirst}</p>{/if}
+      {#if connected}<DisconnectNote {app} text={t.disconnectFirst} />{/if}
       {#if heldDropped}<p class="notice" role="status">{t.heldDropped}</p>{/if}
       <form class="form" onsubmit={submit}>
         <div class="field">
@@ -380,9 +385,12 @@
     cursor: pointer;
     font: inherit;
     color: inherit;
+    /* A button brings the browser's own white border; the card's edge is the design's. */
+    border: 1px solid var(--c-line-strong);
   }
 
   .pick[aria-pressed='true'] {
+    border-color: var(--c-paper);
     outline: 2px solid var(--c-focus);
   }
 

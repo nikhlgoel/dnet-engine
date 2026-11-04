@@ -302,6 +302,7 @@ export const en = {
     useServer: 'Use my own server',
     useWithout: 'Use without a server',
     notYet: 'Not available in this version yet',
+    chosen: 'Chosen',
     providerTitle: 'Where will your server run?',
     providerLede: 'Pick the one you will use. You can come back to this screen at any time.',
     checkedOn: 'Checked on {date} against the provider’s own pages.',
@@ -354,6 +355,7 @@ export const en = {
     service: words.serviceDown,
     refused: 'The service refused: {reason}',
     disconnectFirst: 'Disconnect before changing endpoints or settings.',
+    disconnectNow: 'Disconnect now',
   },
 } as const;
 

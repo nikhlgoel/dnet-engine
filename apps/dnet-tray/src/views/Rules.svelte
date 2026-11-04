@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import type { AppState } from '../lib/app.svelte';
+  import DisconnectNote from '../components/DisconnectNote.svelte';
   import PendingChanges from '../components/PendingChanges.svelte';
   import { en } from '../lib/messages';
   import type { RuleView } from '../lib/model';
@@ -105,7 +106,7 @@
         <button type="submit" class="btn" disabled={connected || busy || value.trim() === ''}>{t.addButton}</button>
       </div>
       {#if connected}
-        <p class="help-line">{en.errors.disconnectFirst}</p>
+        <DisconnectNote {app} />
       {:else}
         <p class="help-line">{t.appliesNext}</p>
       {/if}

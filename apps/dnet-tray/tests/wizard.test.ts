@@ -88,6 +88,38 @@ describe('the first screen', () => {
   });
 });
 
+describe('the first two screens, for a person who wants to get on', () => {
+  it('shows the way to start before the long comparison, so nothing has to be scrolled to', async () => {
+    await openWizard();
+    const card = screen.getByRole('group', { name: /Your own server/ });
+    const start = within(card).getByRole('button', { name: /Use my own server/ });
+    const details = within(card).getByRole('heading', { level: 4, name: 'What you get' });
+    expect(start.compareDocumentPosition(details) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('says once, beside its button, that the second way is not available yet', async () => {
+    await openWizard();
+    expect(screen.getAllByText(/Not available in this version yet/)).toHaveLength(1);
+    const card = screen.getByRole('group', { name: /Without a server/ });
+    expect(within(card).getByText(/Not available in this version yet/)).toBeTruthy();
+  });
+
+  it('does not let Continue look pressable before a provider is picked, and shows the pick in words', async () => {
+    await openWizard();
+    await click(/Use my own server/);
+    const go = screen.getByRole('button', { name: 'Continue' }) as HTMLButtonElement;
+    expect(go.disabled).toBe(true);
+    expect(screen.queryByText('Chosen')).toBeNull();
+    const oracle = screen.getByRole('button', { name: /Oracle Cloud, free/ });
+    await fireEvent.click(oracle);
+    expect(oracle.getAttribute('aria-pressed')).toBe('true');
+    expect(within(oracle).getByText('Chosen')).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Another server/ }).getAttribute('aria-pressed')).toBe('false');
+    expect((screen.getByRole('button', { name: 'Continue' }) as HTMLButtonElement).disabled).toBe(false);
+    expect(await violations()).toEqual([]);
+  });
+});
+
 describe('the steps', () => {
   it('Oracle: states what the free server costs and when it was checked, before any step asks for anything', async () => {
     await openWizard();

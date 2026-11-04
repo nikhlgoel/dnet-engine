@@ -92,7 +92,6 @@ export const OPTIONS: Option[] = [
     pros: ['Nothing to create or pay for.', 'Nothing leaves your computer except your normal traffic.'],
     cons: [
       'It cannot get past a network that blocks websites or apps: there is nowhere else for your traffic to go.',
-      'Not available in this version yet.',
     ],
     features: [
       { text: 'Switch between Wi-Fi, cable and phone hotspot without dropping', included: true },

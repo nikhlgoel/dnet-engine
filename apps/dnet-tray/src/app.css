@@ -105,6 +105,7 @@ input[type='checkbox'] {
 
 .btn:disabled {
   color: var(--c-text-3);
+  border-color: var(--c-line);
   cursor: not-allowed;
 }
 
@@ -112,6 +113,15 @@ input[type='checkbox'] {
   background: var(--c-paper);
   color: var(--c-on-paper);
   border-color: var(--c-paper);
+}
+
+/* After `.btn.primary`, which has the same weight: a primary button that cannot be pressed must not keep the fill that
+ * means "press this". */
+.btn.primary:disabled {
+  background: var(--c-line);
+  border-color: var(--c-line);
+  color: var(--c-text-3);
+  cursor: not-allowed;
 }
 
 /* Forms: a visible label above, error text replacing helper text, never colour-only (§12). */

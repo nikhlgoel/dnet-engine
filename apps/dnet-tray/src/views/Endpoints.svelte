@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import type { AppState } from '../lib/app.svelte';
   import Consent from '../components/Consent.svelte';
+  import DisconnectNote from '../components/DisconnectNote.svelte';
   import PendingChanges from '../components/PendingChanges.svelte';
   import { en } from '../lib/messages';
   import type { EndpointView } from '../lib/model';
@@ -114,7 +115,7 @@
     <p class="notice" role="status">{held}</p>
   {/if}
   {#if locked}
-    <p class="notice">{en.errors.disconnectFirst}</p>
+    <DisconnectNote {app} />
   {/if}
   {#if error}
     <p class="notice" role="alert">{error}</p>
