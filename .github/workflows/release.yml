@@ -176,6 +176,14 @@ jobs:
           installer/Test-Signature.ps1 -CertSha256 (Get-Content installer/signing-cert.sha256 -Raw).Trim() `
             target/payload/app/dnetd.exe target/payload/app/dnetctl.exe $setup
 
+      # The installer is installed on this runner, checked (the service, its recovery, the folders and who may change
+      # them, the signatures of what was installed, that the command-line tool reaches the service), uninstalled, and the
+      # network compared before and after (testing/Invoke-InstallTest.ps1). A runner is an ephemeral machine, so this is
+      # the install test that needs nobody at a keyboard; it never connects to anything.
+      - name: Install it on this runner, check it, uninstall it
+        shell: pwsh
+        run: testing/Invoke-InstallTest.ps1
+
       - name: Remove the signing key from this runner
         if: always() && steps.key.outputs.signed == 'true'
         shell: pwsh
