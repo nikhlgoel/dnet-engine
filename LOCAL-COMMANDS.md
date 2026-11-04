@@ -159,6 +159,16 @@ run 6.2 "cargo clippy -p dnetd -p xtask --all-targets -- -D warnings; cargo run 
 
 ## 7. New: the installer (T114). Sections 7.3 onwards on a Windows 11 VM with a snapshot
 
+**7.0 Install it on this PC (owner's decision 2026-11-04; one script, admin).** Sections 7.3 to 7.8 below are what the script does, with its own checks, so run this instead of typing them. It never connects to anything, so your network is not touched except by the installer itself; the uninstaller's rule is to restore the network or refuse to remove the service, and step 9 checks that from outside. Before: quit the tray from its icon, stop a development service (`taskkill /im dnetd.exe /f`), and (optional) make a restore point: `Checkpoint-Computer -Description 'before DNet Engine install test' -RestorePointType MODIFY_SETTINGS` (works only if System Protection is on).
+```powershell
+run 7.0 "powershell -NoProfile -ExecutionPolicy Bypass -File testing\Invoke-InstallTest.ps1 -KeepInstalled"
+```
+It stops with the program installed so you can open the window (Start menu or tray) and look at the frame, Servers, Rules and Activity. Then finish (uninstall, and compare the network):
+```powershell
+run 7.0b "powershell -NoProfile -ExecutionPolicy Bypass -File testing\Invoke-InstallTest.ps1 -UninstallOnly"
+```
+7.5 to 7.7 and 7.10 (connect, restart, crash, sleep) need an endpoint and wait for the real server. 7.9 needs a second, ordinary user.
+
 7.1 Stage the payload (needs 1.1 and 8.3 done once: 8.3 writes `target\server-cores\server-pins.json`, which the installer ships; verifies, builds release `dnetd`/`dnetctl`, copies)
 ```powershell
 run 7.1 "cargo run -p xtask -- stage-installer"
