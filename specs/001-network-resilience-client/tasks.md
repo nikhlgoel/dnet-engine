@@ -2062,6 +2062,9 @@ own, made by DNet Engine's wizard on Oracle Cloud Always Free (or any Linux serv
 - [x] T186 [US1] Real application icons (they were 64-pixel placeholders)
   > **2026-11-05.** The window, tray and installer used a 233-byte placeholder. The mark is the website's own favicon (a line ending in a green dot, on the app's dark base), rendered at 1024 pixels and turned into the set Windows uses by Tauri's own icon command: a 512-pixel PNG, a six-size `.ico` (16 to 256), and the 32, 128 and 256 pixel sizes, listed in the shell's bundle config. Built the page and the shell with them (the shell embeds the icon at compile time). **Not done:** looked at in the real tray at 16 pixels, where a thin line may need a bolder variant; the installed program's shortcut and the installer's own icon need the next installer build.
 
+- [x] T187 [US1] The community files a public repository needs
+  > **2026-11-05.** `SECURITY.md` (private reporting, what is in scope, what to expect), `CONTRIBUTING.md` (what the project is and is not, where to start, what to run before a pull request), `CODE_OF_CONDUCT.md` and a pull request template had been written on 2026-11-04 and left untracked. Read in full for personal or assistant-directed wording: none. Added to the repository. `SECURITY.md` says there is no release yet and that only `master` is supported; that line is to be changed when the first release is tagged.
+
 ## Dependencies
 
 ```
