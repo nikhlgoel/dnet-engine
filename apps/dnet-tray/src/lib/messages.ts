@@ -192,6 +192,7 @@ export const en = {
     },
     rules: {
       title: 'Rules',
+      listTitle: 'Rules in order',
       empty: 'No rules of your own yet. Built-in rules keep your local network and sign-in pages working.',
       builtin: 'Built in · cannot be removed',
       reliable: 'Reliable',

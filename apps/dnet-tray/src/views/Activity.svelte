@@ -8,6 +8,16 @@
 
   const t = en.views.activity;
   const p = t.parts;
+  /** The lamp for a part's state: what the service said, drawn, never decoration. */
+  const lampOf: Record<ComponentsView['parts'][number]['state'], string> = {
+    Unknown: '',
+    Off: '',
+    Starting: 'probe',
+    Ok: 'ok',
+    Degraded: 'warn',
+    Blocked: 'warn',
+    Failed: 'fail',
+  };
 
   let map = $state<ComponentsView | null>(null);
   let mapError = $state<string | null>(null);
@@ -45,20 +55,20 @@
   <h1 id="activity-title">{t.title}</h1>
   <p class="lede">{t.note}</p>
 
-  <h2>{p.title}</h2>
+  <h2 class="cat">{p.title}</h2>
   {#if mapError}
     <p class="notice" role="alert">{mapError}</p>
   {:else if map && !map.supported}
     <p class="notice" role="status">{p.unsupported}</p>
   {:else if map}
     <p class="hint">{p.note}</p>
-    <ul class="parts" aria-label={p.title}>
+    <ul class="panel parts" aria-label={p.title}>
       {#each map.parts as part (part.kind + part.id)}
-        <li class={`part ${part.state.toLowerCase()}`}>
-          <span class="state">{p.states[part.state]}</span>
-          <span class="what">
-            <strong>{p.kinds[part.kind]}{' '}<span class="id">{part.id}</span></strong>
-            <span>{part.reason}</span>
+        <li class="row part">
+          <span class={`dot ${lampOf[part.state]}`} aria-hidden="true"></span>
+          <span class="text">
+            <strong class="title">{p.kinds[part.kind]}{' '}<span class="id">{part.id}</span></strong>
+            <span class="desc">{part.reason}</span>
             <span class="meta num">
               {fill(p.for, { age: age(part.ageSeconds) })}
               {#if part.latencyMs !== null} · {fill(p.latency, { ms: part.latencyMs })}{/if}
@@ -66,23 +76,24 @@
               {#if part.restarts !== null && part.restarts > 0} · {fill(p.restarts, { count: part.restarts })}{/if}
             </span>
           </span>
+          <span class={`state ${part.state.toLowerCase()}`}>{p.states[part.state]}</span>
         </li>
       {/each}
     </ul>
   {/if}
 
-  <h2>{p.log}</h2>
+  <h2 class="cat">{p.log}</h2>
   {#if app.activity.length === 0}
-    <p class="empty">{t.empty}</p>
+    <div class="panel"><p class="empty row">{t.empty}</p></div>
   {:else}
     <!-- Newest first. Each line says what happened and why (principle 3); a bare "Reconnecting…" is not acceptable. -->
-    <ol class="log">
+    <ol class="panel log">
       {#each app.activity as item (item.seq ?? item.atMs)}
-        <li>
+        <li class="row entry">
           <time class="num" datetime={new Date(item.atMs).toISOString()}>{clock(item.atMs)}</time>
-          <span class="what">
-            <strong>{item.event}</strong>
-            <span>{item.because}</span>
+          <span class="text">
+            <strong class="title">{item.event}</strong>
+            <span class="desc">{item.because}</span>
           </span>
         </li>
       {/each}
@@ -91,40 +102,17 @@
 </section>
 
 <style>
-  h2 {
-    font-size: var(--fs-lg);
-    font-weight: 600;
-    margin-top: var(--s-5);
-  }
-
-  .parts {
-    display: grid;
-    max-width: 760px;
+  .hint {
+    color: var(--c-text-2);
+    font-size: var(--fs-sm);
   }
 
   .part {
-    display: grid;
-    grid-template-columns: 6.5em 1fr;
-    gap: var(--s-3);
-    padding: var(--s-2) 0;
-    border-top: 1px solid var(--c-line);
+    align-items: flex-start;
   }
 
-  .part .state {
-    font-weight: 600;
-  }
-
-  .part.ok .state {
-    color: var(--c-ok);
-  }
-
-  .part.degraded .state,
-  .part.blocked .state {
-    color: var(--c-warn);
-  }
-
-  .part.failed .state {
-    color: var(--c-fail);
+  .part .dot {
+    margin-top: var(--s-2);
   }
 
   .part .id,
@@ -133,30 +121,41 @@
     font-size: var(--fs-sm);
   }
 
-  .log {
-    display: grid;
-    max-width: 760px;
+  .part .meta {
+    display: block;
   }
 
-  li {
-    display: grid;
-    grid-template-columns: 6.5em 1fr;
-    gap: var(--s-3);
-    padding: var(--s-2) 0;
-    border-top: 1px solid var(--c-line);
-  }
-
-  time {
-    color: var(--c-text-3);
+  /* The state in words, in its lamp colour; the dot beside it repeats it, and neither is the only sign. */
+  .state {
+    flex: none;
+    font-weight: 600;
     font-size: var(--fs-sm);
   }
 
-  .what {
-    display: grid;
-    gap: 2px;
+  .state.ok {
+    color: var(--c-ok);
   }
 
-  .what span {
-    color: var(--c-text-2);
+  .state.degraded,
+  .state.blocked {
+    color: var(--c-warn);
+  }
+
+  .state.failed {
+    color: var(--c-fail);
+  }
+
+  .entry {
+    align-items: flex-start;
+    justify-content: flex-start;
+    gap: var(--s-4);
+  }
+
+  .entry time {
+    flex: none;
+    min-width: 6.5em;
+    color: var(--c-text-3);
+    font-size: var(--fs-sm);
+    padding-top: 2px;
   }
 </style>

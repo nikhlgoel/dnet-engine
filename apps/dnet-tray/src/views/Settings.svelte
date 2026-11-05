@@ -123,32 +123,46 @@
 <section class="view" aria-labelledby="settings-title">
   <h1 id="settings-title">{t.title}</h1>
 
-  <h2 class="cat">{t.catLook}</h2>
-  <fieldset class="card">
-    <legend>{t.theme}</legend>
-    <label><input type="radio" name="theme" checked={app.theme === 'system'} onchange={() => app.setTheme('system')} /> {t.themeSystem}</label>
-    <label><input type="radio" name="theme" checked={app.theme === 'dark'} onchange={() => app.setTheme('dark')} /> {t.themeDark}</label>
-    <label><input type="radio" name="theme" checked={app.theme === 'light'} onchange={() => app.setTheme('light')} /> {t.themeLight}</label>
-  </fieldset>
+  <!-- Said once, at the top, instead of inside every group that cannot be changed while connected. -->
+  {#if connected}
+    <DisconnectNote {app} />
+  {/if}
 
-  <div class="card">
-    <label>
-      <input type="checkbox" checked={app.reduceMotion} onchange={(e) => app.setReduceMotion(e.currentTarget.checked)} />
-      {t.motion}
-    </label>
-    <p class="help">{t.motionHelp}</p>
+  <h2 class="cat">{t.catLook}</h2>
+  <div class="panel">
+    <div class="row" role="radiogroup" aria-labelledby="theme-title">
+      <div class="text"><span class="title" id="theme-title">{t.theme}</span></div>
+      <div class="segmented control">
+        <label><input type="radio" name="theme" checked={app.theme === 'system'} onchange={() => app.setTheme('system')} /> {t.themeSystem}</label>
+        <label><input type="radio" name="theme" checked={app.theme === 'dark'} onchange={() => app.setTheme('dark')} /> {t.themeDark}</label>
+        <label><input type="radio" name="theme" checked={app.theme === 'light'} onchange={() => app.setTheme('light')} /> {t.themeLight}</label>
+      </div>
+    </div>
+    <div class="row">
+      <div class="text">
+        <label class="title" for="motion">{t.motion}</label>
+        <p class="desc" id="motion-help">{t.motionHelp}</p>
+      </div>
+      <input
+        id="motion"
+        class="toggle"
+        type="checkbox"
+        aria-describedby="motion-help"
+        checked={app.reduceMotion}
+        onchange={(e) => app.setReduceMotion(e.currentTarget.checked)}
+      />
+    </div>
   </div>
 
   <h2 class="cat">{t.catPrivacy}</h2>
-  <div class="card">
-    <label>
-      <input type="checkbox" role="switch" checked={block} disabled={locked} {onchange} />
-      {dns.on}
-    </label>
-    <p class="help">{block ? dns.onHelp : dns.offHelp}</p>
-    {#if connected}
-      <DisconnectNote {app} />
-    {/if}
+  <div class="panel">
+    <div class="row">
+      <div class="text">
+        <label class="title" for="dns-block">{dns.on}</label>
+        <p class="desc" id="dns-help">{block ? dns.onHelp : dns.offHelp}</p>
+      </div>
+      <input id="dns-block" type="checkbox" role="switch" aria-describedby="dns-help" checked={block} disabled={locked} {onchange} />
+    </div>
     {#if consequence}
       <p class="notice">{consequence}</p>
     {/if}
@@ -159,25 +173,32 @@
 
   {#if hy2 || brutalError}
     <h2 class="cat">{t.speedMode}</h2>
-    <div class="card">
+    <div class="panel">
       {#if hy2}
-        <label>
-          <input type="checkbox" role="switch" checked={hy2.brutal} disabled={connected} onchange={onBrutalChange} />
-          {t.speedMode}
-        </label>
-        <p class="help">{hy2.brutal ? t.speedModeOnHelp : t.speedModeHelp}</p>
+        <div class="row">
+          <div class="text">
+            <label class="title" for="speed-mode">{t.speedMode}</label>
+            <p class="desc" id="speed-help">{hy2.brutal ? t.speedModeOnHelp : t.speedModeHelp}</p>
+          </div>
+          <input
+            id="speed-mode"
+            type="checkbox"
+            role="switch"
+            aria-describedby="speed-help"
+            checked={hy2.brutal}
+            disabled={connected}
+            onchange={onBrutalChange}
+          />
+        </div>
         {#if !hy2.brutal}
-          <label>
-            {t.up}
-            <input type="text" inputmode="numeric" autocomplete="off" bind:value={up} disabled={connected} />
-          </label>
-          <label>
-            {t.down}
-            <input type="text" inputmode="numeric" autocomplete="off" bind:value={down} disabled={connected} />
-          </label>
-        {/if}
-        {#if connected}
-          <DisconnectNote {app} />
+          <div class="row">
+            <label class="title" for="speed-up">{t.up}</label>
+            <input id="speed-up" class="input short" type="text" inputmode="numeric" autocomplete="off" bind:value={up} disabled={connected} />
+          </div>
+          <div class="row">
+            <label class="title" for="speed-down">{t.down}</label>
+            <input id="speed-down" class="input short" type="text" inputmode="numeric" autocomplete="off" bind:value={down} disabled={connected} />
+          </div>
         {/if}
       {/if}
       {#if brutalError}
@@ -188,13 +209,13 @@
 
   {#if app.bridge.capabilities.updates}
     <h2 class="cat">{t.updates}</h2>
-    <div class="card">
-      <p class="help">{t.updatesHelp}</p>
-      <div>
-        <button type="button" class="btn" disabled={checking} onclick={checkNow}>{checking ? t.checking : t.checkNow}</button>
+    <div class="panel">
+      <div class="row">
+        <div class="text"><p class="desc">{t.updatesHelp}</p></div>
+        <button type="button" class="btn control" disabled={checking} onclick={checkNow}>{checking ? t.checking : t.checkNow}</button>
       </div>
       {#if result === 'tunnel' || result === 'physical'}
-        <p class="help" role="status">
+        <p class="desc result" role="status">
           {result === 'physical' ? t.checkedPhysical : t.checkedTunnel}
         </p>
       {:else if result}
@@ -231,30 +252,7 @@
 />
 
 <style>
-  fieldset {
-    border: 0;
-    margin: 0;
-  }
-
-  legend {
-    font-weight: 600;
-    margin-bottom: var(--s-2);
-  }
-
-  label {
-    display: flex;
-    gap: var(--s-3);
-    align-items: center;
-    min-height: var(--hit);
-  }
-
-  h2 {
-    font-size: var(--fs-lg);
-    font-weight: 600;
-  }
-
-  .help {
-    color: var(--c-text-2);
-    font-size: var(--fs-sm);
+  .result {
+    padding: var(--s-3) var(--s-4);
   }
 </style>
