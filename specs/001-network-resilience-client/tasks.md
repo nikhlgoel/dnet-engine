@@ -2033,6 +2033,11 @@ own, made by DNet Engine's wizard on Oracle Cloud Always Free (or any Linux serv
   > (`tests/scene.test.ts`: the easing never overshoots or leaves 0 to 1 for any input including NaN and infinity; the figure keeps 48 px clear of the network chips and fits the scene at 560 x 300, 960 x 420 and 1400 x 600). Checked in a browser against the mock: no shadow on hover, the dots lift,
   > the beams and chips are unchanged and clear of the figure at 800 x 600. **Known, not new:** at the smallest window (560 x 420) the scene is pinned at 200 px and the stats strip already overlapped its lower part; the larger figure adds about 12 px to that.
 
+- [x] T181 [US1] One script for the owner's elevated Windows checks
+  > **2026-11-05, owner's request** ("give me a script with all the commands, save the output so you can check"). `testing/Invoke-OwnerElevatedChecks.ps1`: one UAC prompt, then: a before picture of routes, DNS and adapters; removal of the leftover `harness` development
+  > endpoint from the installed service; the elevated-only tests with the service stopped and always started again; the trace-session check; read-only link facts and the service's own view; an after picture compared with the before one. Everything is saved under
+  > `.local-logs/owner-elevated/<time>/` with a `SUMMARY.txt`. **Tested here:** syntax, and `-DryRun` (no elevation, no change) end to end against the real installed service, which found the real `harness` endpoint. **Not run:** the elevated part, since the UAC prompt is the owner's to accept.
+
 ## Dependencies
 
 ```

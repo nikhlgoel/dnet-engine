@@ -24,6 +24,9 @@ service (`DNetEngine`) is running and holds the control pipe. Stop it for the st
 
 ### 1A. Today, no server needed
 
+**Rows 1 to 4 are done by one script** (one UAC prompt, then nothing to type; it saves every output and Claude reads them):
+`powershell -ExecutionPolicy Bypass -File testing\Invoke-OwnerElevatedChecks.ps1`. Only row 5 (typing `yes` at Windows' prompt) is by hand.
+
 | # | What | Why it matters | Pass looks like |
 |---|---|---|---|
 | 1 | Remove the leftover development server. `dnetctl --json endpoints` lists it; then `dnetctl remove-endpoint <uuid>` for the one named `harness`. Normal PowerShell. | The installed service says "Failed: endpoint 'harness' has no measurement origin" because of it. You cannot judge a first run until it is gone. | `dnetctl status` stops saying Failed. |
