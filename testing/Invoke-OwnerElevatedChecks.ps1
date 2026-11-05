@@ -163,5 +163,4 @@ Say "`n===== SUMMARY ====="
 $results | Format-Table -AutoSize | Out-String -Width 200 | Tee-Object -FilePath $summary -Append | Write-Host
 Copy-Item $summary (Join-Path $repo '.local-logs\owner-elevated\LATEST.txt') -Force
 Say "Logs: $out"
-Say "Tell Claude: done. Claude reads the logs itself."
 if (-not $DryRun -and $Relaunched) { Read-Host 'Press Enter to close this window' | Out-Null }

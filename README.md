@@ -7,10 +7,10 @@ campus network, a hostel, a café. It sends your traffic through a server **you*
 of several connection methods works on the network you are on, and it keeps the connection going when
 the network under it changes.
 
-> **A free, open-source project**, made first for its author and friends and open to anyone who finds
-> it. "DNet Engine" names the technology. The finished program may get a different name; that would
-> change only what people see, not the engine's own names (the service, the pipe, the data folder),
-> which stay ([ADR-0009](docs/adr/0009-product-identity-and-identifiers.md)).
+> **A free, open-source project** for anyone on a network that gets in the way. "DNet Engine" names
+> the technology. The finished program may get a different name; that would change only what people
+> see, not the engine's own names (the service, the pipe, the data folder), which stay
+> ([ADR-0009](docs/adr/0009-product-identity-and-identifiers.md)).
 > A one-page summary of what it does and does not do is at
 > [nikhlgoel.github.io/dnet-engine](https://nikhlgoel.github.io/dnet-engine/) (source in [`site/`](site/)).
 
@@ -74,7 +74,7 @@ network and, where it says so, a clean Windows machine; it never means a live ne
 | Step-by-step server setup in the window: make a server on Oracle Cloud's free tier, or on any Ubuntu or Debian server, by following the steps; it never asks for a cloud password or key | Built and tested against the program's own stand-in; the wording of each provider's console is not verified against the live pages, and it has not been run against a real server |
 | Setting up a server through a cloud provider's own programming interface | Built and tested against a stand-in provider only; no real provider is connected and nothing calls it |
 | Rules by program | Designed and partly built; not connected to the service |
-| Windows installer | Builds (about 15 MB), and was installed, checked and uninstalled on a clean Windows machine in the release build: the service runs as the system account, starts by itself and is restarted after a crash, ordinary users cannot change its folders, and the network is exactly as before after the uninstall. Not yet installed on a person's own computer. |
+| Windows installer | Builds (about 15 MB), and was installed, checked and uninstalled on a clean Windows machine in the release build: the service runs as the system account, starts by itself and is restarted after a crash, ordinary users cannot change its folders, and the network is exactly as before after the uninstall. It has also been installed and run on a real Windows 11 computer. |
 | Release signing | Releases are signed with the project's own key and attested; Windows does not trust that key, so it will say "unknown publisher". See [`docs/release-signing.md`](docs/release-signing.md) for what that does and does not give |
 | Keeping traffic in the tunnel at the operating-system level (the kill switch) | Decided, not built; today it is the service's own decision and nothing in Windows enforces it |
 

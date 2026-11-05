@@ -290,7 +290,7 @@ If you just installed Go, open a new terminal first, so it is on the path (`go v
 Everything here only reads, or runs tests; nothing changes your network. 10.4 ends the development service.
 Where a command talks to the service it uses the development build: run 4.1 first, and 4.2 (admin) to start the new service.
 A service started earlier is the old build and does not know these commands.
-After each command, tell me the numbers (or just say "done"): I read `.local-logs\<number>.log` myself.
+After each command, its full output is in `.local-logs\<number>.log`.
 
 10.1 Rebuild the cores with the new build tags (needs Go; a few minutes; the first run after pulling)
 ```powershell
