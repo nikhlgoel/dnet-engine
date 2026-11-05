@@ -20,6 +20,11 @@ import type {
 } from './model';
 import { parseComponents, parseSnapshot } from './model';
 
+/** The service's rule for a device's name (`dnet_config::invite::valid_name`). */
+const DEVICE_NAME = /^(?! )[A-Za-z0-9 ._-]{1,32}(?<! )$/;
+/** A public key as the service prints one: 32 bytes in base64, not all zero. */
+const MOCK_DEVICE_KEY = 'BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=';
+
 export type MockState = 'off' | 'probe' | 'ok' | 'warn' | 'fail';
 export type MockNetworks = 'one' | 'two' | 'three';
 
@@ -243,6 +248,11 @@ export function createMockBridge(options: MockOptions = {}): MockController {
       reason: `${what} waits for approval (change ${change}). Approve it with \`dnetctl approve ${change}\` and answer the Windows prompt; it is dropped after ten minutes`,
     };
   };
+  /** A friend's computer that has asked to join, and the devices an owner has made a script for. */
+  let joining: { name: string } | null = null;
+  const preparedDevices = new Set<string>();
+  /** Invites made after an approval and waiting to be asked for once. */
+  const readyInvites = new Set<string>();
   const addServer = (label: string, host: string) => (): string => {
     const id = `e${endpoints.length + 2}`;
     endpoints = [...endpoints, { id, label, address: `${host}:44443`, enabled: true, health: 'Unknown' }];
@@ -337,6 +347,74 @@ export function createMockBridge(options: MockOptions = {}): MockController {
       }
       if (endpoints.some((e) => e.label === input.label)) return refuse('an endpoint with that label already exists');
       return applyOrHold(`Adding the server "${input.label}" at ${input.host} made by the setup guide`, addServer(input.label, input.host));
+    },
+    async requestJoin(name) {
+      if (!DEVICE_NAME.test(name)) {
+        return refuse('`name` must be 1 to 32 letters, digits, spaces, dots, dashes or underscores');
+      }
+      joining = { name };
+      return {
+        ok: true,
+        request: {
+          name,
+          text: `DNET-DEVICE-REQUEST ${JSON.stringify({ version: 1, name, public_key: MOCK_DEVICE_KEY })}`,
+          validForMinutes: 360,
+        },
+      };
+    },
+    async acceptInvite(invite, label) {
+      const blocked = idleOnly();
+      if (blocked) return blocked;
+      if (joining === null) return refuse('this computer has not asked to join a server; start from the first step');
+      if (!/DNET-INVITE-1:[A-Za-z0-9_-]+/.test(invite)) return refuse('the invite cannot be used: that is not an invite');
+      const name = (label ?? '').trim() === '' ? 'Shared server' : (label ?? '').trim();
+      if (endpoints.some((e) => e.label === name)) return refuse('an endpoint with that label already exists');
+      return applyOrHold(`Adding the server "${name}" at 203.0.113.9 from a friend's invite`, () => {
+        joining = null;
+        return addServer(name, '203.0.113.9')();
+      });
+    },
+    async prepareDevice(endpoint, request) {
+      if (!endpoints.some((e) => e.id === endpoint)) return refuse('there is no endpoint with that id');
+      const name = /"name":"([^"]{1,32})"/.exec(request)?.[1];
+      if (!request.includes('DNET-DEVICE-REQUEST ') || name === undefined || !DEVICE_NAME.test(name)) {
+        return refuse('the request cannot be used: that is not a device request');
+      }
+      preparedDevices.add(`${endpoint}:${name}`);
+      return {
+        ok: true,
+        prepared: { name, script: `#!/bin/sh\n# mock script: add ${name}\necho "DNET-DEVICE-REPORT {}"\n`, validForMinutes: 360 },
+      };
+    },
+    async finishDevice(endpoint, request, report) {
+      const name = /"name":"([^"]{1,32})"/.exec(request)?.[1] ?? '';
+      const key = `${endpoint}:${name}`;
+      const invited = { name, address: '10.9.0.3', invite: 'DNET-INVITE-1:bW9jay1pbnZpdGU' };
+      // As the service does: an invite holds the server's access details, so making one waits for approval, and
+      // asking again once it is approved returns it.
+      if (readyInvites.delete(key)) return { ok: true, invited };
+      if (!preparedDevices.has(key)) {
+        return refuse('no device is being added with that request on that server; start again from the first step');
+      }
+      if (!report.includes('DNET-DEVICE-REPORT')) return refuse('the result cannot be used: the server printed no device report');
+      const label = endpoints.find((e) => e.id === endpoint)?.label ?? '';
+      const make = (): string => {
+        preparedDevices.delete(key);
+        readyInvites.add(key);
+        return key;
+      };
+      if (options.holdChanges !== true) {
+        make();
+        readyInvites.delete(key);
+        return { ok: true, invited };
+      }
+      const what = `Making an invite for the device "${name}" on the server "${label}"; it holds that server's access details`;
+      const change = hold(what, () => void make());
+      return {
+        ok: false,
+        code: 'ApprovalRequired',
+        reason: `${what} waits for approval (change ${change}). Approve it with \`dnetctl approve ${change}\` and answer the Windows prompt; it is dropped after ten minutes`,
+      };
     },
     async removeEndpoint(id) {
       const blocked = idleOnly();

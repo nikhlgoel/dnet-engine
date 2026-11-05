@@ -397,6 +397,45 @@ async fn finish_server(
     Ok(outcome)
 }
 
+/// A friend's computer asks to join a server: the text to send to its owner (T188).
+#[tauri::command]
+async fn request_join(shell: Shared<'_>, name: String) -> Result<Value, String> {
+    Ok(shell.bridge.request_join(&name).await)
+}
+
+/// The owner's invite, pasted: the server is added after an approval, with this computer's own key (T188).
+#[tauri::command]
+async fn accept_invite(
+    shell: Shared<'_>,
+    invite: String,
+    label: Option<String>,
+) -> Result<Value, String> {
+    let outcome = shell.bridge.accept_invite(&invite, label.as_deref()).await;
+    shell.wake.notify_one();
+    Ok(outcome)
+}
+
+/// The owner adds a friend's device to one of their servers: the script to run on it (T188).
+#[tauri::command]
+async fn prepare_device(
+    shell: Shared<'_>,
+    endpoint: String,
+    text: String,
+) -> Result<Value, String> {
+    Ok(shell.bridge.prepare_device(&endpoint, &text).await)
+}
+
+/// What that script printed, pasted back: the invite to send to the friend (T188).
+#[tauri::command]
+async fn finish_device(
+    shell: Shared<'_>,
+    endpoint: String,
+    text: String,
+    report: String,
+) -> Result<Value, String> {
+    Ok(shell.bridge.finish_device(&endpoint, &text, &report).await)
+}
+
 #[tauri::command]
 async fn add_rule(
     shell: Shared<'_>,
@@ -583,6 +622,10 @@ pub fn run() {
             remove_endpoint,
             prepare_server,
             finish_server,
+            request_join,
+            accept_invite,
+            prepare_device,
+            finish_device,
             set_endpoint_enabled,
             list_profiles,
             list_components,

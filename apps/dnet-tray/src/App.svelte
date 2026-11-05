@@ -18,6 +18,8 @@
   import Activity from './views/Activity.svelte';
   import Endpoints from './views/Endpoints.svelte';
   import FirstRun from './views/FirstRun.svelte';
+  import Invite from './views/Invite.svelte';
+  import Join from './views/Join.svelte';
   import Rules from './views/Rules.svelte';
   import Settings from './views/Settings.svelte';
   import Wizard from './views/Wizard.svelte';
@@ -166,6 +168,10 @@
         <FirstRun {app} />
       {:else if app.view === 'wizard'}
         <Wizard {app} />
+      {:else if app.view === 'join'}
+        <Join {app} />
+      {:else if app.view === 'invite'}
+        <Invite {app} />
       {/if}
     </main>
 
@@ -178,7 +184,11 @@
       <div></div>
     {/if}
 
-    <Dock current={app.view} onnavigate={(view) => app.go(view)} />
+    <!-- The pages that belong to Servers keep it lit, so a person always knows where they are. -->
+    <Dock
+      current={app.view === 'wizard' || app.view === 'join' || app.view === 'invite' ? 'endpoints' : app.view}
+      onnavigate={(view) => app.go(view)}
+    />
   </div>
 </div>
 

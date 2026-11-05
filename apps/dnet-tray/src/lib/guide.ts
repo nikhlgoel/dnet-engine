@@ -310,12 +310,12 @@ const END_OF_PASTE = 'DNET_SETUP_EOF';
  * file. Run from the terminal's own input, a command that reads input could swallow the rest of the script.
  * Refuses a script that holds the end marker on a line of its own, which would end the paste early.
  */
-export function wrapForPaste(script: string): string {
+export function wrapForPaste(script: string, file = 'dnet-setup.sh'): string {
   if (script.split('\n').some((line) => line.trim() === END_OF_PASTE)) {
     throw new Error('the script contains the end marker');
   }
   const body = script.endsWith('\n') ? script : `${script}\n`;
-  return `cat > dnet-setup.sh <<'${END_OF_PASTE}'\n${body}${END_OF_PASTE}\nsudo sh dnet-setup.sh`;
+  return `cat > ${file} <<'${END_OF_PASTE}'\n${body}${END_OF_PASTE}\nsudo sh ${file}`;
 }
 
 /** Whether `text` could be a server's address: an IPv4 address or a host name, and nothing else. */

@@ -4,7 +4,7 @@
   import Consent from '../components/Consent.svelte';
   import DisconnectNote from '../components/DisconnectNote.svelte';
   import PendingChanges from '../components/PendingChanges.svelte';
-  import { en } from '../lib/messages';
+  import { en, fill } from '../lib/messages';
   import type { EndpointView } from '../lib/model';
 
   let { app }: { app: AppState } = $props();
@@ -121,6 +121,7 @@
           }}>{t.add}</button
         >
         <button type="button" class="btn" disabled={locked} onclick={() => app.go('wizard')}>{t.setup}</button>
+        <button type="button" class="btn" disabled={locked} onclick={() => app.go('join')}>{t.join}</button>
       </div>
     {/if}
   </div>
@@ -154,6 +155,15 @@
           </div>
           <span class="chip" class:ok={e.enabled}>{e.enabled ? t.enabled : t.disabled}</span>
           <div class="actions">
+            <button
+              type="button"
+              class="btn"
+              aria-label={fill(t.addDeviceLabel, { server: e.label })}
+              onclick={() => {
+                app.inviteFor = e.id;
+                app.go('invite');
+              }}>{t.addDevice}</button
+            >
             <button type="button" class="btn" disabled={locked} onclick={() => toggle(e)}>
               {e.enabled ? t.disable : t.enable}
             </button>

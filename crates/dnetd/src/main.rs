@@ -30,6 +30,7 @@ mod approval;
 mod components;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod configure;
+mod devices;
 mod diagnostics;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod domain;

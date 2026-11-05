@@ -12,8 +12,8 @@
     app: AppState;
     /** Raised by the view each time something it asked for was held, so the list is read again at once. */
     asked?: number;
-    /** Told after a change is approved or dropped here, so the view can read what that changed. */
-    onsettled?: () => void;
+    /** Told after a change is approved or dropped here, so the view can read what that changed. `applied` is true only when it was approved and applied. */
+    onsettled?: (applied: boolean) => void;
   } = $props();
 
   const t = en.views.pending;
@@ -62,7 +62,7 @@
     busy = null;
     message = outcome.ok ? t.approved : outcome.reason;
     await load();
-    onsettled?.();
+    onsettled?.(outcome.ok);
   }
 
   async function drop(item: PendingView): Promise<void> {
@@ -71,7 +71,7 @@
     busy = null;
     message = outcome.ok ? t.dropped : outcome.reason;
     await load();
-    onsettled?.();
+    onsettled?.(false);
   }
 </script>
 

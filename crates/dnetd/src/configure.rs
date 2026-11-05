@@ -173,6 +173,37 @@ impl Configurator {
         Ok(())
     }
 
+    /// What an owner needs to invite a friend's device to the server `id` (T188): its name, its address and the
+    /// credentials sealed for it. Read-only. The credentials go to the service and no further than the invite it
+    /// makes, which holds only what is the same for every device.
+    pub fn server_for_invite(
+        &self,
+        state: &DomainState,
+        id: EndpointId,
+    ) -> Result<
+        (
+            String,
+            String,
+            dnet_config::credentials::EndpointCredentials,
+        ),
+        ConfigureError,
+    > {
+        let Some(endpoint) = state.endpoint(id) else {
+            return Err(refused("there is no endpoint with that id"));
+        };
+        let key = SecretKey::parse(endpoint.credentials()).map_err(storage)?;
+        let credentials = self
+            .secrets
+            .get(&key)
+            .map_err(storage)?
+            .ok_or_else(|| refused("this server has no credentials stored"))?;
+        Ok((
+            endpoint.label().to_owned(),
+            endpoint.address().host().to_owned(),
+            credentials,
+        ))
+    }
+
     /// Remove an endpoint and forget its credentials.
     ///
     /// An endpoint that holds cloud resources is refused: removing it here would orphan them, and the

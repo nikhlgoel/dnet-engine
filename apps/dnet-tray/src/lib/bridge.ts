@@ -65,6 +65,31 @@ export interface FinishServerInput {
   report: string;
 }
 
+/** What a friend's computer sends to the owner: a name and the public half of a key made on this computer. */
+export interface JoinRequest {
+  name: string;
+  /** The text to send. It holds no secret. */
+  text: string;
+  /** How long this computer keeps the key waiting for the invite. */
+  validForMinutes: number;
+}
+
+/** The script that adds a friend's device to the owner's server. */
+export interface PreparedDevice {
+  name: string;
+  script: string;
+  validForMinutes: number;
+}
+
+/** What the owner sends back to the friend. */
+export interface InvitedDevice {
+  name: string;
+  /** The address the server gave the device. */
+  address: string;
+  /** The invite. It holds the server's details, never a private key. */
+  invite: string;
+}
+
 /** A rule a person can add: by site, by a site and its subdomains, or by address range. */
 export interface NewRuleInput {
   kind: 'domain' | 'domain_suffix' | 'ip_cidr';
@@ -90,6 +115,15 @@ export interface Bridge {
   prepareServer(arch: ServerKind): Promise<Outcome & { prepared?: PreparedServer }>;
   /** Finish it with what the server printed. The service checks it belongs to this setup. */
   finishServer(input: FinishServerInput): Promise<Outcome & { id?: string }>;
+
+  /** A friend's computer asks to join a server: it makes a key of its own and answers with the text to send. */
+  requestJoin(name: string): Promise<Outcome & { request?: JoinRequest }>;
+  /** The owner's invite, pasted. The server is added after an approval, with this computer's own key. */
+  acceptInvite(invite: string, label?: string): Promise<Outcome & { id?: string }>;
+  /** The owner adds a friend's device to a server: the script to run on it. */
+  prepareDevice(endpoint: string, request: string): Promise<Outcome & { prepared?: PreparedDevice }>;
+  /** What that script printed, pasted: the invite to send to the friend. */
+  finishDevice(endpoint: string, request: string, report: string): Promise<Outcome & { invited?: InvitedDevice }>;
 
   /** The live map of parts. A service too old to know the request answers `supported: false`. */
   components(): Promise<ComponentsView>;

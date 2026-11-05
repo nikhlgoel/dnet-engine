@@ -61,6 +61,8 @@ pub enum InviteError {
     NoSession,
     #[error("the invite holds a device key, which an invite never does")]
     CarriesAKey,
+    #[error("the key of the device the invite is for is not a valid key")]
+    Key,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -69,6 +71,8 @@ struct Wire {
     version: u32,
     label: String,
     host: String,
+    /// The public half of the key of the device this invite was made for.
+    device_public_key: String,
     credentials: Value,
 }
 
@@ -77,6 +81,9 @@ struct Wire {
 pub struct Invite {
     label: String,
     host: String,
+    /// The public half of the key of the device this invite was made for: the device that is given it checks that
+    /// the key it made is this one, so an invite meant for another device is noticed at once.
+    device_public_key: String,
     /// The owner's carriers and origin, the session's public side, and this device's address, with the placeholder
     /// where the device's own key goes. No AmneziaWG: its key is the owner's alone.
     credentials: EndpointCredentials,
@@ -92,6 +99,14 @@ pub fn valid_name(name: &str) -> bool {
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '.' | '-' | '_'))
+}
+
+/// A device's public key as the core prints it: 32 bytes in base64, and not the all-zero key.
+fn valid_public_key(key: &str) -> bool {
+    key.len() == 44
+        && STANDARD
+            .decode(key)
+            .is_ok_and(|b| b.len() == 32 && b.iter().any(|x| *x != 0))
 }
 
 /// The same rule a server typed into the window must meet (`dnet-ipc`'s `check_host`): an address or a name with no
@@ -131,29 +146,40 @@ fn address_could_be_a_server(ip: std::net::IpAddr) -> bool {
 }
 
 impl Invite {
-    /// An invite to `host`, for a device that the server gave `device_address`, from the owner's own `credentials`
-    /// for that server. The owner's device key and AmneziaWG key stay out of it.
+    /// An invite to `host`, for the device with public key `device_public_key` that the server gave
+    /// `device_address`, from the owner's own `credentials` for that server. The owner's device key and
+    /// AmneziaWG key stay out of it.
     pub fn new(
         label: &str,
         host: &str,
         owner: &EndpointCredentials,
         device_address: Ipv4Addr,
+        device_public_key: &str,
     ) -> Result<Self, InviteError> {
         if !valid_name(label) {
             return Err(InviteError::Name);
+        }
+        if !valid_public_key(device_public_key) {
+            return Err(InviteError::Key);
         }
         if !valid_host(host) {
             return Err(InviteError::Host);
         }
         let session = owner.session.as_ref().ok_or(InviteError::NoSession)?;
-        let mut credentials = owner.clone();
-        credentials.amneziawg = None;
-        credentials.session = Some(SessionBundle {
-            device_private_key: Secret::new(STANDARD.encode(PLACEHOLDER)),
-            server_public_key: session.server_public_key.clone(),
-            device_address,
-            session_port: session.session_port,
-        });
+        // Named field by field, so a kind of secret added to the credentials later is not handed to a friend
+        // unless someone decides it should be: the carriers and the origin are the same for every device.
+        let credentials = EndpointCredentials {
+            amneziawg: None,
+            hysteria2: owner.hysteria2.clone(),
+            reality: owner.reality.clone(),
+            measure_origin: owner.measure_origin.clone(),
+            session: Some(SessionBundle {
+                device_private_key: Secret::new(STANDARD.encode(PLACEHOLDER)),
+                server_public_key: session.server_public_key.clone(),
+                device_address,
+                session_port: session.session_port,
+            }),
+        };
         // Whatever the stored form would refuse, an invite is not made from.
         credentials
             .to_plaintext_json()
@@ -161,8 +187,15 @@ impl Invite {
         Ok(Self {
             label: label.to_owned(),
             host: host.to_owned(),
+            device_public_key: device_public_key.to_owned(),
             credentials,
         })
+    }
+
+    /// The public half of the key of the device this invite is for.
+    #[must_use]
+    pub fn device_public_key(&self) -> &str {
+        &self.device_public_key
     }
 
     /// The name the server is shown under.
@@ -195,6 +228,7 @@ impl Invite {
             version: 1,
             label: self.label.clone(),
             host: self.host.clone(),
+            device_public_key: self.device_public_key.clone(),
             credentials,
         };
         let json = serde_json::to_vec(&wire).map_err(|_| InviteError::Damaged)?;
@@ -247,6 +281,9 @@ impl Invite {
         if !valid_host(&wire.host) {
             return Err(InviteError::Host);
         }
+        if !valid_public_key(&wire.device_public_key) {
+            return Err(InviteError::Key);
+        }
         let stored = serde_json::to_vec(&wire.credentials).map_err(|_| InviteError::Damaged)?;
         if stored.len() > MAX_STORED_LEN {
             return Err(InviteError::TooLarge);
@@ -265,6 +302,7 @@ impl Invite {
         Ok(Self {
             label: wire.label,
             host: wire.host,
+            device_public_key: wire.device_public_key,
             credentials,
         })
     }
@@ -337,8 +375,20 @@ mod tests {
         crate::session::session_device_address(n)
     }
 
+    /// A device's public key for the tests (any 32 bytes that are not all zero).
+    fn device_key() -> String {
+        STANDARD.encode([7u8; 32])
+    }
+
     fn invite() -> Invite {
-        Invite::new("Ravis laptop", "203.0.113.9", &owner(), address(1)).unwrap()
+        Invite::new(
+            "Ravis laptop",
+            "203.0.113.9",
+            &owner(),
+            address(1),
+            &device_key(),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -418,6 +468,7 @@ mod tests {
                 version: 1,
                 label: "A".into(),
                 host: "203.0.113.9".into(),
+                device_public_key: device_key(),
                 credentials: wire_creds,
             };
             format!(
@@ -433,7 +484,7 @@ mod tests {
         let mut creds = owner();
         creds.session = None;
         assert_eq!(
-            Invite::new("A", "203.0.113.9", &creds, address(1)),
+            Invite::new("A", "203.0.113.9", &creds, address(1), &device_key()),
             Err(InviteError::NoSession)
         );
     }
@@ -452,7 +503,7 @@ mod tests {
             long.as_str(),
         ] {
             assert_eq!(
-                Invite::new(bad, "203.0.113.9", &owner(), address(1)),
+                Invite::new(bad, "203.0.113.9", &owner(), address(1), &device_key()),
                 Err(InviteError::Name),
                 "{bad:?}"
             );
@@ -477,11 +528,47 @@ mod tests {
             "::ffff:0.0.0.0",
         ] {
             assert_eq!(
-                Invite::new("A", bad, &owner(), address(1)),
+                Invite::new("A", bad, &owner(), address(1), &device_key()),
                 Err(InviteError::Host),
                 "{bad:?}"
             );
         }
+    }
+
+    #[test]
+    fn an_invite_is_for_one_device_and_says_which() {
+        let text = invite().encode().unwrap();
+        let read = Invite::decode(&text).unwrap();
+        assert_eq!(read.device_public_key(), device_key());
+        // Not a key, the all-zero key, and nothing at all: none can be made, and none is read.
+        for bad in [
+            "",
+            "short",
+            &STANDARD.encode([0u8; 32]),
+            &STANDARD.encode([1u8; 31]),
+        ] {
+            assert_eq!(
+                Invite::new("A", "203.0.113.9", &owner(), address(1), bad),
+                Err(InviteError::Key),
+                "{bad:?}"
+            );
+        }
+        let swapped = |key: &str| {
+            let json = URL_SAFE_NO_PAD
+                .decode(text.strip_prefix(PREFIX).unwrap())
+                .unwrap();
+            let mut v: Value = serde_json::from_slice(&json).unwrap();
+            v["device_public_key"] = Value::from(key);
+            format!(
+                "{PREFIX}{}",
+                URL_SAFE_NO_PAD.encode(serde_json::to_vec(&v).unwrap())
+            )
+        };
+        assert_eq!(Invite::decode(&swapped("nope")), Err(InviteError::Key));
+        assert_eq!(
+            Invite::decode(&swapped(&STANDARD.encode([0u8; 32]))),
+            Err(InviteError::Key)
+        );
     }
 
     #[test]

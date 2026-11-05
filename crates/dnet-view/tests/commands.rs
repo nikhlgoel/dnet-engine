@@ -731,6 +731,150 @@ async fn a_result_or_address_the_service_would_refuse_is_not_sent_and_not_repeat
     }
 }
 
+// ---------------------------------------------------------------------- a friend's device (T188)
+
+const SERVER_ID: &str = "31111111-2222-4333-8444-555555555555";
+
+#[tokio::test]
+async fn a_friend_asks_to_join_and_gets_the_text_to_send() {
+    let link = FakeLink::new(|request| match request {
+        Request::RequestJoin { name } => {
+            assert_eq!(name, "Ravi laptop");
+            done(json!({
+                "name": "Ravi laptop",
+                "text": "DNET-DEVICE-REQUEST {\"version\":1}",
+                "valid_for_s": 7200,
+            }))
+        }
+        other => panic!("unexpected {other:?}"),
+    });
+    let out = Bridge::new(link).request_join("Ravi laptop").await;
+    assert_eq!(
+        out,
+        json!({
+            "ok": true, "name": "Ravi laptop",
+            "text": "DNET-DEVICE-REQUEST {\"version\":1}", "validForMinutes": 120,
+        })
+    );
+}
+
+#[tokio::test]
+async fn an_invite_is_sent_as_pasted_and_names_the_new_server() {
+    let link = FakeLink::new(|request| match request {
+        Request::AcceptInvite { invite, label } => {
+            assert_eq!(invite, "DNET-INVITE-1:abc");
+            assert_eq!(label.as_deref(), Some("Ravi server"));
+            done(json!({ "endpoint": SERVER_ID }))
+        }
+        other => panic!("unexpected {other:?}"),
+    });
+    let out = Bridge::new(link)
+        .accept_invite("DNET-INVITE-1:abc", Some("Ravi server"))
+        .await;
+    assert_eq!(out, json!({ "ok": true, "id": SERVER_ID }));
+}
+
+#[tokio::test]
+async fn the_owner_prepares_and_finishes_a_device_and_gets_an_invite() {
+    let link = FakeLink::new(|request| match request {
+        Request::PrepareDevice { endpoint, request } => {
+            assert_eq!(endpoint.to_string(), SERVER_ID);
+            assert!(request.starts_with("DNET-DEVICE-REQUEST"));
+            done(json!({ "name": "Ravi laptop", "script": "#!/bin/sh\n", "valid_for_s": 21600 }))
+        }
+        Request::FinishDevice { report, .. } => {
+            assert!(report.contains("DNET-DEVICE-REPORT"));
+            done(json!({
+                "name": "Ravi laptop", "address": "10.9.0.3", "invite": "DNET-INVITE-1:abc-_1",
+            }))
+        }
+        other => panic!("unexpected {other:?}"),
+    });
+    let bridge = Bridge::new(link);
+    let prepared = bridge
+        .prepare_device(SERVER_ID, "DNET-DEVICE-REQUEST {}")
+        .await;
+    assert_eq!(
+        prepared,
+        json!({ "ok": true, "name": "Ravi laptop", "script": "#!/bin/sh\n", "validForMinutes": 360 })
+    );
+    let invited = bridge
+        .finish_device(
+            SERVER_ID,
+            "DNET-DEVICE-REQUEST {}",
+            "x\nDNET-DEVICE-REPORT {}\n",
+        )
+        .await;
+    assert_eq!(
+        invited,
+        json!({
+            "ok": true, "name": "Ravi laptop", "address": "10.9.0.3",
+            "invite": "DNET-INVITE-1:abc-_1",
+        })
+    );
+}
+
+#[tokio::test]
+async fn what_the_service_would_refuse_is_not_sent_and_not_repeated() {
+    let nothing = || FakeLink::new(|_| panic!("nothing may be sent"));
+    for out in [
+        Bridge::new(nothing()).request_join("SENTINEL'x").await,
+        Bridge::new(nothing()).request_join("").await,
+        Bridge::new(nothing())
+            .accept_invite("SENTINEL\u{0}", None)
+            .await,
+        Bridge::new(nothing()).accept_invite("   ", None).await,
+        Bridge::new(nothing())
+            .accept_invite("DNET-INVITE-1:a", Some("SENTINEL\u{202e}"))
+            .await,
+        Bridge::new(nothing())
+            .prepare_device("not-an-id", "SENTINEL")
+            .await,
+        Bridge::new(nothing()).prepare_device(SERVER_ID, "").await,
+        Bridge::new(nothing())
+            .finish_device(SERVER_ID, "t", "SENTINEL\u{7}")
+            .await,
+        Bridge::new(nothing())
+            .finish_device(SERVER_ID, "t", "")
+            .await,
+    ] {
+        assert_eq!(out["ok"], json!(false), "{out}");
+        assert!(!out.to_string().contains("SENTINEL"), "{out}");
+    }
+}
+
+/// The window shows what these replies carry and offers it for copying: one that is not what was promised is an
+/// error the person can read, not something that might be anything.
+#[tokio::test]
+async fn a_reply_that_is_not_what_was_promised_is_never_shown() {
+    for reply in [
+        json!({}),
+        json!({ "name": "x", "text": "nope", "valid_for_s": 60 }),
+        json!({ "name": "x", "script": "", "valid_for_s": 60 }),
+        json!({ "name": "x", "address": "10.9.0.3", "invite": "nope" }),
+        json!({ "name": "x\u{202e}", "address": "10.9.0.3", "invite": "DNET-INVITE-1:abc" }),
+    ] {
+        let answering = |reply: &Value| {
+            let reply = reply.clone();
+            FakeLink::new(move |_| done(reply.clone()))
+        };
+        for out in [
+            Bridge::new(answering(&reply)).request_join("x").await,
+            Bridge::new(answering(&reply))
+                .prepare_device(SERVER_ID, "t")
+                .await,
+            Bridge::new(answering(&reply))
+                .finish_device(SERVER_ID, "t", "r")
+                .await,
+        ] {
+            assert_eq!(out["ok"], json!(false), "{out}");
+            for shown in ["text", "script", "invite", "address"] {
+                assert!(out.get(shown).is_none(), "{out}");
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------- held changes (T160)
 
 #[tokio::test]
