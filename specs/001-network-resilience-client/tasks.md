@@ -2027,6 +2027,12 @@ own, made by DNet Engine's wizard on Oracle Cloud Always Free (or any Linux serv
   > lets the start-up replay delete a route someone else created; (b) `TrustedFile::write` renames the new journal into place and only then restricts it, so if that last step errors, `apply` returns an error before the mutation runs but the record is already durable (same replay consequence). Fix ideas: keep a
   > tombstone in memory until the withdrawal is written; restrict the temporary file before the rename. Very narrow (a route that already exists, plus a failed disk write, plus a crash). **Not done:** mutation testing of `guard`, the engine, the supervisor and the service crate (hours); the elevated Windows code (owner and virtual-machine work, `docs/owner-testing-guide.md`).
 
+- [x] T180 [US1] The central figure: no outline on hover, and larger
+  > **2026-11-05, owner's request.** Hovering the figure drew a one-pixel circle over its edge, which covered part of a figure that shows live state. The outline (a CSS shadow on the invisible hit area) is gone; the hover is now drawn by the figure itself, a soft lift
+  > (`easeHover`: the dots about 22% brighter and 15% larger, the whole about 3.5% bigger, eased, and instant under reduced motion), and the pointer stays a hand. The figure's radius went from 34% of the scene's height (at most 96 px) to 40% (at most 120 px, at least 56). Tests first
+  > (`tests/scene.test.ts`: the easing never overshoots or leaves 0 to 1 for any input including NaN and infinity; the figure keeps 48 px clear of the network chips and fits the scene at 560 x 300, 960 x 420 and 1400 x 600). Checked in a browser against the mock: no shadow on hover, the dots lift,
+  > the beams and chips are unchanged and clear of the figure at 800 x 600. **Known, not new:** at the smallest window (560 x 420) the scene is pinned at 200 px and the stats strip already overlapped its lower part; the larger figure adds about 12 px to that.
+
 ## Dependencies
 
 ```

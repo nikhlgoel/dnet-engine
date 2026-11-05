@@ -101,7 +101,21 @@ export function slotsFor(width: number, height: number): Slot[] {
 
 /** The core's radius for a scene of this height. */
 export function radiusFor(height: number): number {
-  return Math.max(48, Math.min(height * 0.34, 96));
+  return Math.max(56, Math.min(height * 0.4, 120));
+}
+
+/**
+ * How far the figure is lifted by the pointer, 0 to 1. Hovering is shown by the figure itself getting a little
+ * brighter and larger, never by an outline drawn over it: the figure carries live information and nothing may
+ * cover it. Eases toward the target; with reduced motion it jumps, because nothing animates then.
+ */
+export function easeHover(current: number, hovered: boolean, dt: number, still: boolean): number {
+  const target = hovered ? 1 : 0;
+  if (still) return target;
+  const from = Math.min(1, Math.max(0, Number.isFinite(current) ? current : 0));
+  if (!(dt > 0)) return from;
+  const rate = 1 - Math.exp(-Math.min(dt, 1) * 10);
+  return Math.min(1, Math.max(0, from + (target - from) * rate));
 }
 
 const SPEED: Record<Lamp, number> = { off: 0.03, probe: 0.5, ok: 0.34, warn: 0.2, fail: 0.12 };
@@ -117,6 +131,8 @@ export class Scene {
   private roles: ChipRole[] = [];
   private angle = 0;
   private roll = 0;
+  private hover = false;
+  private lift = 0;
   private width = 0;
   private height = 0;
   private dpr = 1;
@@ -157,6 +173,11 @@ export class Scene {
 
   setNetworks(roles: ChipRole[]): void {
     this.roles = roles;
+  }
+
+  /** The pointer is over the figure (it is the switch's pointer target). */
+  setHover(on: boolean): void {
+    this.hover = on;
   }
 
   /** Match the canvas to its box. Returns the slots the chips go in. */
@@ -221,7 +242,10 @@ export class Scene {
     const lamp = { off: c.text3, probe: c.probe, ok: c.ok, warn: c.warn, fail: c.fail }[this.lamp];
     const cx = W / 2;
     const cy = H / 2;
-    const R = radiusFor(H);
+    const base = radiusFor(H);
+    this.lift = easeHover(this.lift, this.hover, dt, still);
+    // The hover: a little larger and brighter, drawn by the figure itself, with nothing laid over it.
+    const R = base * (1 + 0.035 * this.lift);
 
     // Drifting dust, for depth. Still under reduced motion.
     ctx.fillStyle = c.text3;
@@ -236,7 +260,7 @@ export class Scene {
       ctx.fill();
     }
 
-    this.drawBeams(t, still, lamp, cx, cy, R);
+    this.drawBeams(t, still, lamp, cx, cy, base);
 
     // The core.
     const speed = SPEED[this.lamp];
@@ -330,10 +354,10 @@ export class Scene {
           if (p.i % 9 === 0) alpha *= still ? 0.3 : 0.15 + 0.5 * hash(p.i + Math.floor(t * 5));
           break;
       }
-      ctx.globalAlpha = Math.max(0, Math.min(1, alpha));
+      ctx.globalAlpha = Math.max(0, Math.min(1, alpha * (1 + 0.22 * this.lift)));
       ctx.fillStyle = lamp;
       ctx.beginPath();
-      ctx.arc(px, py, size, 0, TAU);
+      ctx.arc(px, py, size * (1 + 0.15 * this.lift), 0, TAU);
       ctx.fill();
     }
     ctx.globalAlpha = 1;
