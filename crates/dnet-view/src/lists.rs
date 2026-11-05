@@ -111,6 +111,47 @@ pub fn pending(reply: &Value) -> Result<Value, String> {
     Ok(json!({ "pending": out }))
 }
 
+/// `GetComponents` as the window's map of parts. The reply was read by the strict decoder of `dnet-ipc` (unknown
+/// kinds and states, over-long text and mismatched summaries are already refused, and hostile characters already
+/// removed), so this only chooses names. A reason is passed whole: it is the part's own account, and cutting it
+/// would change what it says. A measurement that was not taken is left out, never written as zero.
+pub fn components(reply: &dnet_ipc::componentview::ComponentsReply) -> Value {
+    use dnet_ipc::componentview::{kind_str, state_str};
+    let parts: Vec<Value> = reply
+        .components
+        .iter()
+        .map(|c| {
+            let mut part = serde_json::Map::new();
+            part.insert("kind".into(), json!(kind_str(c.kind)));
+            part.insert("id".into(), json!(c.id));
+            part.insert("state".into(), json!(state_str(c.state)));
+            part.insert("reason".into(), json!(c.reason));
+            part.insert("ageSeconds".into(), json!(c.changed_ago_ms / 1000));
+            if let Some(ms) = c.evidence.latency_ms {
+                part.insert("latencyMs".into(), json!(ms));
+            }
+            if let Some(permille) = c.evidence.loss_permille {
+                part.insert("lossPermille".into(), json!(permille));
+            }
+            if let Some(restarts) = c.evidence.restarts {
+                part.insert("restarts".into(), json!(restarts));
+            }
+            Value::Object(part)
+        })
+        .collect();
+    json!({
+        "supported": true,
+        "asOfUnixMs": reply.as_of_unix_ms,
+        "overall": state_str(reply.overall),
+        "parts": parts,
+    })
+}
+
+/// What the window is shown when the service is too old to know `GetComponents`: not "no parts", and not "fine".
+pub fn components_unsupported() -> Value {
+    json!({ "supported": false, "asOfUnixMs": null, "overall": "Unknown", "parts": [] })
+}
+
 /// `ListRules` as the window's list, with the encrypted-name setting that rides along with it.
 pub fn rules(reply: &Value) -> Result<Value, String> {
     let mut out = Vec::new();

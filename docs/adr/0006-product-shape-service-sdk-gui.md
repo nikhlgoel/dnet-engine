@@ -107,10 +107,36 @@ Optimization here is a discipline, not a feature, and it comes after the feature
 |---|---|---|---|
 | **P1** | Where does the GUI live? | (a) `apps/dnet-tray` in this workspace, as planned. (b) A separate repository that consumes the engine's protocol. | **(b), but not yet.** Split when the IPC protocol is frozen for v1 and before T099 starts. Until then there is nothing to move and a split now only creates drift between two repositories. Pin the protocol crate by tag, version the wire protocol, and run the engine's own client (`dnetctl`) in this repository's CI as the contract test. |
 | **P2** | What would "connecting it into other programs" be? (**Deferred by the owner.**) | (a) The IPC client and protocol types, published as a crate. (b) The engine linked into another program. | **(a) only.** (b) is refused: the engine needs privilege (routes, adapters, process control), and keeping that behind the service boundary is Principle V. A third-party program is then just another unprivileged client, and the service decides what it may do. |
-| **P3** | Enforce the kill switch in the operating system? | (a) Yes, with user-mode filtering rules in the Windows firewall engine (no driver). (b) No, keep the posture only. | **(a).** It is the missing half of "safer on public Wi-Fi". It is not a kernel driver, so the "no kernel-mode drivers" rule is not touched, but it changes routing and firewall state and needs its own task, undo records and a security review. |
+| **P3** | Enforce the kill switch in the operating system? | (a) Yes, with user-mode filtering rules in the Windows firewall engine (no driver). (b) No, keep the posture only. | **(a).** It is the missing half of "safer on public Wi-Fi". It is not a kernel driver, so the "no kernel-mode drivers" rule is not touched, but it changes routing and firewall state and needs its own task, undo records and a security review. **Decided 2026-11-04: (a), under the conditions in §5a.** |
 | **P4** | Licence of that client crate (**Deferred by the owner.**) | (a) GPLv3 like the rest. (b) A more permissive licence for the thin client and protocol crate only. | **Owner's choice, decide before publishing.** With GPLv3, a program that links it must be GPLv3-compatible, which blocks most commercial users. The owner holds the copyright and may license that crate differently, but only while all contributions to it are the owner's. The bundled third-party components are unaffected either way: they run as separate processes. |
 | **P5** | Start the download-accelerator specification? | (a) Not now. (b) Write the specification, build nothing. | **(a) until v1's gates pass.** Then (b). It is a separate specification by rule. |
 | **P6** | Name | The release name is not decided. | The repository and crate names do not need it. Settle it before any installer, About screen or published crate. |
+
+### 5a. P3 decided, 2026-11-04
+
+**P3 (a) is approved, by the owner's delegation.** The owner asked for the kill switch to be built and tested, and said: "You have the complete
+access. Make decisions yourself, approve them, and move forward. Just verify them once before approving." This section is that approval and what
+was checked first. The owner may reverse it at any time: the code that applies filters is then removed, and the pure model stays.
+
+**Checked before approving:** `docs/research/2026-10-31-solutions.md` section 4 (the design) was read; it needs the Windows firewall engine in user
+mode only, so the "no kernel-mode drivers" rule is untouched; no enforcement code existed; the pure model (`dnet_core::guard`, 34 tests, clippy
+clean; nine deliberate breaks each made at least one fail) was written and run first. An independent review found that the first version's
+lint could not see a well-formed permit nobody asked for, and accepted network-share paths and accounts that everyone belongs to: all
+fixed before anything was built on it. **Not checked:** how any of it behaves on a real machine. That is the lab (S4).
+
+**Conditions, all binding:**
+
+1. User mode only. No driver; a driver would need its own ADR.
+2. The rule set is data first. `dnet_core::guard::Guard::build` makes it and refuses a plan or a list that leaks; an applier takes only a
+   `Guard`; `guard::verify` compares what is read back from the firewall with the plan, in both directions; and the same list is the dry
+   run. Two kinds of permit (the IPv4 address request, IPv6 neighbour discovery) are not scoped by address; the lab measures them.
+3. The filters belong to a provider tied to the auto-start `DNetEngine` service, so removing the service cannot leave a machine with no network.
+   Uninstall, `dnetctl guard-release` and a safe-mode command remove them.
+4. The undo is registered before any filter is applied, like every routing change.
+5. Nothing is applied to a real machine until it has been applied in a virtual machine with a snapshot and the five lab checks passed. The
+   owner's own computer is not the test bed.
+6. Security review before the commit of any code that applies a filter.
+7. The site and the README keep saying the kill switch is not a guarantee until the lab checks pass.
 
 ## 6. What continues now, and what does not
 
@@ -125,7 +151,7 @@ nod).
 - no download acceleration, parallel ranges or aggregation code;
 - no new repository, and no move of `apps/dnet-tray` (P1);
 - no published crate, no integration documentation, no promise of a stable API for outsiders (P2, P4);
-- no firewall-enforcement code (P3);
+- no firewall-enforcement code beyond what §5a allows (P3);
 - no marketing or UI text beyond §3.
 
 ## 7. If approved

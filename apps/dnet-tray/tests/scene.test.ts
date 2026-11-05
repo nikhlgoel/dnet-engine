@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { POINTS_FULL, POINTS_REDUCED, hash, pointFor, radiusFor, slotsFor } from '../src/lib/scene';
+import {
+  POINTS_FULL,
+  POINTS_REDUCED,
+  easeHover,
+  hash,
+  pointFor,
+  radiusFor,
+  slotsFor,
+} from '../src/lib/scene';
 
 const SHAPES = ['ring', 'sphere', 'cube'] as const;
 
@@ -58,8 +66,62 @@ describe('layout helpers', () => {
   });
 
   it('bounds the core’s radius', () => {
-    expect(radiusFor(0)).toBe(48);
-    expect(radiusFor(10_000)).toBe(96);
-    expect(radiusFor(200)).toBeCloseTo(68, 5);
+    expect(radiusFor(0)).toBe(56);
+    expect(radiusFor(10_000)).toBe(120);
+    expect(radiusFor(200)).toBeCloseTo(80, 5);
+  });
+
+  it('leaves room for the figure between the network chips and inside the scene', () => {
+    for (const [w, h] of [
+      [560, 300],
+      [960, 420],
+      [1400, 600],
+    ] as const) {
+      const r = radiusFor(h);
+      const [left, right] = slotsFor(w, h);
+      // The figure never reaches the chips, and fits the scene with a margin.
+      expect((right?.x ?? 0) - w / 2 - r).toBeGreaterThanOrEqual(48);
+      expect(w / 2 - (left?.x ?? 0) - r).toBeGreaterThanOrEqual(48);
+      expect(2 * r).toBeLessThanOrEqual(h * 0.85);
+    }
+  });
+});
+
+describe('easeHover: the hover is a soft lift of the figure itself, not an outline', () => {
+  it('moves toward the target without overshooting, in both directions', () => {
+    let v = 0;
+    for (let i = 0; i < 60; i += 1) {
+      const next = easeHover(v, true, 1 / 60, false);
+      expect(next).toBeGreaterThanOrEqual(v);
+      expect(next).toBeLessThanOrEqual(1);
+      v = next;
+    }
+    expect(v).toBeGreaterThan(0.95);
+    for (let i = 0; i < 90; i += 1) {
+      const next = easeHover(v, false, 1 / 60, false);
+      expect(next).toBeLessThanOrEqual(v);
+      expect(next).toBeGreaterThanOrEqual(0);
+      v = next;
+    }
+    expect(v).toBeLessThan(0.02);
+  });
+
+  it('does not move when no time has passed, and jumps when motion is reduced', () => {
+    expect(easeHover(0.3, true, 0, false)).toBe(0.3);
+    expect(easeHover(0.3, true, 0.016, true)).toBe(1);
+    expect(easeHover(0.7, false, 0.016, true)).toBe(0);
+  });
+
+  it('stays finite and inside 0 to 1 for any input', () => {
+    for (const dt of [0, 0.001, 0.1, 5, Number.POSITIVE_INFINITY, Number.NaN]) {
+      for (const from of [0, 0.5, 1]) {
+        for (const on of [true, false]) {
+          const v = easeHover(from, on, dt, false);
+          expect(Number.isFinite(v)).toBe(true);
+          expect(v).toBeGreaterThanOrEqual(0);
+          expect(v).toBeLessThanOrEqual(1);
+        }
+      }
+    }
   });
 });

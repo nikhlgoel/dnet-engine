@@ -114,10 +114,20 @@ without `--accept-tier2` must be refused with the Tier 2 warning (that is "the U
 then connect with `--accept-tier2`, repeat steps 2–3. **Pass**: the transfer breaks (expected for TCP),
 and the warning was shown first.
 
-**Then** (a code change, test-first, by whoever records it): in `crates/dnet-core/src/tier.rs`, set
-`recorded_survival` to `Survived` **only** for a kind that passed all three HV-07 runs, with the core
-versions in the doc comment; leave any other at `NotMeasured` (or `Broke` if it failed). The tier label in
-configuration and UI follows from that function, never from intent.
+**Then** (data, not code; T175): add one record per method to `crates/dnet-core/evidence/survival.json`:
+
+```json
+{ "version": 1, "records": [ { "method": "hysteria2", "core_commit": "<40-digit commit from vendor/*/BUILD-PROVENANCE.md>",
+  "runs": [ { "on": "2026-11-05", "same_connection": true, "bytes_expected": 524288000, "bytes_received": 524288000,
+              "moved_without_disconnect": true } ] } ] }
+```
+
+One entry in `runs` per run (at least three for survival); put `false` and the real byte count for a run that failed,
+and do not leave a failed run out. `methods` are `amneziawg`, `hysteria2`, `vless_reality`. The tier follows by itself:
+three clean runs at the pinned commit is Tier 1, one failure is Broke, a record for another commit is ignored (so a
+core upgrade retires it). Then update `what_the_shipped_evidence_says_today` in `survival_evidence.rs` to state the
+new tier, and `cargo test -p dnet-core -p xtask`: the site test will then insist the page stops saying nothing was
+measured.
 
 ---
 
@@ -200,6 +210,8 @@ account (card and phone), and a release build's `server-pins.json` beside `dnetd
    line the terminal mangled.
 4. Paste the result back. The server must appear in Servers.
 5. Turn the connection on. **Pass:** connected through the new server, `dnetctl status` shows it.
+
+**Speed, before choosing the shape:** Oracle's own Always Free list says the AMD `VM.Standard.E2.1.Micro` has **up to 50 Mbps** of internet bandwidth, so it cannot show more than that. The Ampere A1 shape's bandwidth scales with its OCPUs and Oracle gives no figure; an unofficial listing implies about 1 Gbps per OCPU (unverified). Measure the throughput through the tunnel (`curl` of a large file from the server's origin on the tunnel address) and write the result next to the shape used. The Arm server programs have been built but never run (no Arm machine): treat the first Arm run as a test of that too.
 
 **Also check, on that server** (`ssh` in): `systemctl list-timers` shows `dnet-keepalive.timer` and `dnet-housekeeping.timer`;
 `journalctl --disk-usage` is below 100 MB; `df -h /` shows no growth after a week; the core log level is `warn`

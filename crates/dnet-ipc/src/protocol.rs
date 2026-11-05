@@ -138,6 +138,32 @@ pub enum Request {
         host: String,
         report: String,
     },
+    /// A friend's device asks to join someone's server (T188): the service makes a key that stays on this
+    /// computer and answers with the text to send to the owner (a name and the public half of the key).
+    /// `name` is what the owner will see for this device.
+    RequestJoin {
+        name: String,
+    },
+    /// The owner's invite, pasted (T188). The service checks it, puts this computer's own key in it, and, once
+    /// a person has approved, adds the server. `label` names the server here; without it the invite's name is
+    /// used.
+    AcceptInvite {
+        invite: String,
+        label: Option<String>,
+    },
+    /// The owner adds a friend's device to one of their servers (T188): `request` is the text the friend sent.
+    /// The answer is the script to run on that server.
+    PrepareDevice {
+        endpoint: EndpointId,
+        request: String,
+    },
+    /// Finish it: `report` is what the script printed on the server. The service checks it against the request
+    /// it prepared and answers with the invite to send to the friend.
+    FinishDevice {
+        endpoint: EndpointId,
+        request: String,
+        report: String,
+    },
     StartProvisioning,
     CancelProvisioning,
     /// Apply a held change (T160). Only an elevated client in the console session may ask; the change
@@ -238,17 +264,35 @@ pub fn check_host(host: &str) -> Result<&str, IpcError> {
 
 /// The rules for the text a person pastes back from their server.
 fn check_report(report: &str) -> Result<(), IpcError> {
-    let bad = |c: char| crate::netview::is_hostile(c) && !matches!(c, '\n' | '\r' | '\t');
-    if report.trim().is_empty()
-        || report.chars().count() > crate::server_setup::MAX_REPORT_CHARS
-        || report.chars().any(bad)
-    {
-        return Err(invalid(format!(
+    check_pasted("report", report, crate::server_setup::MAX_REPORT_CHARS).map_err(|_| {
+        invalid(format!(
             "`report` must be the text the server printed, up to {} characters, with no control characters",
             crate::server_setup::MAX_REPORT_CHARS
+        ))
+    })
+}
+
+/// The rules for any text a person pastes: not empty, not longer than `max` characters, and no control or
+/// direction characters other than line breaks and tabs. What the text means is decided by whoever reads it.
+fn check_pasted(field: &str, text: &str, max: usize) -> Result<(), IpcError> {
+    let bad = |c: char| crate::netview::is_hostile(c) && !matches!(c, '\n' | '\r' | '\t');
+    if text.trim().is_empty() || text.chars().count() > max || text.chars().any(bad) {
+        return Err(invalid(format!(
+            "`{field}` must be pasted text of up to {max} characters, with no control characters"
         )));
     }
     Ok(())
+}
+
+/// The rules for the name a friend's device gives itself.
+fn check_device_name(name: &str) -> Result<&str, IpcError> {
+    if !dnet_config::invite::valid_name(name) {
+        return Err(invalid(format!(
+            "`name` must be 1 to {} letters, digits, spaces, dots, dashes or underscores",
+            dnet_config::invite::MAX_NAME_LEN
+        )));
+    }
+    Ok(name)
 }
 
 impl NewEndpoint {
@@ -317,6 +361,10 @@ impl Request {
             | FetchFeed
             | PrepareServer { .. }
             | FinishServer { .. }
+            | RequestJoin { .. }
+            | AcceptInvite { .. }
+            | PrepareDevice { .. }
+            | FinishDevice { .. }
             | StartProvisioning
             | CancelProvisioning
             | RejectChange { .. } => RequestClass::Mutating,
@@ -1166,6 +1214,45 @@ pub fn decode_request(wire: &str) -> Result<Request, IpcError> {
                 report: report.to_owned(),
             }
         }
+        "RequestJoin" => {
+            only_fields(&value, &["request", "name"])?;
+            Request::RequestJoin {
+                name: check_device_name(field_str(&value, "name")?)?.to_owned(),
+            }
+        }
+        "AcceptInvite" => {
+            only_fields(&value, &["request", "invite", "label"])?;
+            let invite = field_str(&value, "invite")?;
+            check_pasted("invite", invite, crate::devices::MAX_INVITE_CHARS)?;
+            let label = match optional_string(&value, "label")? {
+                Some(label) => Some(check_label(label)?.to_owned()),
+                None => None,
+            };
+            Request::AcceptInvite {
+                invite: invite.to_owned(),
+                label,
+            }
+        }
+        "PrepareDevice" => {
+            only_fields(&value, &["request", "endpoint", "text"])?;
+            let text = field_str(&value, "text")?;
+            check_pasted("text", text, crate::devices::MAX_REQUEST_CHARS)?;
+            Request::PrepareDevice {
+                endpoint: parse_endpoint_id(field_str(&value, "endpoint")?)?,
+                request: text.to_owned(),
+            }
+        }
+        "FinishDevice" => {
+            only_fields(&value, &["request", "endpoint", "text", "report"])?;
+            let text = field_str(&value, "text")?;
+            check_pasted("text", text, crate::devices::MAX_REQUEST_CHARS)?;
+            check_report(field_str(&value, "report")?)?;
+            Request::FinishDevice {
+                endpoint: parse_endpoint_id(field_str(&value, "endpoint")?)?,
+                request: text.to_owned(),
+                report: field_str(&value, "report")?.to_owned(),
+            }
+        }
         "StartProvisioning" => Request::StartProvisioning,
         "CancelProvisioning" => Request::CancelProvisioning,
         "ApproveChange" => {
@@ -1216,6 +1303,10 @@ pub fn encode_request(request: &Request) -> String {
         Request::FetchFeed => "FetchFeed",
         Request::PrepareServer { .. } => "PrepareServer",
         Request::FinishServer { .. } => "FinishServer",
+        Request::RequestJoin { .. } => "RequestJoin",
+        Request::AcceptInvite { .. } => "AcceptInvite",
+        Request::PrepareDevice { .. } => "PrepareDevice",
+        Request::FinishDevice { .. } => "FinishDevice",
         Request::StartProvisioning => "StartProvisioning",
         Request::CancelProvisioning => "CancelProvisioning",
         Request::ApproveChange { .. } => "ApproveChange",
@@ -1278,6 +1369,28 @@ pub fn encode_request(request: &Request) -> String {
         } => {
             object.insert("label".into(), Value::String(label.clone()));
             object.insert("host".into(), Value::String(host.clone()));
+            object.insert("report".into(), Value::String(report.clone()));
+        }
+        Request::RequestJoin { name } => {
+            object.insert("name".into(), Value::String(name.clone()));
+        }
+        Request::AcceptInvite { invite, label } => {
+            object.insert("invite".into(), Value::String(invite.clone()));
+            if let Some(label) = label {
+                object.insert("label".into(), Value::String(label.clone()));
+            }
+        }
+        Request::PrepareDevice { endpoint, request } => {
+            object.insert("endpoint".into(), Value::String(endpoint.to_string()));
+            object.insert("text".into(), Value::String(request.clone()));
+        }
+        Request::FinishDevice {
+            endpoint,
+            request,
+            report,
+        } => {
+            object.insert("endpoint".into(), Value::String(endpoint.to_string()));
+            object.insert("text".into(), Value::String(request.clone()));
             object.insert("report".into(), Value::String(report.clone()));
         }
         Request::EnableBrutal {

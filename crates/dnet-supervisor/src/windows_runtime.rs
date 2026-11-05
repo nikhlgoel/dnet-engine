@@ -20,7 +20,7 @@ use tokio::sync::Mutex;
 use crate::error::SupervisorError;
 use crate::orphans;
 use crate::process::{self, CoreCommand, RunningCore};
-use crate::runtime::CoreRuntime;
+use crate::runtime::{CoreHealth, CoreRuntime};
 
 /// How long a killed core gets to exit before the kill is reported as failed.
 pub const KILL_GRACE: Duration = Duration::from_secs(10);
@@ -116,6 +116,20 @@ impl CoreRuntime for WindowsCoreRuntime {
         Ok(())
     }
 
+    async fn core_health(&self, core: CoreBinding) -> CoreHealth {
+        match self.running.lock().await.get_mut(&core) {
+            None => CoreHealth::Unknown,
+            // The core stays in the map after it ends by itself, so the next reading says so too; it is
+            // taken out only by `kill_core`, which is a stop on purpose.
+            Some(running) => match running.try_exited() {
+                Some(status) => CoreHealth::Exited {
+                    code: status.code(),
+                },
+                None => CoreHealth::Running,
+            },
+        }
+    }
+
     async fn kill_core(&self, core: CoreBinding) -> Result<(), SupervisorError> {
         let taken = self.running.lock().await.remove(&core);
         match taken {
@@ -130,5 +144,75 @@ impl CoreRuntime for WindowsCoreRuntime {
 
     async fn replay_undo(&self) -> Result<(), SupervisorError> {
         (self.undo)()
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::runtime::CoreHealth;
+
+    fn cmd(script: &str, core: CoreBinding) -> CoreCommand {
+        CoreCommand {
+            core,
+            program: PathBuf::from("cmd.exe"),
+            args: ["/c", script].iter().map(OsString::from).collect(),
+            working_dir: None,
+            ready_marker: None,
+            ready_timeout: Duration::from_secs(5),
+        }
+    }
+
+    fn runtime(primary: &str) -> WindowsCoreRuntime {
+        WindowsCoreRuntime::new(
+            cmd(primary, CoreBinding::PrimaryCore),
+            cmd("exit 0", CoreBinding::AmneziaWgCore),
+            "dnet-test",
+            Duration::from_secs(1),
+            Box::new(|| Ok(())),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_core_that_was_never_started_is_not_spoken_for() {
+        let rt = runtime("exit 0");
+        assert_eq!(
+            rt.core_health(CoreBinding::PrimaryCore).await,
+            CoreHealth::Unknown
+        );
+    }
+
+    #[tokio::test]
+    async fn a_running_core_is_running_and_a_stopped_one_is_not_spoken_for() {
+        let rt = runtime("ping -n 30 127.0.0.1 > nul");
+        rt.spawn_core(CoreBinding::PrimaryCore).await.unwrap();
+        assert_eq!(
+            rt.core_health(CoreBinding::PrimaryCore).await,
+            CoreHealth::Running
+        );
+        rt.kill_core(CoreBinding::PrimaryCore).await.unwrap();
+        assert_eq!(
+            rt.core_health(CoreBinding::PrimaryCore).await,
+            CoreHealth::Unknown
+        );
+    }
+
+    #[tokio::test]
+    async fn a_core_that_exits_on_its_own_is_reported_with_its_exit_code() {
+        // Alive for about two seconds (so spawning sees it survive, even on a slow machine), then exits with 3.
+        let rt = runtime("ping -n 3 127.0.0.1 > nul & exit 3");
+        rt.spawn_core(CoreBinding::PrimaryCore).await.unwrap();
+        assert_eq!(
+            rt.core_health(CoreBinding::PrimaryCore).await,
+            CoreHealth::Running
+        );
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        assert_eq!(
+            rt.core_health(CoreBinding::PrimaryCore).await,
+            CoreHealth::Exited { code: Some(3) }
+        );
     }
 }

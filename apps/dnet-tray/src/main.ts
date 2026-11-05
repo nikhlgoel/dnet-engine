@@ -4,6 +4,7 @@ import './app.css';
 import { mount } from 'svelte';
 import App from './App.svelte';
 import { isTauri } from './lib/bridge';
+import { createTauriChrome } from './lib/chrome';
 import { createMockBridge } from './lib/mock';
 
 async function bridge() {
@@ -12,8 +13,9 @@ async function bridge() {
     return createTauriBridge();
   }
   // A browser tab with no service behind it: the design's own scenarios, so the window can be developed and
-  // looked at. Never reached inside the real app, which has `__TAURI_INTERNALS__`.
-  const mock = createMockBridge({ initial: { state: 'ok', networks: 'two' }, disclosed: true });
+  // looked at. Never reached inside the real app, which has `__TAURI_INTERNALS__`. New servers and rules that send
+  // traffic around the tunnel wait for approval, as the installed service makes them (T160).
+  const mock = createMockBridge({ initial: { state: 'ok', networks: 'two' }, disclosed: true, holdChanges: true });
   // In development only (the condition is false in a production build, so this is removed from it): the mock
   // can be driven from the console, e.g. `__dnetMock.set({ state: 'fail', cause: 'NoUsablePath' })`.
   if (import.meta.env.DEV) (window as unknown as { __dnetMock: unknown }).__dnetMock = mock;
@@ -22,4 +24,5 @@ async function bridge() {
 
 const target = document.getElementById('app');
 if (target === null) throw new Error('the page has no #app element');
-mount(App, { target, props: { bridge: await bridge() } });
+// Inside the real app the system frame is off, so the page draws the window's own; a browser tab keeps the browser's.
+mount(App, { target, props: { bridge: await bridge(), chrome: isTauri() ? createTauriChrome() : null } });

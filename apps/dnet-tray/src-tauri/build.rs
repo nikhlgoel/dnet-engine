@@ -12,8 +12,13 @@ const COMMANDS: &[&str] = &[
     "remove_endpoint",
     "prepare_server",
     "finish_server",
+    "request_join",
+    "accept_invite",
+    "prepare_device",
+    "finish_device",
     "set_endpoint_enabled",
     "list_profiles",
+    "list_components",
     "set_brutal",
     "list_rules",
     "add_rule",
@@ -24,6 +29,11 @@ const COMMANDS: &[&str] = &[
     "set_encrypted_dns",
     "check_updates",
     "open_login_page",
+    "window_minimize",
+    "window_toggle_maximize",
+    "window_start_drag",
+    "window_close",
+    "window_ready",
 ];
 
 fn main() {

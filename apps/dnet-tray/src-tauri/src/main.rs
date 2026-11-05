@@ -8,9 +8,9 @@
 //! - **R1.** The tray and its menu are native and depend on no JavaScript: the state, the one control, "Open",
 //!   and "Quit this app (the connection stays up)". Quitting this app leaves the service, and so the
 //!   connection, exactly as it was.
-//! - **R2.** There is no window at start-up. "Open" creates it hidden and shows it when the page has loaded.
-//!   Closing it hides it; after a grace period nobody reopened it in, the web view is destroyed. While it is
-//!   hidden nothing is sent to it.
+//! - **R2.** The login start (`--background`) has no window; any other start opens one, and a second copy asks the
+//!   first to (`single`). "Open" creates it hidden and shows it when the page has loaded. Closing it hides it; after
+//!   a grace period nobody reopened it in, the web view is destroyed. While it is hidden nothing is sent to it.
 //! - **R4.** The web view never touches the control pipe: its commands are the functions in `shell`, each of
 //!   which goes through `dnet_view::Bridge`.
 //!
@@ -25,6 +25,8 @@ compile_error!("the DNet Engine window is Windows-only until ADR-0005 (Linux) is
 
 #[cfg(windows)]
 mod shell;
+#[cfg(windows)]
+mod single;
 
 #[cfg(windows)]
 fn main() {

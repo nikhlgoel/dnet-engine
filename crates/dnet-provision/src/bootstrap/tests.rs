@@ -238,6 +238,505 @@ fn exactly_the_three_ports_are_opened_on_the_machine() {
     assert_eq!(text.matches("\n  allow ").count(), 3);
 }
 
+/// The text of `dnet-net-up` inside the script: what runs on the server's firewall at every start.
+fn net_up(text: &str) -> &str {
+    let start = text
+        .find("cat > \"$BIN/dnet-net-up\" <<'NET_EOF'")
+        .expect("the script writes the firewall script");
+    let body = &text[start..];
+    &body[..body.find("\nNET_EOF\n").expect("and ends it")]
+}
+
+fn denied_ranges() -> Vec<dnet_core::rule::IpCidr> {
+    EXIT_DENIED_V4
+        .iter()
+        .chain(EXIT_DENIED_V6)
+        .map(|r| dnet_core::rule::IpCidr::parse(r).expect("a valid range"))
+        .collect()
+}
+
+fn inside(denied: &[dnet_core::rule::IpCidr], range: &str) -> bool {
+    let range = dnet_core::rule::IpCidr::parse(range).unwrap();
+    denied
+        .iter()
+        .any(|d| range.prefix_len() >= d.prefix_len() && d.overlaps(&range))
+}
+
+#[test]
+fn the_exit_refuses_everything_the_client_treats_as_local_and_the_clouds_own_addresses() {
+    let denied = denied_ranges();
+    for local in dnet_core::builtin_rules::LOCAL_BYPASS_CIDRS {
+        assert!(inside(&denied, local), "{local}");
+    }
+    // Where a cloud keeps its instance metadata (the address and its IPv6 twin), this machine's own loopback, and the
+    // private network a provider puts a server on.
+    for own in [
+        "169.254.169.254/32",
+        "fd00:c1::a9fe:a9fe/128",
+        "127.0.0.1/32",
+        "10.0.0.2/32",
+        "172.31.5.5/32",
+        "100.64.0.1/32",
+        // Azure's control-plane address is a public one, so it needs its own entry; and the NAT64 prefix maps
+        // IPv4 addresses, private ones included, into IPv6.
+        "168.63.129.16/32",
+        "64:ff9b::a00:1/128",
+    ] {
+        assert!(inside(&denied, own), "{own}");
+    }
+}
+
+#[test]
+fn no_public_address_is_refused_by_the_exit() {
+    let denied = denied_ranges();
+    for public in [
+        "1.1.1.1/32",
+        "8.8.8.8/32",
+        "93.184.216.34/32",
+        "172.32.0.1/32",
+        "172.15.255.255/32",
+        "100.128.0.1/32",
+        "2606:4700::1111/128",
+        "2001:4860:4860::8888/128",
+    ] {
+        let range = dnet_core::rule::IpCidr::parse(public).unwrap();
+        assert!(!denied.iter().any(|d| d.overlaps(&range)), "{public}");
+    }
+}
+
+#[test]
+fn what_leaves_through_the_server_is_filtered_before_it_is_forwarded() {
+    let text = script(&plan()).unwrap();
+    let net = net_up(&text);
+    let tunnel = format!("{TUNNEL_SERVER}/{TUNNEL_PREFIX}");
+    // A chain of its own for everything that comes in through the tunnel (by its interface, not by an address
+    // anybody could write on a packet), and one rule for the replies going back out through it.
+    let to_chain = net
+        .find(&format!("jump FORWARD -i awg0 -s {tunnel} -j DNET-FORWARD"))
+        .expect("the tunnel's traffic goes through its own chain");
+    let replies = net
+        .find(&format!(
+            "jump FORWARD -o awg0 -d {tunnel} -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT"
+        ))
+        .expect("and so do the replies");
+    // A packet that claims to come from the tunnel's addresses but did not arrive through it (a neighbour on the
+    // provider's network, with a source it made up) is dropped. It is inserted last, so it is looked at first.
+    let spoofed = net
+        .find(&format!("jump FORWARD -s {tunnel} ! -i awg0 -j DROP"))
+        .expect("a made-up tunnel address is dropped");
+    assert!(to_chain < replies && replies < spoofed);
+    // Nothing private, local or reserved, and no mail sent straight to other servers. A refusal is the variable
+    // `$DENY`, never a bare REJECT: on a kernel that has none a skipped refusal would be a hole.
+    assert!(net.contains("iptables -A DNET-FORWARD -d \"$range\" -j \"$DENY\""));
+    assert!(net.contains("iptables -A DNET-FORWARD -p tcp --dport 25 -j \"$DENY\""));
+    // Only TCP, UDP and ICMP leave. There is no accept-everything at the end: IP-in-IP and GRE to a public host,
+    // sent from this address, are a known way to have a server's address reported for reflected attacks.
+    assert!(!net.contains("iptables -A DNET-FORWARD -j ACCEPT"));
+    let last_refusal = net
+        .find("iptables -A DNET-FORWARD -p tcp --dport 25")
+        .unwrap();
+    let tcp = net
+        .find("iptables -A DNET-FORWARD -p tcp -j ACCEPT")
+        .unwrap();
+    let udp = net
+        .find("iptables -A DNET-FORWARD -p udp -j ACCEPT")
+        .unwrap();
+    let icmp = net
+        .find("iptables -A DNET-FORWARD -p icmp -j ACCEPT")
+        .unwrap();
+    let rest = net.find("iptables -A DNET-FORWARD -j DROP").unwrap();
+    assert!(last_refusal < tcp && tcp < udp && udp < icmp && icmp < rest);
+    // New connections of those three go through the cap before anything accepts them, and the cap chain is made
+    // before it is used.
+    for protocol in ["tcp", "udp", "icmp"] {
+        let step = net
+            .find(&format!(
+                "iptables -A DNET-FORWARD -m conntrack --ctstate NEW -p {protocol} -j DNET-CAP-FWD"
+            ))
+            .unwrap_or_else(|| panic!("no cap for {protocol}"));
+        assert!(last_refusal < step && step < tcp, "{protocol}");
+    }
+    assert!(net.find("cap DNET-CAP-FWD ACCEPT").unwrap() < last_refusal);
+}
+
+#[test]
+fn new_connections_are_capped_per_address_and_overall_and_a_drop_exists_only_if_its_accept_was_made(
+) {
+    let text = script(&plan()).unwrap();
+    let net = net_up(&text);
+    let from = net.find("cap() {").expect("the cap is one function");
+    let cap = &net[from..from + net[from..].find("\n    }\n").unwrap()];
+    // One address cannot be hammered (a flood, a stranger making the REALITY door dial out again and again), and
+    // all of it together stays far below what a scan or a flood needs.
+    let per_address = cap
+        .find("--hashlimit-mode dstip --hashlimit-above 30/second --hashlimit-burst 60 -j DROP")
+        .expect("a limit per address");
+    let overall = cap
+        .find("if iptables -A \"$1\" -m limit --limit 60/second --limit-burst 300 -j \"$2\"; then")
+        .expect("an overall limit");
+    let drop = cap
+        .find("rule iptables -A \"$1\" -j DROP")
+        .expect("and a drop after it");
+    assert!(per_address < overall && overall < drop);
+    // One for each way a device's traffic leaves, IPv6 included.
+    for call in [
+        "cap DNET-CAP-FWD ACCEPT",
+        "cap DNET-CAP-OUT RETURN",
+        "cap6 DNET-CAP-OUT6 RETURN",
+    ] {
+        assert!(net.contains(call), "{call}");
+    }
+}
+
+#[test]
+fn a_refusal_that_cannot_be_installed_falls_back_to_a_drop_and_the_firewall_lock_is_waited_for() {
+    let text = script(&plan()).unwrap();
+    let net = net_up(&text);
+    assert!(net.contains("then DENY=REJECT; else DENY=DROP; fi"));
+    assert!(net.contains("then DENY6=REJECT; else DENY6=DROP; fi"));
+    // The two probes are the only places REJECT is named.
+    assert_eq!(net.matches("-j REJECT").count(), 2);
+    // Another tool holding the lock at boot (a package, another firewall manager) is waited for, not a reason to
+    // skip a rule.
+    assert!(net.contains("iptables() { command iptables -w \"$@\"; }"));
+    assert!(net.contains("ip6tables() { command ip6tables -w \"$@\"; }"));
+}
+
+#[test]
+fn the_tunnel_may_reach_only_the_measurement_origin_on_the_server_itself() {
+    let text = script(&plan()).unwrap();
+    let net = net_up(&text);
+    assert!(net.contains("jump INPUT -i awg0 -j DNET-INPUT"));
+    let allowed = net
+        .find(&format!(
+            "iptables -A DNET-INPUT -p tcp -d {TUNNEL_SERVER} --dport {ORIGIN_PORT} -j ACCEPT"
+        ))
+        .expect("the origin is let through");
+    let closed = net
+        .find("iptables -A DNET-INPUT -j DROP")
+        .expect("and everything else from the tunnel is not");
+    assert!(allowed < closed);
+    // The origin is a small web server: one device may not hold open more connections than it could ever need.
+    let limited = net
+        .find(&format!(
+            "iptables -A DNET-INPUT -p tcp -d {TUNNEL_SERVER} --dport {ORIGIN_PORT} -m connlimit --connlimit-above 64 --connlimit-mask 32 -j DROP"
+        ))
+        .expect("the origin's connections are limited");
+    assert!(limited < allowed);
+    // Nothing else from the tunnel is let in by port: its ssh, its other services and the three public ports are
+    // not reachable from inside the tunnel. Replies, the limit, the origin, a ping, and the drop.
+    assert_eq!(net.matches("iptables -A DNET-INPUT").count(), 5);
+}
+
+#[test]
+fn the_account_the_core_runs_as_is_kept_from_this_machine_the_private_network_and_mail() {
+    /// `steps` appear in `text`, each after the one before it.
+    fn in_order(text: &str, steps: &[String]) {
+        let mut at = 0;
+        for step in steps {
+            let found = text[at..]
+                .find(step.as_str())
+                .unwrap_or_else(|| panic!("missing, or out of order: {step}"));
+            at += found + step.len();
+        }
+    }
+    let text = script(&plan()).unwrap();
+    let net = net_up(&text);
+    assert!(net.contains("jump OUTPUT -m owner --uid-owner dnet -j DNET-OUT"));
+    // What this account may reach is decided before anything is refused: replies (a client may sit on a private
+    // address), this machine's own session port and origin and nothing else on it, and only the resolvers the
+    // machine itself uses. Then this machine's other addresses (its public one included: a device must not reach
+    // services the provider's firewall hides), the private ranges, mail, and last the caps.
+    in_order(
+        net,
+        &[
+            "iptables -A DNET-OUT -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN".to_owned(),
+            format!("iptables -A DNET-OUT -d 127.0.0.1 -p udp --dport {SESSION_PORT} -j RETURN"),
+            format!("iptables -A DNET-OUT -d 127.0.0.1 -p tcp --dport {ORIGIN_PORT} -j RETURN"),
+            // The stub resolver of a systemd machine, always: a resolv.conf that is read only once at start must not
+            // be able to leave names unresolvable for good after the machine changes it.
+            "iptables -A DNET-OUT -d 127.0.0.53 -p udp --dport 53 -j RETURN".to_owned(),
+            "iptables -A DNET-OUT -d 127.0.0.53 -p tcp --dport 53 -j RETURN".to_owned(),
+            "iptables -A DNET-OUT -d \"$ns\" -p udp --dport 53 -j RETURN".to_owned(),
+            "iptables -A DNET-OUT -d \"$ns\" -p tcp --dport 53 -j RETURN".to_owned(),
+            "iptables -A DNET-OUT -m addrtype --dst-type LOCAL -j \"$DENY\"".to_owned(),
+            "iptables -A DNET-OUT -d \"$range\" -j \"$DENY\"".to_owned(),
+            "iptables -A DNET-OUT -p tcp --dport 25 -j \"$DENY\"".to_owned(),
+            "iptables -A DNET-OUT -m conntrack --ctstate NEW -j DNET-CAP-OUT".to_owned(),
+        ],
+    );
+    // No blanket exemption of port 53 to anywhere (it would skip the caps and the refusals), and none for the
+    // whole loopback range.
+    assert!(!net.contains("iptables -A DNET-OUT -p udp --dport 53"));
+    assert!(!net.contains("iptables -A DNET-OUT -p tcp --dport 53"));
+    assert!(!net.contains("-d 127.0.0.0/8 -j RETURN"));
+    // The same for IPv6, which the carriers also listen on, with the same cap.
+    assert!(net.contains("jump6 OUTPUT -m owner --uid-owner dnet -j DNET-OUT6"));
+    in_order(
+        net,
+        &[
+            "ip6tables -A DNET-OUT6 -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN"
+                .to_owned(),
+            "ip6tables -A DNET-OUT6 -d \"$ns\" -p udp --dport 53 -j RETURN".to_owned(),
+            "ip6tables -A DNET-OUT6 -m addrtype --dst-type LOCAL -j \"$DENY6\"".to_owned(),
+            "ip6tables -A DNET-OUT6 -d \"$range\" -j \"$DENY6\"".to_owned(),
+            "ip6tables -A DNET-OUT6 -p tcp --dport 25 -j \"$DENY6\"".to_owned(),
+            "ip6tables -A DNET-OUT6 -m conntrack --ctstate NEW -j DNET-CAP-OUT6".to_owned(),
+        ],
+    );
+    assert!(!net.contains("::1/128 -j RETURN"));
+}
+
+#[test]
+fn every_range_the_exit_refuses_is_written_into_the_script() {
+    let text = script(&plan()).unwrap();
+    let net = net_up(&text);
+    for range in EXIT_DENIED_V4.iter().chain(EXIT_DENIED_V6) {
+        assert!(net.contains(range), "{range}");
+    }
+    assert!(!net.contains("@@"));
+}
+
+#[test]
+fn the_extra_rules_come_after_the_three_ports_and_can_never_stop_the_server_starting() {
+    let text = script(&plan()).unwrap();
+    let net = net_up(&text);
+    let last_port = net.rfind("\n  allow ").unwrap();
+    let masquerade = net.find("-j MASQUERADE").unwrap();
+    let hardening = net
+        .find("harden() {")
+        .expect("the extra rules are one function");
+    assert!(last_port < hardening && masquerade < hardening);
+    // Called so that a rule the kernel does not support is a note and not the end of the script (`set -e` does not
+    // apply inside a function that is part of an `||` list)...
+    assert!(net.contains("\n  harden || {"));
+    // ...except that the three jumps carrying the protection are looked for afterwards, and the server is not started
+    // without them: `rule` only notes a rule it could not make, and a server that looks protected and is not is worse
+    // than one that does not start.
+    let check = net
+        .find("# The jumps that carry")
+        .expect("the jumps are checked");
+    assert!(check > hardening);
+    for jump in [
+        "iptables -C FORWARD -i awg0 -s",
+        "iptables -C INPUT -i awg0 -j DNET-INPUT",
+        "iptables -C OUTPUT -m owner --uid-owner dnet -j DNET-OUT",
+        "ip6tables -C OUTPUT -m owner --uid-owner dnet -j DNET-OUT6",
+    ] {
+        assert!(net[check..].contains(jump), "{jump}");
+    }
+    // The IPv6 jump is required only if this machine can reach anything over IPv6: with no IPv6 default route there is
+    // nothing to protect, and a kernel with no IPv6 filtering is then no reason to refuse to start.
+    assert!(net[check..].contains("if [ -n \"$(ip -6 route show default 2>/dev/null)\" ]; then"));
+    assert!(net.contains("not starting"));
+    // And the three ports are still exactly three.
+    assert_eq!(net.matches("\n  allow ").count(), 3);
+}
+
+#[test]
+fn the_firewall_tool_is_installed_if_it_is_missing_and_its_lock_is_waited_for_by_every_rule() {
+    let text = script(&plan()).unwrap();
+    // A server without iptables would otherwise get no protection at all, silently.
+    let tools = text.find("ensure ip iproute2 iproute").unwrap();
+    let wanted = text
+        .find("ensure iptables iptables iptables")
+        .expect("iptables is made sure of with the other tools");
+    assert!(tools < wanted);
+    // The wait for the lock covers the three ports and the masquerade too, not only the extra rules: on the older
+    // kind of iptables, another tool holding the lock at boot would otherwise fail the unit and keep the tunnel down.
+    let net = net_up(&text);
+    let wrapper = net.find("iptables() { command iptables -w").unwrap();
+    assert!(wrapper < net.find("allow() {").unwrap());
+}
+
+#[test]
+fn a_stranger_hammering_the_reality_door_is_limited_by_where_it_comes_from() {
+    let text = script(&plan()).unwrap();
+    let net = net_up(&text);
+    // Each of those connections makes the server call the cover site once. A device keeps one connection to the door,
+    // so a handful a second from one address is more than enough for it and a flood from one address is stopped.
+    let reality = plan().ports.reality_tcp;
+    for tool in ["", "6"] {
+        let rule = format!(
+            "jump{tool} INPUT -p tcp --dport {reality} -m conntrack --ctstate NEW -m hashlimit --hashlimit-name dnet-reality{tool} --hashlimit-mode srcip --hashlimit-above 5/second --hashlimit-burst 20 -j DROP"
+        );
+        assert!(net.contains(&rule), "{rule}");
+    }
+}
+
+#[test]
+fn a_changed_unit_file_is_applied_to_a_server_that_is_already_running_and_every_service_is_waited_for(
+) {
+    let text = script(&plan()).unwrap();
+    // The units are compared before and after, not only the firewall script: a new sandbox setting or account would
+    // otherwise wait for the next reboot.
+    let before = text.find("UNITS_BEFORE=$(").expect("units before");
+    let written = text
+        .find("cat > /etc/systemd/system/dnet-origin.service")
+        .unwrap();
+    let after = text.find("UNITS_AFTER=$(").expect("units after");
+    assert!(before < written && written < after);
+    assert!(text.contains("UNITS_CHANGED=1"));
+    let restart = text
+        .find("if [ \"$NET_CHANGED\" = 1 ] || [ \"$UNITS_CHANGED\" = 1 ]; then\n  systemctl restart dnet-net.service")
+        .expect("a change restarts the firewall unit, and with it what needs it");
+    // The session's origin does not need the firewall unit, so it is named.
+    assert!(text[restart..].contains("systemctl try-restart dnet-origin-session.service"));
+    // And no report is printed for a server whose services are not running.
+    let waited = text
+        .find("systemctl is-active --quiet \"$unit.service\"")
+        .expect("each service is waited for");
+    assert!(restart < waited && waited < text.find("python3 - <<'REPORT_EOF'").unwrap());
+    for unit in [
+        "dnet-net",
+        "dnet-primary",
+        "dnet-awg",
+        "dnet-origin",
+        "dnet-origin-session",
+    ] {
+        assert!(text[waited - 200..waited + 600].contains(unit), "{unit}");
+    }
+    assert!(text.contains("journalctl -u"));
+}
+
+#[test]
+fn a_door_cannot_be_the_origins_port() {
+    // The REALITY door listens on every address, the loopback one included, where the session's origin is.
+    let mut p = plan();
+    p.ports.reality_tcp = ORIGIN_PORT;
+    assert!(script(&p).is_err());
+}
+
+#[test]
+fn the_sessions_own_port_is_closed_to_everything_but_this_machine() {
+    let text = script(&plan()).unwrap();
+    let net = net_up(&text);
+    // The core gives the session no listen address, so nothing but this rule keeps its port off the network.
+    assert!(net.contains(&format!(
+        "rule jump INPUT ! -i lo -p udp --dport {SESSION_PORT} -j DROP"
+    )));
+    assert!(net.contains(&format!(
+        "rule jump6 INPUT ! -i lo -p udp --dport {SESSION_PORT} -j DROP"
+    )));
+}
+
+#[test]
+fn a_plan_whose_door_is_the_sessions_own_port_is_refused() {
+    for door in 0..2 {
+        let mut p = plan();
+        if door == 0 {
+            p.ports.amneziawg_udp = SESSION_PORT;
+        } else {
+            p.ports.hysteria2_udp = SESSION_PORT;
+        }
+        assert!(script(&p).is_err(), "door {door}");
+    }
+}
+
+#[test]
+fn a_firewall_script_that_changed_is_applied_to_a_server_that_is_already_running() {
+    let text = script(&plan()).unwrap();
+    // The firewall unit stays "active" after it ran, so starting it again does nothing: a changed script needs a
+    // restart. A first run has no earlier script and starts the units itself.
+    let before = text
+        .find("HAD_NET_UP=1")
+        .expect("it notes an earlier script");
+    let changed = text
+        .find("NET_CHANGED=1")
+        .expect("and whether the new one differs");
+    let start = text
+        .find("systemctl enable --now dnet-net.service")
+        .unwrap();
+    let restart = text
+        .find("if [ \"$NET_CHANGED\" = 1 ] || [ \"$UNITS_CHANGED\" = 1 ]; then\n  systemctl restart dnet-net.service")
+        .expect("and restarts the firewall unit if it did");
+    assert!(before < changed && changed < start && start < restart);
+}
+
+#[test]
+fn the_account_the_services_run_as_can_reach_the_programs_it_runs() {
+    let text = script(&plan()).unwrap();
+    // `umask 077` makes `mkdir` create these directories root-only, and a service that runs as `dnet` (the core and
+    // the session's origin) then cannot start its program: "permission denied" before the report is ever printed.
+    // Nothing secret lives in them (keys and secrets are under /var/lib/dnet, which keeps its own modes).
+    assert!(text.contains("\numask 077\n"));
+    let made = text.find("mkdir -p \"$BIN\"").unwrap();
+    let opened = text
+        .find("chmod 755 \"$BASE\" \"$BIN\"")
+        .expect("the program directories are made walkable");
+    assert!(made < opened);
+    assert!(
+        opened
+            < text
+                .find("systemctl enable --now dnet-net.service")
+                .unwrap()
+    );
+}
+
+/// The text of one systemd unit the script writes.
+fn unit<'a>(text: &'a str, name: &str) -> &'a str {
+    let start = text
+        .find(&format!("cat > /etc/systemd/system/{name} <<'UNIT_EOF'"))
+        .unwrap_or_else(|| panic!("no unit called {name}"));
+    let body = &text[start..];
+    &body[..body.find("\nUNIT_EOF\n").unwrap()]
+}
+
+#[test]
+fn the_origin_runs_without_rights_and_the_tunnel_program_is_narrowed() {
+    let text = script(&plan()).unwrap();
+    let origin = unit(&text, "dnet-origin.service");
+    for want in [
+        "User=dnet",
+        "Group=dnet",
+        "NoNewPrivileges=yes",
+        "ProtectSystem=strict",
+        "ProtectHome=yes",
+        "PrivateTmp=yes",
+        "PrivateDevices=yes",
+        "CapabilityBoundingSet=",
+        "RestrictAddressFamilies=AF_INET",
+    ] {
+        assert!(origin.contains(want), "{want}");
+    }
+    // The tunnel program listens on a public port and parses what strangers send, as root, because it makes a
+    // network device: it keeps what it needs for that and gives up the rest.
+    let awg = unit(&text, "dnet-awg.service");
+    for want in [
+        "NoNewPrivileges=yes",
+        "PrivateTmp=yes",
+        "ProtectHome=yes",
+        "LockPersonality=yes",
+        "RestrictSUIDSGID=yes",
+    ] {
+        assert!(awg.contains(want), "{want}");
+    }
+    assert!(!awg.contains("PrivateDevices"), "it needs /dev/net/tun");
+}
+
+/// Writes the server's firewall script, as rendered, to the file named by `DNET_DUMP_NET_UP`, for
+/// `testing/server-firewall`, which runs it against real `iptables` in a throwaway container. Ignored: it is a tool.
+#[test]
+#[ignore = "a tool for testing/server-firewall, not a check"]
+fn dump_the_firewall_script_for_the_container_check() {
+    let path = std::env::var("DNET_DUMP_NET_UP").expect("DNET_DUMP_NET_UP names the file to write");
+    let text = script(&plan()).unwrap();
+    let body = net_up(&text).split_once('\n').unwrap().1;
+    std::fs::write(path, format!("{body}\n")).unwrap();
+}
+
+#[test]
+fn the_script_warns_a_person_whose_server_allows_password_logins() {
+    let text = script(&plan()).unwrap();
+    assert!(text.contains("passwordauthentication yes"));
+    let warning = text
+        .find("lets people log in to ssh with a password")
+        .unwrap();
+    // A warning on the error stream, before the report: the report line stays the one line the client reads.
+    assert!(text[warning..].lines().next().unwrap().contains(">&2"));
+    assert!(warning < text.find("python3 - <<'REPORT_EOF'").unwrap());
+}
+
 /// Runs `shell` with `args`, the script given on stdin. Not as a path or a `-c` argument: on Windows the
 /// first `bash` can be WSL's launcher, which reads `C:\...` as escapes and drops `$(...)` from arguments.
 fn run_on_stdin(shell: &str, args: &[&str], script: &str) -> std::process::Output {
@@ -1165,21 +1664,97 @@ fn a_device_key_with_shell_syntax_is_refused_before_any_text_is_made() {
     }
 }
 
+/// The peers the server's own device program prints for these keys, as `$SESSION_PEERS` holds them on a server: the
+/// program is run, exactly as the script runs it (`sync`, then `peers`).
+fn session_peers_as_the_server_has_them(keys: &[String]) -> String {
+    let python = ["python3", "python"]
+        .into_iter()
+        .find(|p| {
+            std::process::Command::new(p)
+                .arg("-c")
+                .arg("pass")
+                .output()
+                .is_ok_and(|o| o.status.success())
+        })
+        .expect("python is needed to run the server's device program");
+    let dir = tempfile::tempdir().unwrap();
+    let program = dir.path().join("dnet-devices.py");
+    std::fs::write(&program, crate::devices::program()).unwrap();
+    let registry = dir.path().join("devices.json");
+    let config = dir.path().join("server.json");
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(python)
+            .arg(&program)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n")
+    };
+    let mut sync = vec![
+        "sync".to_owned(),
+        registry.to_string_lossy().into_owned(),
+        config.to_string_lossy().into_owned(),
+    ];
+    sync.extend(keys.iter().cloned());
+    run(&sync.iter().map(String::as_str).collect::<Vec<_>>());
+    run(&["peers", &registry.to_string_lossy()])
+        .trim_end()
+        .to_owned()
+}
+
 #[test]
 fn each_device_is_a_peer_with_an_address_of_its_own_and_nothing_else() {
+    // The script hands the keys it was made for to the server's list, in order, and the list makes the peers.
     let text = script(&plan()).unwrap();
+    assert!(
+        text.contains(&format!(
+            "sync \"$DEVICES\" \"$STATE/primary/server.json\" '{}' '{}'",
+            device_key(1),
+            device_key(2)
+        )),
+        "the setup keys are not given to the list"
+    );
+    let peers = session_peers_as_the_server_has_them(&[device_key(1), device_key(2)]);
     for (address, key) in [("10.9.0.2", device_key(1)), ("10.9.0.3", device_key(2))] {
         assert!(
-            text.contains(&format!(
+            peers.contains(&format!(
                 "{{ \"public_key\": \"{key}\", \"allowed_ips\": [ \"{address}/32\" ] }}"
             )),
-            "no peer for {address}"
+            "no peer for {address}: {peers}"
         );
     }
     // No device is a router: a peer's allowed address is its own single address.
     assert!(!text.contains("\"allowed_ips\": [ \"0.0.0.0/0\""));
+    assert!(!peers.contains("0.0.0.0/0"));
     assert_eq!(session_device_address(0).to_string(), "10.9.0.2");
     assert_eq!(session_device_address(7).to_string(), "10.9.0.9");
+    // The configuration takes its peers from the list, and nothing about a device is baked into it.
+    assert!(text.contains("$SESSION_PEERS\n      ]"));
+}
+
+/// The setup script only ever adds to the server's list: the program that keeps it is written first, it is told the
+/// setup keys with `sync` (which adds and never removes), and the configuration and the report are made from the list.
+#[test]
+fn the_setup_script_takes_the_devices_from_the_servers_list_and_never_replaces_it() {
+    let text = script(&plan()).unwrap();
+    let write = text.find("cat > \"$BIN/dnet-devices\"").unwrap();
+    let sync = text.find("dnet-devices\" sync").unwrap();
+    let peers = text.find("dnet-devices\" peers").unwrap();
+    let config = text.find("<<CONFIG_EOF").unwrap();
+    assert!(write < sync && sync < peers && peers < config);
+    // It never writes the list itself, never deletes it, and never asks for a device to be removed.
+    assert!(!text.contains("rm -f \"$DEVICES\""));
+    assert!(!text.contains("dnet-devices\" remove"));
+    assert!(text.contains(&crate::devices::program()));
+    // The setup keys are the first device(s).
+    let owner = device_key(1);
+    let after_setup = session_peers_as_the_server_has_them(std::slice::from_ref(&owner));
+    assert!(after_setup.contains(&owner));
 }
 
 #[test]
@@ -1514,11 +2089,10 @@ fn the_script_reports_the_session_with_every_device_it_was_given() {
     let text = script(&plan()).unwrap();
     assert!(text.contains("\"session\": {\"server_public_key\": e[\"SESSION_PUBLIC\"]"));
     assert!(text.contains("\"version\": 2,"));
-    for (address, key) in [("10.9.0.2", device_key(1)), ("10.9.0.3", device_key(2))] {
-        assert!(text.contains(&format!(
-            "{{\"address\": \"{address}\", \"public_key\": \"{key}\"}}"
-        )));
-    }
+    // The devices in the report are the server's own list, as the program prints it for the report.
+    assert!(text.contains("\"devices\": json.loads(e[\"SESSION_DEVICES\"])"));
+    assert!(text.contains("SESSION_DEVICES=$(python3 \"$BIN/dnet-devices\" json \"$DEVICES\")"));
+    assert!(text.contains("SESSION_DEVICES=\"$SESSION_DEVICES\" PRIMARY_SHA="));
     // Only the public half of the server's session key is reported; the private half never leaves.
     let report = text.split("REPORT_EOF").nth(1).unwrap();
     assert!(!report.contains("SESSION_PRIVATE"));
@@ -1565,6 +2139,16 @@ fn written_configuration(
     state: &std::path::Path,
     core: &std::path::Path,
 ) -> serde_json::Value {
+    let filled = written_configuration_text(text, state, core);
+    serde_json::from_str(&filled).unwrap_or_else(|e| panic!("not JSON ({e}): {filled}"))
+}
+
+/// The same, as the text the server would have on disk.
+fn written_configuration_text(
+    text: &str,
+    state: &std::path::Path,
+    core: &std::path::Path,
+) -> String {
     let template = text
         .split("<<CONFIG_EOF\n")
         .nth(1)
@@ -1579,9 +2163,14 @@ fn written_configuration(
         .replace("$REALITY_UUID", "bf000d23-0752-40b4-affe-68f7707a9661")
         .replace("$REALITY_PRIVATE", &reality_private)
         .replace("$REALITY_SHORT", "0123456789abcdef")
-        .replace("$SESSION_PRIVATE", &session_private);
+        .replace("$SESSION_PRIVATE", &session_private)
+        // What the server's own device program makes of the setup keys, so the core checks the true result.
+        .replace(
+            "$SESSION_PEERS",
+            &session_peers_as_the_server_has_them(&[device_key(1), device_key(2)]),
+        );
     assert!(!filled.contains('$'), "a variable was left in: {filled}");
-    serde_json::from_str(&filled).unwrap_or_else(|e| panic!("not JSON ({e}): {filled}"))
+    filled
 }
 
 fn state_with_certificate(core: &std::path::Path) -> tempfile::TempDir {
@@ -1638,6 +2227,101 @@ fn the_real_core_accepts_the_configuration_the_script_writes() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+/// The proof that matters for friends: a device added to the configuration the real script writes is accepted by the
+/// real core, every other part of the configuration is untouched, and the devices already there keep their entries.
+#[test]
+fn a_device_added_to_the_real_configuration_is_accepted_by_the_real_core_and_nothing_else_changes()
+{
+    let Some(core) = vendored_core() else {
+        eprintln!("SKIPPED: vendor/primary-core not fetched (cargo run -p xtask -- fetch-vendor)");
+        return;
+    };
+    let python = ["python3", "python"]
+        .into_iter()
+        .find(|p| {
+            std::process::Command::new(p)
+                .arg("-c")
+                .arg("pass")
+                .output()
+                .is_ok_and(|o| o.status.success())
+        })
+        .expect("python is needed to run the server's device program");
+    let state = state_with_certificate(&core);
+    let before = written_configuration_text(&script(&plan()).unwrap(), state.path(), &core);
+    let config = state.path().join("server.json");
+    std::fs::write(&config, &before).unwrap();
+    let program = state.path().join("dnet-devices.py");
+    std::fs::write(&program, crate::devices::program()).unwrap();
+    let registry = state.path().join("devices.json");
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(python)
+            .arg(&program)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let reg = registry.to_string_lossy().into_owned();
+    let cfg = config.to_string_lossy().into_owned();
+    run(&["sync", &reg, &cfg, &device_key(1), &device_key(2)]);
+
+    let friend = device_key(9);
+    let added = run(&["add", &reg, &cfg, &friend, "Ravi"]);
+    assert!(added.contains("10.9.0.4"), "{added}");
+
+    // The real core accepts what was staged, and the control: it rejects a broken one.
+    let staged = state.path().join("server.json.new");
+    let check = |path: &std::path::Path| {
+        std::process::Command::new(&core)
+            .args(["check", "-c"])
+            .arg(path)
+            .output()
+            .unwrap()
+    };
+    let out = check(&staged);
+    assert!(
+        out.status.success(),
+        "the core rejected the configuration with a device added:
+{}
+{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let broken = state.path().join("broken.json");
+    std::fs::write(
+        &broken,
+        std::fs::read_to_string(&staged)
+            .unwrap()
+            .replace("session-in", ""),
+    )
+    .ok();
+    std::fs::write(&broken, "{ not json").unwrap();
+    assert!(
+        !check(&broken).status.success(),
+        "the control passed: the check proves nothing"
+    );
+
+    // Only the peers changed: the two devices that were there are as they were, and the friend is new.
+    let old: serde_json::Value = serde_json::from_str(&before).unwrap();
+    let mut new: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&staged).unwrap()).unwrap();
+    let peers = new["endpoints"][0]["peers"].as_array().unwrap().clone();
+    assert_eq!(peers.len(), 3);
+    assert_eq!(
+        peers[..2],
+        old["endpoints"][0]["peers"].as_array().unwrap()[..]
+    );
+    assert_eq!(peers[2]["public_key"], friend.as_str());
+    assert_eq!(peers[2]["allowed_ips"][0], "10.9.0.4/32");
+    new["endpoints"][0]["peers"] = old["endpoints"][0]["peers"].clone();
+    assert_eq!(new, old, "something other than the peers changed");
 }
 
 #[test]

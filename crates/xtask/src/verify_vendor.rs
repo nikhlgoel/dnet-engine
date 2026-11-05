@@ -205,10 +205,10 @@ fn check_signed_dll(repo_root: &Path, failures: &mut Vec<String>) -> Result<DllC
             ));
             Ok(DllCheck::DigestOnly)
         }
-        Signature::Unknown => {
-            failures.push(
-                "could not determine the Authenticode status of vendor/wintun/wintun.dll".into(),
-            );
+        Signature::Unknown(why) => {
+            failures.push(format!(
+                "could not determine the Authenticode status of vendor/wintun/wintun.dll: {why}"
+            ));
             Ok(DllCheck::DigestOnly)
         }
     }
@@ -219,8 +219,8 @@ enum Signature {
     /// This host has no Authenticode verifier. The pinned digest still binds the file to
     /// the vendor's signed release, but the signature itself was not examined.
     NotCheckable,
-    /// The verifier ran but produced no status.
-    Unknown,
+    /// The verifier ran but produced no status; why, as it said it.
+    Unknown(String),
     /// The status string the verifier reported (`Valid`, `NotSigned`, `HashMismatch`, ...).
     Status(String),
 }
@@ -233,7 +233,7 @@ fn authenticode_status(path: &Path) -> Result<Signature> {
         return Ok(Signature::NotCheckable);
     }
 
-    let out = Command::new("powershell")
+    let out = windows_powershell()
         .args([
             "-NoProfile",
             "-NonInteractive",
@@ -246,15 +246,26 @@ fn authenticode_status(path: &Path) -> Result<Signature> {
         .output()
         .context("failed to invoke powershell for Authenticode verification")?;
 
-    if !out.status.success() {
-        return Ok(Signature::Unknown);
-    }
     let status = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    Ok(if status.is_empty() {
-        Signature::Unknown
-    } else {
-        Signature::Status(status)
-    })
+    if !out.status.success() || status.is_empty() {
+        let said = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let why = if said.is_empty() {
+            format!("the verifier printed nothing ({})", out.status)
+        } else {
+            said
+        };
+        return Ok(Signature::Unknown(why));
+    }
+    Ok(Signature::Status(status))
+}
+
+/// Windows PowerShell for the tools that ask it something. It is started without the module path of whatever started
+/// this program: from PowerShell 7 (as a release build on GitHub's runner is) it would inherit PowerShell 7's module
+/// path, and its own security cmdlets and certificate drive then fail to load.
+pub(crate) fn windows_powershell() -> Command {
+    let mut command = Command::new("powershell");
+    command.env_remove("PSModulePath");
+    command
 }
 
 /// Every bundled dependency must ship its licence text: GPLv3 §6 requires it for the
@@ -317,6 +328,37 @@ fn walk(root: &Path) -> Result<Vec<PathBuf>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The release build runs this from PowerShell 7 on GitHub's runner, and Windows PowerShell started from it
+    /// inherits PowerShell 7's module path, which broke its security cmdlets: the signature could not be read and the
+    /// release stopped. A child Windows PowerShell must not inherit it.
+    #[cfg(windows)]
+    #[test]
+    fn windows_powershell_does_not_inherit_the_parents_module_path() {
+        let command = windows_powershell();
+        assert!(
+            command
+                .get_envs()
+                .any(|(key, value)| key == "PSModulePath" && value.is_none()),
+            "PSModulePath is passed on to the child"
+        );
+    }
+
+    /// A signature that cannot be read is reported with the reason, not as a bare "could not determine".
+    #[cfg(windows)]
+    #[test]
+    fn an_unreadable_signature_says_why() {
+        match authenticode_status(Path::new(
+            r"C:
+o\sucholderile.exe",
+        ))
+        .unwrap()
+        {
+            Signature::Unknown(why) => assert!(!why.trim().is_empty(), "no reason given"),
+            Signature::Status(status) => panic!("a missing file read as {status}"),
+            Signature::NotCheckable => panic!("this host can check signatures"),
+        }
+    }
 
     /// The summary never claims a check that did not run.
     #[test]

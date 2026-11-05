@@ -92,7 +92,6 @@ export const OPTIONS: Option[] = [
     pros: ['Nothing to create or pay for.', 'Nothing leaves your computer except your normal traffic.'],
     cons: [
       'It cannot get past a network that blocks websites or apps: there is nowhere else for your traffic to go.',
-      'Not available in this version yet.',
     ],
     features: [
       { text: 'Switch between Wi-Fi, cable and phone hotspot without dropping', included: true },
@@ -119,8 +118,10 @@ const OPEN_PORTS: Step = {
     'A port is a door into your server. The program needs exactly these three open, and nothing else.',
     'In your provider’s page for the server, find its network firewall rules (the rules for traffic coming in).',
     'Add one rule for each row below: where from is everywhere, the protocol and port are as listed.',
+    'Each of these three only works for someone who holds your secret keys, which is why they can be open to everywhere. Opening anything else is not safe.',
+    'Leave the ssh rule (port 22) that your provider made for you, so you can still log in. Do not open any other port, and do not turn on IPv6 for this server.',
   ],
-  see: 'Three new rules in the list, one for each row.',
+  see: 'Three new rules in the list, one for each row, next to the ssh rule that was already there.',
   stuck: [
     'If the provider has a second place with firewall rules for the server itself, add the same three there too.',
     WORDING,
@@ -309,12 +310,12 @@ const END_OF_PASTE = 'DNET_SETUP_EOF';
  * file. Run from the terminal's own input, a command that reads input could swallow the rest of the script.
  * Refuses a script that holds the end marker on a line of its own, which would end the paste early.
  */
-export function wrapForPaste(script: string): string {
+export function wrapForPaste(script: string, file = 'dnet-setup.sh'): string {
   if (script.split('\n').some((line) => line.trim() === END_OF_PASTE)) {
     throw new Error('the script contains the end marker');
   }
   const body = script.endsWith('\n') ? script : `${script}\n`;
-  return `cat > dnet-setup.sh <<'${END_OF_PASTE}'\n${body}${END_OF_PASTE}\nsudo sh dnet-setup.sh`;
+  return `cat > ${file} <<'${END_OF_PASTE}'\n${body}${END_OF_PASTE}\nsudo sh ${file}`;
 }
 
 /** Whether `text` could be a server's address: an IPv4 address or a host name, and nothing else. */

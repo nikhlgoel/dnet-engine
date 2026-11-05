@@ -186,3 +186,25 @@ describe('the page’s Content-Security-Policy', () => {
     expect(connect.split(' ').sort()).toEqual(["'self'", 'http://ipc.localhost', 'ipc:'].sort());
   });
 });
+
+describe('buttons', () => {
+  const css = readFileSync(join(ROOT, 'src', 'app.css'), 'utf8');
+
+  /** A primary button that cannot be pressed must not look pressable: `.btn.primary` is declared after
+   * `.btn:disabled` with the same weight, so without its own rule the light fill wins and a disabled "Continue"
+   * looks like the one thing to press. */
+  it('a disabled primary button does not keep the fill that means "press this"', () => {
+    const rule = css.match(/\.btn\.primary:disabled\s*\{([^}]*)\}/);
+    expect(rule, 'no rule for .btn.primary:disabled').not.toBeNull();
+    const body = (rule as RegExpMatchArray)[1] as string;
+    expect(body).not.toMatch(/background:\s*var\(--c-paper\)/);
+    expect(body).toMatch(/cursor:\s*not-allowed/);
+  });
+
+  /** Any disabled button must differ from a live one by more than its text colour, which is close to the live one's. */
+  it('a disabled button has a quieter edge as well as quieter text', () => {
+    const rule = css.match(/\.btn:disabled\s*\{([^}]*)\}/);
+    expect(rule, 'no rule for .btn:disabled').not.toBeNull();
+    expect((rule as RegExpMatchArray)[1]).toMatch(/border-color:\s*var\(--c-line\)/);
+  });
+});

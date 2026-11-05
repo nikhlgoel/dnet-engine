@@ -951,3 +951,182 @@ fn feed_15_known_answer_signature_over_the_pae() {
 const KAT_ROOT_1_PUBLIC_KEY: &str = "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w=";
 const KAT_SIGNATURE: &str =
     "twmP5r2sTBCSYPpLV82VwKYuPUmFIoEyZD4snW57yiMbjCJ21XhaYUpyBcPzLf/aeQFmpOIgkw5yk5kDLcr+Dg==";
+
+// ---------------------------------------------------------------- limits, exactly at the edge
+//
+// Added after mutation testing (cargo-mutants, 2026-11-05): changing `>` to `>=`, or `||` to `&&`, in each of
+// these checks went unnoticed. A size or count limit that is off by one, or that lets an empty list through,
+// is the kind of slip the feed's verifier must not have, so each edge is pinned from both sides.
+
+#[test]
+fn an_envelope_of_exactly_the_cap_is_read_and_one_byte_more_is_not() {
+    let state = with_keys(1, &[&signer(1)]);
+    let at_cap = vec![b' '; ENVELOPE_MAX_BYTES];
+    // Past the size check, so it fails later, as an unreadable structure, not as too large.
+    assert_eq!(
+        accept_feed(&state, &at_cap, NOW),
+        Err(FeedError::MalformedEnvelope("structure"))
+    );
+    assert_eq!(
+        accept_keys_document(&trust(), &FeedState::default(), &at_cap, NOW),
+        Err(FeedError::MalformedEnvelope("structure"))
+    );
+    let over = vec![b' '; ENVELOPE_MAX_BYTES + 1];
+    assert_eq!(accept_feed(&state, &over, NOW), Err(FeedError::TooLarge));
+}
+
+/// A feed signed by `n` different keys, the first of which is the delegated one.
+fn feed_signed_by(n: u8) -> Result<FeedOutcome, FeedError> {
+    let state = with_keys(1, &[&signer(1)]);
+    let all: Vec<SigningKey> = (1..=n).map(signer).collect();
+    let refs: Vec<&SigningKey> = all.iter().collect();
+    accept_feed(&state, &feed_envelope(&feed_value(1, 1), &refs), NOW)
+}
+
+#[test]
+fn the_number_of_signatures_must_be_between_one_and_eight() {
+    let count_error = Err(FeedError::MalformedEnvelope("signature count"));
+    assert_eq!(feed_signed_by(0), count_error, "no signature at all");
+    assert_eq!(feed_signed_by(9), count_error, "one more than the limit");
+    assert!(feed_signed_by(1).is_ok());
+    assert!(feed_signed_by(8).is_ok(), "exactly the limit is allowed");
+}
+
+/// A keys document delegating to `n` signing keys, with `edit` applied, offered to a fresh client.
+fn keys_offer(n: u8, edit: impl Fn(&mut Value)) -> Result<KeysOutcome, FeedError> {
+    let all: Vec<SigningKey> = (1..=n).map(signer).collect();
+    let refs: Vec<&SigningKey> = all.iter().collect();
+    let mut value = keys_value(1, &refs);
+    edit(&mut value);
+    accept_keys_document(&trust(), &FeedState::default(), &keys_envelope(&value), NOW)
+}
+
+#[test]
+fn a_keys_document_must_list_one_to_eight_signing_keys() {
+    let refused = |r: Result<KeysOutcome, FeedError>| {
+        matches!(
+            r,
+            Err(FeedError::InvalidField {
+                field: "signing_keys",
+                ..
+            })
+        )
+    };
+    assert!(refused(keys_offer(0, |_| {})), "an empty list");
+    assert!(refused(keys_offer(9, |_| {})), "one more than the limit");
+    assert!(matches!(
+        keys_offer(8, |_| {}),
+        Ok(KeysOutcome::Accepted { .. })
+    ));
+    assert!(matches!(
+        keys_offer(1, |_| {}),
+        Ok(KeysOutcome::Accepted { .. })
+    ));
+}
+
+#[test]
+fn the_signing_threshold_must_be_between_one_and_the_number_of_keys() {
+    let threshold = |t: u64| keys_offer(3, move |v| v["signing_threshold"] = json!(t));
+    let refused = |r: Result<KeysOutcome, FeedError>| {
+        matches!(
+            r,
+            Err(FeedError::InvalidField {
+                field: "signing_threshold",
+                ..
+            })
+        )
+    };
+    assert!(refused(threshold(0)), "zero would need nobody to sign");
+    assert!(refused(threshold(4)), "more than the keys there are");
+    assert!(matches!(threshold(1), Ok(KeysOutcome::Accepted { .. })));
+    assert!(matches!(threshold(3), Ok(KeysOutcome::Accepted { .. })));
+}
+
+#[test]
+fn a_feed_may_be_issued_up_to_the_clock_skew_ahead_and_no_further() {
+    let state = with_keys(1, &[&signer(1)]);
+    let offer = |issued_at: u64| {
+        let mut feed = feed_value(1, 1);
+        feed["issued_at"] = json!(issued_at);
+        accept_feed(&state, &feed_envelope(&feed, &[&signer(1)]), NOW)
+    };
+    assert!(offer(NOW + CLOCK_SKEW_SECS).is_ok(), "exactly the skew");
+    assert_eq!(
+        offer(NOW + CLOCK_SKEW_SECS + 1),
+        Err(FeedError::NotCurrent {
+            document: Document::Feed,
+            reason: "issued in the future"
+        })
+    );
+}
+
+#[test]
+fn a_feed_expires_exactly_when_the_skew_after_its_expiry_has_passed() {
+    let state = with_keys(1, &[&signer(1)]);
+    let offer = |expires_at: u64| {
+        let mut feed = feed_value(1, 1);
+        feed["issued_at"] = json!(NOW - 5 * DAY);
+        feed["expires_at"] = json!(expires_at);
+        accept_feed(&state, &feed_envelope(&feed, &[&signer(1)]), NOW)
+    };
+    assert_eq!(
+        offer(NOW - CLOCK_SKEW_SECS),
+        Err(FeedError::NotCurrent {
+            document: Document::Feed,
+            reason: "expired"
+        })
+    );
+    assert!(offer(NOW - CLOCK_SKEW_SECS + 1).is_ok());
+}
+
+#[test]
+fn an_applied_feed_turns_stale_exactly_when_the_skew_after_its_expiry_has_passed() {
+    let state = applied(
+        &with_keys(1, &[&signer(1)]),
+        &feed_envelope(&feed_value(1, 1), &[&signer(1)]),
+        NOW,
+    );
+    let edge = NOW + 14 * DAY + CLOCK_SKEW_SECS;
+    assert_eq!(state.status(edge - 1), FeedStatus::Current);
+    assert_eq!(state.status(edge), FeedStatus::Stale);
+}
+
+#[test]
+fn a_feed_may_live_exactly_thirty_days_and_not_a_second_longer() {
+    let state = with_keys(1, &[&signer(1)]);
+    let offer = |lifetime: u64| {
+        let mut feed = feed_value(1, 1);
+        feed["issued_at"] = json!(NOW - 3600);
+        feed["expires_at"] = json!(NOW - 3600 + lifetime);
+        accept_feed(&state, &feed_envelope(&feed, &[&signer(1)]), NOW)
+    };
+    assert!(offer(FEED_MAX_LIFETIME_SECS).is_ok(), "exactly the limit");
+    assert!(matches!(
+        offer(FEED_MAX_LIFETIME_SECS + 1),
+        Err(FeedError::InvalidField {
+            reason: "exceeds the maximum lifetime",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn a_keys_document_may_live_exactly_the_maximum_and_not_a_second_longer() {
+    let offer = |lifetime: u64| {
+        keys_offer(1, move |v| {
+            v["issued_at"] = json!(NOW - DAY);
+            v["expires_at"] = json!(NOW - DAY + lifetime);
+        })
+    };
+    assert!(matches!(
+        offer(KEYS_MAX_LIFETIME_SECS),
+        Ok(KeysOutcome::Accepted { .. })
+    ));
+    assert!(matches!(
+        offer(KEYS_MAX_LIFETIME_SECS + 1),
+        Err(FeedError::InvalidField {
+            reason: "exceeds the maximum lifetime",
+            ..
+        })
+    ));
+}

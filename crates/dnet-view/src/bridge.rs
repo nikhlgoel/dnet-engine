@@ -90,6 +90,28 @@ impl<L: Link> Bridge<L> {
         }
     }
 
+    /// The live map of parts (T170). An older service that does not know the request is `supported: false`;
+    /// any other refusal, and anything the strict decoder refuses, is an error that repeats nothing.
+    pub async fn components(&self) -> Result<Value, String> {
+        match self.link.call(Request::GetComponents).await {
+            Err(error) => Err(error.to_string()),
+            Ok(Reply::Refused(refusal))
+                if refusal.code == "InvalidRequest"
+                    && refusal.detail.contains("unknown request") =>
+            {
+                Ok(lists::components_unsupported())
+            }
+            Ok(Reply::Refused(refusal)) => Err(refusal_text(&refusal.detail)),
+            Ok(Reply::Done(value)) => {
+                dnet_ipc::componentview::decode_components(&value.to_string())
+                    .map(|reply| lists::components(&reply))
+                    .map_err(|_| {
+                        "The service's list of parts was not what was expected.".to_owned()
+                    })
+            }
+        }
+    }
+
     pub async fn profiles(&self) -> Result<Value, String> {
         match self.link.call(Request::ListProfiles).await {
             Err(error) => Err(error.to_string()),
@@ -236,6 +258,88 @@ impl<L: Link> Bridge<L> {
                 .and_then(Value::as_str)
                 .ok_or_else(|| "The service added the server but did not say which.".to_owned())?;
             Ok(json!({ "id": crate::text::plain(id, 64) }))
+        })
+    }
+
+    // ------------------------------------------------------------------ a friend's device (T188)
+
+    /// A friend's computer asks to join: the text to send to the owner (a name and the public half of a key
+    /// made on this computer). Nothing is saved. The reply is read as untrusted input.
+    pub async fn request_join(&self, name: &str) -> Value {
+        let wire = json!({ "request": "RequestJoin", "name": name });
+        let request = match decode_request(&wire.to_string()) {
+            Ok(request) => request,
+            Err(why) => return refused(&why.to_string(), "Refused"),
+        };
+        from_reply(self.link.call(request).await, |reply| {
+            let asked = dnet_ipc::devices::decode_join_requested(&reply.to_string())
+                .map_err(|_| "The service's answer was not what was expected.".to_owned())?;
+            Ok(json!({
+                "name": asked.name,
+                "text": asked.text,
+                "validForMinutes": asked.valid_for_s / 60,
+            }))
+        })
+    }
+
+    /// The owner's invite, pasted: the server is added after an approval, with this computer's own key.
+    /// `label` names the server here (the invite's own name when `None`). Checked by the service's own grammar
+    /// before anything is sent; the reply names the new server.
+    pub async fn accept_invite(&self, invite: &str, label: Option<&str>) -> Value {
+        let mut wire = json!({ "request": "AcceptInvite", "invite": invite });
+        if let Some(label) = label {
+            wire["label"] = Value::String(label.to_owned());
+        }
+        let request = match decode_request(&wire.to_string()) {
+            Ok(request) => request,
+            Err(why) => return refused(&why.to_string(), "Refused"),
+        };
+        from_reply(self.link.call(request).await, |reply| {
+            let id = reply
+                .get("endpoint")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "The service added the server but did not say which.".to_owned())?;
+            Ok(json!({ "id": crate::text::plain(id, 64) }))
+        })
+    }
+
+    /// The owner adds a friend's device to `endpoint`: the script to run on that server. `text` is what the
+    /// friend sent. The reply is read as untrusted input.
+    pub async fn prepare_device(&self, endpoint: &str, text: &str) -> Value {
+        let wire = json!({ "request": "PrepareDevice", "endpoint": endpoint, "text": text });
+        let request = match decode_request(&wire.to_string()) {
+            Ok(request) => request,
+            Err(why) => return refused(&why.to_string(), "Refused"),
+        };
+        from_reply(self.link.call(request).await, |reply| {
+            let prepared = dnet_ipc::devices::decode_device_prepared(&reply.to_string())
+                .map_err(|_| "The service's answer was not what was expected.".to_owned())?;
+            Ok(json!({
+                "name": prepared.name,
+                "script": prepared.script,
+                "validForMinutes": prepared.valid_for_s / 60,
+            }))
+        })
+    }
+
+    /// Finish it: `report` is what the script printed, pasted back. The reply is the invite to send to the
+    /// friend, read as untrusted input.
+    pub async fn finish_device(&self, endpoint: &str, text: &str, report: &str) -> Value {
+        let wire = json!({
+            "request": "FinishDevice", "endpoint": endpoint, "text": text, "report": report,
+        });
+        let request = match decode_request(&wire.to_string()) {
+            Ok(request) => request,
+            Err(why) => return refused(&why.to_string(), "Refused"),
+        };
+        from_reply(self.link.call(request).await, |reply| {
+            let invited = dnet_ipc::devices::decode_device_invited(&reply.to_string())
+                .map_err(|_| "The service's answer was not what was expected.".to_owned())?;
+            Ok(json!({
+                "name": invited.name,
+                "address": invited.address,
+                "invite": invited.invite,
+            }))
         })
     }
 

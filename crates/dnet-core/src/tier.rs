@@ -47,17 +47,12 @@ impl FailoverTier {
 
 /// The recorded HV-07 result for each kind at the pinned core versions.
 ///
-/// **T085 records results here, with the core versions and the evidence in `tasks.md`.**
-/// Bumping a core pin invalidates the result for the kinds that core serves: set them back
-/// to `NotMeasured` until HV-07 is re-run. Every kind is listed explicitly, so adding a kind
-/// forces a decision.
+/// **T085 records results as data** in `evidence/survival.json` (see `survival_evidence`): the method, the exact
+/// commit of the core that was measured, and each run. Nothing here is edited by hand, and a result for any
+/// other commit than the pinned one is ignored, so bumping a core pin turns the claim back to `NotMeasured` by
+/// itself. Every kind is read the same way, so adding a kind forces a decision in `survival_evidence`.
 pub fn recorded_survival(kind: ProfileKind) -> SurvivalMeasurement {
-    match kind {
-        // HV-07 has not run (SPIKE-R9 is Phase 6, T085).
-        ProfileKind::AmneziaWg => SurvivalMeasurement::NotMeasured,
-        ProfileKind::Hysteria2 => SurvivalMeasurement::NotMeasured,
-        ProfileKind::VlessReality => SurvivalMeasurement::NotMeasured,
-    }
+    crate::survival_evidence::recorded(kind)
 }
 
 #[cfg(test)]

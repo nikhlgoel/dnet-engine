@@ -13,6 +13,11 @@ on:
   push:
     tags: ["v*.*.*"]
   workflow_dispatch:
+    inputs:
+      rehearse_signing:
+        description: "Sign with a throwaway key made on the runner, to exercise the whole signing path without the real key (the installer is then NOT the project's)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -31,10 +36,10 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: stable
       - name: The version
@@ -47,11 +52,11 @@ jobs:
           echo "version=$v" >> "$GITHUB_OUTPUT"
       - name: Build
         run: cargo xtask build-server-cores --base-url "https://github.com/${{ github.repository }}/releases/download/v${{ steps.version.outputs.version }}/"
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@v4
         with:
           subject-path: target/server-cores/*-linux-*
         # (needs id-token and attestations permissions, set below)
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: server-cores
           path: target/server-cores/
@@ -64,22 +69,26 @@ jobs:
     name: Windows installer
     needs: server-cores
     runs-on: windows-latest
+    # A release tag runs in the environment `release`, which holds the signing key and is restricted to release tags
+    # and to the owner's approval; any other run (a branch, a manual dispatch) runs in `release-test`, which has no
+    # secrets and no restriction (docs/release-signing.md).
+    environment: ${{ github.ref_type == 'tag' && 'release' || 'release-test' }}
     permissions:
       contents: write # the draft release
       id-token: write # the attestation
       attestations: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # The cores are built from their pinned commits; the Go toolchain they declare is fetched as needed.
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: stable
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v5
         with:
           version: 12.4.2
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: pnpm
@@ -97,7 +106,7 @@ jobs:
           }
           "version=$cargo" >> $env:GITHUB_OUTPUT
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: server-cores
           path: target/server-cores
@@ -109,14 +118,100 @@ jobs:
           cargo xtask lint-branding
       - name: Tests
         run: cargo test --workspace
+      # Signing with the project's own key (docs/release-signing.md). Only on a release tag, and only when the
+      # repository has the key as secrets: a branch build and a build without the key are unsigned (and still
+      # attested below). The key is imported into this runner's certificate store once, as a key that cannot be
+      # exported, and the key file is deleted at once; the password is used by this one step and by nothing after
+      # it. Later steps sign by the certificate's thumbprint, which is not a secret.
+      - name: Prepare the signing key (release tags only, if the repository has one)
+        id: key
+        shell: pwsh
+        env:
+          SIGN_PFX_BASE64: ${{ secrets.SIGN_PFX_BASE64 }}
+          SIGN_PFX_PASSWORD: ${{ secrets.SIGN_PFX_PASSWORD }}
+        run: |
+          if ($env:GITHUB_REF_TYPE -ne 'tag') {
+            'Not a release tag: this build is never signed with the project key.'
+            'signed=false' >> $env:GITHUB_OUTPUT
+            exit 0
+          }
+          if (-not $env:SIGN_PFX_BASE64 -or -not $env:SIGN_PFX_PASSWORD) {
+            '::warning title=Unsigned release::The signing key is not set in this repository''s secrets, so this installer is NOT signed with the project key. It is still attested.'
+            'signed=false' >> $env:GITHUB_OUTPUT
+            exit 0
+          }
+          if (-not (Test-Path installer/signing-cert.sha256)) {
+            throw 'A signing key is set but installer/signing-cert.sha256 is missing: nothing would say whose key it is.'
+          }
+          $pfx = Join-Path $env:RUNNER_TEMP 'dnet-signing.pfx'
+          try {
+            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGN_PFX_BASE64))
+            $imported = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My `
+              -Password (ConvertTo-SecureString $env:SIGN_PFX_PASSWORD -AsPlainText -Force)
+          }
+          finally {
+            Remove-Item -LiteralPath $pfx -Force -ErrorAction SilentlyContinue
+          }
+          "DNET_SIGN_THUMBPRINT=$($imported.Thumbprint)" >> $env:GITHUB_ENV
+          "DNET_EXPECT_SHA256=$((Get-Content installer/signing-cert.sha256 -Raw).Trim())" >> $env:GITHUB_ENV
+          'DNET_SIGNING=on' >> $env:GITHUB_ENV
+          'signed=true' >> $env:GITHUB_OUTPUT
+
+      # A rehearsal of the above with a key made here and thrown away (only when asked for, never on a tag): it runs
+      # the whole signing path (signing by thumbprint, Tauri's sign command, the check, the install test's comparison
+      # of the installed files) so that the first real release is not its first run. What it builds is NOT signed by the
+      # project's key and says so in its name.
+      - name: Rehearse signing with a throwaway key (manual runs only)
+        if: github.ref_type != 'tag' && inputs.rehearse_signing == true
+        shell: pwsh
+        run: |
+          $c = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=DNet Engine signing rehearsal (throwaway, not the project key)' `
+            -CertStoreLocation Cert:\CurrentUser\My -NotAfter (Get-Date).AddDays(2)
+          $sha = ([System.Security.Cryptography.SHA256]::Create().ComputeHash($c.RawData) | ForEach-Object { $_.ToString('x2') }) -join ''
+          "DNET_SIGN_THUMBPRINT=$($c.Thumbprint)" >> $env:GITHUB_ENV
+          'DNET_SIGN_TIMESTAMP_URL=none' >> $env:GITHUB_ENV
+          "DNET_EXPECT_SHA256=$sha" >> $env:GITHUB_ENV
+          'DNET_SIGNING=on' >> $env:GITHUB_ENV
+          'DNET_REHEARSAL=yes' >> $env:GITHUB_ENV
+
       - name: Stage the payload
         run: cargo xtask stage-installer
+
+      - name: Sign the service and the command-line tool
+        if: env.DNET_SIGNING == 'on'
+        shell: pwsh
+        run: installer/Sign-Files.ps1 target/payload/app/dnetd.exe target/payload/app/dnetctl.exe
 
       - run: pnpm install --frozen-lockfile
         working-directory: apps/dnet-tray
       - name: Build the installer
         run: pnpm installer
         working-directory: apps/dnet-tray
+        # Tauri signs the tray program and the installer itself through bundle.windows.signCommand, by thumbprint.
+
+      # Not checked here: the tray program inside the installer. Tauri signs it, packs it, and then restores the loose
+      # copy in the build folder, which therefore carries no signature. It is checked on the installed files
+      # (docs/release-signing.md); the installer's own signature is checked here.
+      - name: Check the signatures, and that they are the project's key
+        if: env.DNET_SIGNING == 'on'
+        shell: pwsh
+        run: |
+          $setup = (Get-ChildItem apps/dnet-tray/src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1).FullName
+          installer/Test-Signature.ps1 -CertSha256 $env:DNET_EXPECT_SHA256 `
+            target/payload/app/dnetd.exe target/payload/app/dnetctl.exe $setup
+
+      # The installer is installed on this runner, checked (the service, its recovery, the folders and who may change
+      # them, the signatures of what was installed, that the command-line tool reaches the service), uninstalled, and the
+      # network compared before and after (testing/Invoke-InstallTest.ps1). A runner is an ephemeral machine, so this is
+      # the install test that needs nobody at a keyboard; it never connects to anything.
+      - name: Install it on this runner, check it, uninstall it
+        shell: pwsh
+        run: testing/Invoke-InstallTest.ps1
+
+      - name: Remove the signing key from this runner
+        if: always() && env.DNET_SIGNING == 'on'
+        shell: pwsh
+        run: Remove-Item -LiteralPath "Cert:\CurrentUser\My\$env:DNET_SIGN_THUMBPRINT" -ErrorAction SilentlyContinue
 
       - name: Size, checksum and winget manifests
         shell: pwsh
@@ -129,6 +224,7 @@ jobs:
           if ($built.Length -gt 60MB) { throw ("installer is {0:N1} MB; the limit is 60 MB" -f ($built.Length / 1MB)) }
           New-Item -ItemType Directory -Force dist-release/winget | Out-Null
           $name = "DNetEngine-$env:VERSION-x64-setup.exe"
+          if ($env:DNET_REHEARSAL -eq 'yes') { $name = "DNetEngine-$env:VERSION-x64-setup-SIGNING-REHEARSAL-not-the-project-key.exe" }
           Copy-Item $built.FullName "dist-release/$name"
           $sha = (Get-FileHash "dist-release/$name" -Algorithm SHA256).Hash
           [IO.File]::WriteAllText("$PWD/dist-release/SHA256SUMS.txt", "$sha  $name`n")
@@ -140,11 +236,11 @@ jobs:
           }
           ("{0}: {1:N1} MB, SHA-256 {2}" -f $name, ($built.Length / 1MB), $sha) | Write-Output
 
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@v4
         with:
           subject-path: dist-release/*.exe
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: installer-${{ steps.version.outputs.version }}
           path: dist-release/

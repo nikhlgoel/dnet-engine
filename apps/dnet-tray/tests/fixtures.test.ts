@@ -7,7 +7,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ACTION_FOR_CAUSE, ACTION_LABEL, chips, look, strip } from '../src/lib/describe';
-import { FAILURE_CAUSES, parseEndpoints, parsePending, parseRulesReply, parseSnapshot } from '../src/lib/model';
+import { FAILURE_CAUSES, parseComponents, parseEndpoints, parsePending, parseRulesReply, parseSnapshot } from '../src/lib/model';
 
 const DIR = join(__dirname, '..', '..', '..', 'crates', 'dnet-view', 'tests', 'fixtures');
 const read = (name: string): unknown => JSON.parse(readFileSync(join(DIR, `${name}.json`), 'utf8'));
@@ -19,6 +19,7 @@ describe('what the Rust side sends', () => {
     expect(SNAPSHOTS.length).toBe(4 + FAILURE_CAUSES.length);
     expect(NAMES).toContain('endpoints');
     expect(NAMES).toContain('rules');
+    expect(NAMES).toContain('components');
   });
 
   for (const name of SNAPSHOTS) {
@@ -113,5 +114,54 @@ describe('the waiting changes', () => {
       ['0f9e8d7c', 'Sending example.com? around the tunnel', 602000],
     ]);
     for (const item of raw.pending) expect(Object.keys(item).sort()).toEqual(['expiresUnixMs', 'id', 'what']);
+  });
+
+  it('the map of parts parses, in the window’s own names, with a missing measurement left missing', () => {
+    const view = parseComponents(read('components'));
+    expect(view.supported).toBe(true);
+    expect(view.overall).toBe('Blocked');
+    expect(view.parts.map((p) => [p.kind, p.id, p.state])).toEqual([
+      ['NetworkPath', 'ethernet', 'Ok'],
+      ['NetworkPath', 'wi-fi', 'Degraded'],
+      ['Session', 'session', 'Ok'],
+      ['CaptivePortal', 'portal', 'Blocked'],
+    ]);
+    const wifi = view.parts[1]!;
+    expect([wifi.latencyMs, wifi.lossPermille, wifi.restarts]).toEqual([180, 80, null]);
+    const portal = view.parts[3]!;
+    expect([portal.latencyMs, portal.lossPermille, portal.restarts]).toEqual([null, null, null]);
+    expect(wifi.reason).toBe('Lossy: 8% of probes were lost.');
+  });
+
+  it('a map that is not believable is refused, and what it said is not repeated', () => {
+    const good = read('components') as { parts: Array<Record<string, unknown>> };
+    const broken: unknown[] = [
+      null,
+      {},
+      { ...good, parts: 'SENTINEL' },
+      { ...good, overall: 'Fine' },
+      { ...good, parts: [{ ...good.parts[0], kind: 'SENTINEL' }] },
+      { ...good, parts: [{ ...good.parts[0], state: 'SENTINEL' }] },
+      { ...good, parts: [{ ...good.parts[0], ageSeconds: -1 }] },
+      { ...good, parts: [{ ...good.parts[0], lossPermille: 1001 }] },
+      { ...good, parts: Array.from({ length: 129 }, (_, i) => ({ ...good.parts[0], id: `p${i}` })) },
+    ];
+    for (const value of broken) {
+      let message = '';
+      try {
+        parseComponents(value);
+      } catch (e) {
+        message = String(e);
+      }
+      expect(message, JSON.stringify(value)?.slice(0, 60)).not.toBe('');
+      expect(message).not.toContain('SENTINEL');
+    }
+  });
+
+  it('a service too old to list its parts is not shown as having none, or as fine', () => {
+    const view = parseComponents({ supported: false, asOfUnixMs: null, overall: 'Unknown', parts: [] });
+    expect(view.supported).toBe(false);
+    expect(view.overall).toBe('Unknown');
+    expect(view.parts).toEqual([]);
   });
 });

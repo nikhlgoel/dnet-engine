@@ -624,6 +624,10 @@ impl RealEffects {
 }
 
 impl Effects for RealEffects {
+    async fn core_health(&self) -> Vec<(CoreBinding, dnet_supervisor::runtime::CoreHealth)> {
+        self.tunnels.core_health().await
+    }
+
     fn environment(&self) -> Environment {
         Environment {
             privileged: self.privileged,

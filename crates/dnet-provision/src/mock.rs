@@ -326,11 +326,27 @@ impl Provider for MockProvider {
             .unwrap_or_default();
         // The same for the session: the devices the script was given, as the server's report lists them.
         // (`"{SESSION_DEVICES}"` in the scripted output is replaced by that array.)
+        // A new server's list is made from the keys the script hands to `dnet-devices sync`, in order, each at the
+        // address its place gives it.
         let devices = script
-            .split("\"devices\": [")
-            .nth(1)
-            .and_then(|rest| rest.split("]},").next())
-            .map(|list| format!("[{list}]"))
+            .lines()
+            .find(|l| l.contains("dnet-devices\" sync "))
+            .map(|line| {
+                let list = line
+                    .split('\'')
+                    .skip(1)
+                    .step_by(2)
+                    .enumerate()
+                    .map(|(i, key)| {
+                        format!(
+                            "{{\"address\": \"{}\", \"public_key\": \"{key}\"}}",
+                            dnet_config::session::session_device_address(i)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("[{list}]")
+            })
             .unwrap_or_else(|| "[]".to_owned());
         Ok(state
             .bootstrap_output

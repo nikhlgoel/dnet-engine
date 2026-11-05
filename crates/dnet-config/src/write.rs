@@ -157,6 +157,14 @@ pub mod win {
                 GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted)
                     .map_err(|e| io::Error::other(e.to_string()))?;
             }
+            // No DACL, or a NULL one, grants everyone full access. A caller that meant to restrict a file
+            // must never end up with that, so it is refused before anything is changed.
+            if !present.as_bool() || dacl.is_null() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "the security descriptor has no access list; applying it would give everyone access",
+                ));
+            }
             // SAFETY: `path_w` is NUL-terminated; `dacl` is valid for the call. Owner and
             // group are left unchanged (null PSIDs with no OWNER/GROUP info flags).
             let status = unsafe {
@@ -379,6 +387,25 @@ mod tests {
 
         // Relax so the tempdir can be removed by the unelevated test user.
         apply_protected_dacl(&file, "D:P(A;;FA;;;WD)").unwrap();
+    }
+
+    /// A security descriptor that carries no DACL is a NULL DACL to Windows, which means everyone has full
+    /// access. Applying one would silently make a credentials file world-writable, so it is refused and the
+    /// file keeps the restriction it had.
+    #[test]
+    fn a_descriptor_without_a_dacl_is_refused_and_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("primary-core.json");
+        std::fs::write(&file, b"{}").unwrap();
+        apply_protected_dacl(&file, RUN_FILE_SDDL).unwrap();
+
+        let refused = apply_protected_dacl(&file, "O:BA");
+        let after = read_dacl_sddl(&file).unwrap();
+
+        // Relax first so the tempdir can be removed whatever happened above.
+        apply_protected_dacl(&file, "D:P(A;;FA;;;WD)").unwrap();
+        assert!(refused.is_err(), "a descriptor with no DACL was applied");
+        assert_only_system_and_admins(&after);
     }
 
     #[test]

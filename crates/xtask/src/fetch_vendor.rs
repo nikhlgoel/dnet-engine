@@ -74,7 +74,10 @@ pub(crate) struct ModulePatch {
 
 const TUN_DLL_LOADER_PATCH: ModulePatch = ModulePatch {
     module: "github.com/sagernet/sing-tun",
-    version: "v0.9.0-beta.4",
+    // What v1.14.4 requires. Nothing under `internal/wintun` differs from the earlier v0.9.0-beta.4 (compared on
+    // 2026-11-05: 24 commits, none in that directory), so the overlay applies unchanged; `fetch-vendor` still refuses
+    // if the pinned source asks for any other version.
+    version: "v0.9.7-0.20261023115432-040db71fcd33",
     overlay: "patches/sing-tun",
     remove: &[
         "internal/wintun/dll_windows_386.go",
@@ -94,8 +97,8 @@ pub(crate) const GO_SOURCES: &[GoSource] = &[
     GoSource {
         dest: "primary-core",
         repo: "https://github.com/SagerNet/sing-box",
-        version: "v1.14.0",
-        commit: "0b8995879f29a9b98ee027bc17b75e101445b238",
+        version: "v1.14.4",
+        commit: "c005f35300ce76427dc285481ec5695f5b179cd2",
         package: "./cmd/sing-box",
         binary: "primary-core.exe",
         // with_quic               -> Hysteria 2 (Profile B)
@@ -273,6 +276,7 @@ fn build_go_source(repo_root: &Path, src: &GoSource) -> Result<()> {
         args.push(src.tags);
     }
     args.push(src.package);
+    warm_go_cache(&work);
     run_cmd("go", &args, Some(&work))?;
 
     let size = std::fs::metadata(&out)?.len();
@@ -635,8 +639,47 @@ pub(crate) fn require_tool(bin: &str, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
+/// Run `attempt` (given the number of this try, from 1) until it works or `tries` have been made, pausing `pause`
+/// times the number of the failed try between them; the last error is what comes back. At least one try is made.
+pub(crate) fn with_retries<T>(
+    tries: u32,
+    pause: std::time::Duration,
+    mut attempt: impl FnMut(u32) -> Result<T>,
+) -> Result<T> {
+    let tries = tries.max(1);
+    let mut n = 1;
+    loop {
+        match attempt(n) {
+            Ok(done) => return Ok(done),
+            Err(error) if n >= tries => return Err(error),
+            Err(error) => {
+                println!("  attempt {n} of {tries} failed ({error:#}); trying again");
+                std::thread::sleep(pause * n);
+                n += 1;
+            }
+        }
+    }
+}
+
+/// Fill the Go module cache before a build, trying again when the download fails. The module proxy now and then
+/// answers with a server-side error (a release build was stopped by one: "stream error ... INTERNAL_ERROR"), and a
+/// build that downloads as it goes then fails on a single such answer. Best effort: a module that cannot be had is
+/// left for the build itself to say, because the build may not need it.
+pub(crate) fn warm_go_cache(work: &Path) {
+    let warmed = with_retries(3, std::time::Duration::from_secs(10), |_| {
+        run_cmd("go", &["mod", "download"], Some(work))
+    });
+    if let Err(error) = warmed {
+        println!("  warning: the Go module cache could not be filled ({error:#}); the build will download what it needs");
+    }
+}
+
 pub(crate) fn run_cmd(bin: &str, args: &[&str], cwd: Option<&Path>) -> Result<()> {
-    let mut cmd = Command::new(bin);
+    let mut cmd = if bin == "powershell" {
+        crate::verify_vendor::windows_powershell()
+    } else {
+        Command::new(bin)
+    };
     cmd.args(args);
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
@@ -667,7 +710,78 @@ pub(crate) fn capture(bin: &str, args: &[&str], cwd: Option<&Path>) -> Result<St
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+    use std::time::Duration;
+
+    #[test]
+    fn a_step_that_fails_twice_and_then_works_is_run_three_times_and_succeeds() {
+        let calls = Cell::new(0);
+        let out = super::with_retries(3, Duration::ZERO, |n| {
+            calls.set(calls.get() + 1);
+            if n < 3 {
+                anyhow::bail!("try {n} failed")
+            }
+            Ok("done")
+        });
+        assert_eq!(out.unwrap(), "done");
+        assert_eq!(calls.get(), 3);
+    }
+
+    #[test]
+    fn a_step_that_always_fails_is_tried_the_stated_number_of_times_and_says_the_last_error() {
+        let calls = Cell::new(0);
+        let out: anyhow::Result<()> = super::with_retries(3, Duration::ZERO, |n| {
+            calls.set(calls.get() + 1);
+            anyhow::bail!("failure number {n}")
+        });
+        assert_eq!(calls.get(), 3);
+        assert!(out.unwrap_err().to_string().contains("failure number 3"));
+    }
+
+    #[test]
+    fn a_step_that_works_at_once_is_run_once() {
+        let calls = Cell::new(0);
+        super::with_retries(5, Duration::ZERO, |_| {
+            calls.set(calls.get() + 1);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn at_least_one_try_is_made_even_when_none_is_asked_for() {
+        let calls = Cell::new(0);
+        let _ = super::with_retries(0, Duration::ZERO, |_| {
+            calls.set(calls.get() + 1);
+            Ok(())
+        });
+        assert_eq!(calls.get(), 1);
+    }
+
     use super::*;
+
+    /// A measurement of survival belongs to one exact core. The commits `dnet-core` checks the evidence
+    /// against are the ones the cores are built from, so they cannot drift apart: a pin bumped here without
+    /// being bumped there would let old evidence stand for a different core.
+    #[test]
+    fn the_evidence_is_checked_against_the_commits_the_cores_are_built_from() {
+        let commit_of = |dest: &str| {
+            GO_SOURCES
+                .iter()
+                .find(|s| s.dest == dest)
+                .unwrap_or_else(|| panic!("no source called {dest}"))
+                .commit
+        };
+        assert_eq!(
+            dnet_core::survival_evidence::PINNED_PRIMARY_COMMIT,
+            commit_of("primary-core")
+        );
+        assert_eq!(
+            dnet_core::survival_evidence::PINNED_AMNEZIAWG_COMMIT,
+            commit_of("amneziawg-go")
+        );
+    }
 
     #[test]
     fn empty_pin_is_rejected() {

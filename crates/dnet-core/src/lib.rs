@@ -7,6 +7,7 @@
 
 pub mod builtin_rules;
 pub mod catalogue;
+pub mod crash;
 pub mod credential;
 pub mod degraded;
 pub mod doh_block;
@@ -14,11 +15,14 @@ pub mod doh_consent;
 pub mod endpoint;
 pub mod endpoint_health;
 pub mod engine;
+#[cfg(test)]
+mod engine_sequences;
 pub mod error;
 pub mod failover;
 pub mod failure;
 pub mod fakeip;
 pub mod feed;
+pub mod guard;
 pub mod health;
 pub mod hostname;
 pub mod ids;
@@ -40,6 +44,7 @@ pub mod rule;
 pub mod rule_eval;
 pub mod selection;
 pub mod session;
+pub mod survival_evidence;
 pub mod telemetry;
 pub mod tick_gap;
 pub mod tier;

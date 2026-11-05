@@ -393,7 +393,7 @@ mod windows_pipe {
     ///
     /// The descriptor is copied into the pipe object at creation, so it is freed
     /// before returning — the returned server owns no borrowed security state.
-    fn create_server(first: bool) -> Result<NamedPipeServer, IpcError> {
+    fn create_server(name: &str, first: bool) -> Result<NamedPipeServer, IpcError> {
         let security = SecurityAttributes::from_sddl(pipe_sddl()).map_err(win_err)?;
         let mut options = ServerOptions::new();
         options.first_pipe_instance(first);
@@ -401,7 +401,7 @@ mod windows_pipe {
         // this call; CreateNamedPipe copies the descriptor, so it may be freed after.
         let server = unsafe {
             options.create_with_security_attributes_raw(
-                super::PIPE_NAME,
+                name,
                 security.as_ptr() as *mut std::ffi::c_void,
             )
         }
@@ -456,7 +456,15 @@ mod windows_pipe {
     /// Used by the T039 attack test; the production entry point is
     /// [`run_control_listener`].
     pub async fn accept_one(service: Arc<dyn Service>) -> Result<(), IpcError> {
-        let server = create_server(true)?;
+        accept_one_on(super::PIPE_NAME, service).await
+    }
+
+    /// [`accept_one`] on the pipe named. For tests: each uses a name of its own, so that it neither collides with a
+    /// real service installed on the same computer (whose pipe is the real name) nor with another test. The security
+    /// descriptor and the "first instance" rule are the same whatever the name.
+    #[doc(hidden)]
+    pub async fn accept_one_on(name: &str, service: Arc<dyn Service>) -> Result<(), IpcError> {
+        let server = create_server(name, true)?;
         server.connect().await.map_err(io_err)?;
         serve_pipe_connection(server, service, Limits::default()).await
     }
@@ -464,6 +472,7 @@ mod windows_pipe {
     /// Hands out pipe instances: one waits for the next client at all times, so there is no window
     /// in which a connect attempt is refused.
     struct PipeAcceptor {
+        name: String,
         waiting: Option<NamedPipeServer>,
     }
 
@@ -473,12 +482,13 @@ mod windows_pipe {
         async fn accept(&mut self) -> std::io::Result<NamedPipeServer> {
             let server = match self.waiting.take() {
                 Some(server) => server,
-                None => create_server(false).map_err(|e| std::io::Error::other(e.to_string()))?,
+                None => create_server(&self.name, false)
+                    .map_err(|e| std::io::Error::other(e.to_string()))?,
             };
             server.connect().await?;
             // The next instance at once. If it cannot be made now it is made on the next call,
             // after the pause, instead of ending the listener.
-            self.waiting = create_server(false).ok();
+            self.waiting = create_server(&self.name, false).ok();
             Ok(server)
         }
     }
@@ -498,8 +508,19 @@ mod windows_pipe {
         service: Arc<dyn Service>,
         limits: Limits,
     ) -> Result<(), IpcError> {
-        let first = create_server(true)?;
+        run_control_listener_on(super::PIPE_NAME, service, limits).await
+    }
+
+    /// [`run_control_listener_with`] on the pipe named (see [`accept_one_on`]).
+    #[doc(hidden)]
+    pub async fn run_control_listener_on(
+        name: &str,
+        service: Arc<dyn Service>,
+        limits: Limits,
+    ) -> Result<(), IpcError> {
+        let first = create_server(name, true)?;
         let acceptor = PipeAcceptor {
+            name: name.to_owned(),
             waiting: Some(first),
         };
         accept_forever(acceptor, limits, move |connected| {
@@ -517,7 +538,8 @@ mod windows_pipe {
 
 #[cfg(windows)]
 pub use windows_pipe::{
-    accept_one, run_control_listener, run_control_listener_with, serve_pipe_connection,
+    accept_one, accept_one_on, run_control_listener, run_control_listener_on,
+    run_control_listener_with, serve_pipe_connection,
 };
 
 #[cfg(test)]

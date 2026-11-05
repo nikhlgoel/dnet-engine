@@ -15,7 +15,7 @@ When documents disagree, this is the order of precedence:
 |---|---|
 | [`architecture/`](architecture/) | [Tech stack](architecture/tech-stack.md) · [System architecture](architecture/system-architecture.md) · [Module blueprints](architecture/module-blueprints.md) |
 | [`design/`](design/) | [Design system](design/design-system.md) · [Tokens](design/tokens.css) · [Live preview](design/preview.html) (serve over HTTP) · [Interaction flows](design/interaction-flows.md) |
-| [`security/`](security/) | [Security design](security/security-design.md) · [Threat model](security/threat-model.md) · [Credential handling](security/credential-handling.md) |
+| [`security/`](security/) | [Security design](security/security-design.md) · [Threat model](security/threat-model.md) · [Credential handling](security/credential-handling.md) · [The server's firewall and ports: what is open, why, what protects it, what was tested](security/server-firewall.md) · [Dependencies and advisories: what was checked, found and accepted](security/dependencies-and-advisories.md) |
 | [`bugs/`](bugs/) | One file per significant bug — see the [index](bugs/README.md) |
 | [`adr/`](adr/) | Architecture decision records |
 | [`research/`](research/) | Dated research records: evidence behind a proposal, with sources and confidence. Start with [the framework research and status audit](research/2026-10-31-framework-research.md), then [the deep audit of our own code and the upgrades it leads to](research/2026-10-31-framework-deep-audit.md), then [the solutions, with the evidence that they work](research/2026-10-31-solutions.md), then [why not assembly, and adapting to each kind of network](research/2026-10-31-language-and-adaptive-paths.md) |

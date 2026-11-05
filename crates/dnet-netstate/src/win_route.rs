@@ -240,6 +240,17 @@ impl WindowsRouteInstaller {
         }
     }
 
+    /// The list is locked across the OS route call, so a panic there poisons it. Removing routes must still work
+    /// afterwards, since that is what puts the network back; so a poisoned lock is taken over, not panicked on.
+    /// A route whose creation was interrupted has its undo record in the journal (written first) but never
+    /// reached this list, so `remove` cannot take it down; the journal's replay does, at teardown or at the
+    /// next start, and only then.
+    fn owned_routes(&self) -> std::sync::MutexGuard<'_, Vec<OwnedRoute>> {
+        self.owned
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Install the host route to every resolved address of the route's destination.
     /// Returns the addresses now routed via the gateway.
     pub fn install(&self, route: &HostRoute) -> Result<Vec<IpAddr>, NetstateError> {
@@ -248,7 +259,7 @@ impl WindowsRouteInstaller {
         // Querying the gateway (on-link) rather than the endpoint is deliberate: once a TUN
         // exists, the best route to the endpoint would be the TUN.
         let via = best_route_to(route.gateway())?;
-        let mut owned = self.owned.lock().expect("route ownership mutex poisoned");
+        let mut owned = self.owned_routes();
         for &dest in &addrs {
             let row = route_row(via.interface_luid, dest, route.gateway());
             // Checked before registering, so a route someone else owns never gets an undo
@@ -287,7 +298,7 @@ impl WindowsRouteInstaller {
     /// already gone is not an error. A route that cannot be removed stays owned, and its
     /// undo record stays on disk for replay.
     pub fn remove(&self, route: &HostRoute) -> Result<(), NetstateError> {
-        let mut owned = self.owned.lock().expect("route ownership mutex poisoned");
+        let mut owned = self.owned_routes();
         let mut first_error = None;
         owned.retain(|r| {
             if r.destination != route.destination() || r.gateway != route.gateway() {
@@ -319,9 +330,7 @@ impl WindowsRouteInstaller {
 
     /// Whether this installer currently owns a route for `route`.
     pub fn owns(&self, route: &HostRoute) -> bool {
-        self.owned
-            .lock()
-            .expect("route ownership mutex poisoned")
+        self.owned_routes()
             .iter()
             .any(|r| r.destination == route.destination() && r.gateway == route.gateway())
     }
@@ -373,6 +382,29 @@ mod tests {
         let host = format!("203.0.113.{last_octet}");
         let bypass = ActiveEndpointBypass::new(&EndpointAddress::new(host, 1).unwrap());
         HostRoute::for_endpoint(&bypass, gateway)
+    }
+
+    /// The ownership list is locked across the OS route call, so a panic there poisons it. Taking a route
+    /// down is what puts the network back, so it must still work afterwards instead of panicking again.
+    /// (Unprivileged: nothing real is installed.)
+    #[test]
+    fn a_poisoned_ownership_list_does_not_stop_removal() {
+        let gateway = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1));
+        let installer = WindowsRouteInstaller::new(Arc::new(
+            UndoRegistry::open(Box::new(MemoryStore::new())).unwrap(),
+        ));
+        let died = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = installer.owned.lock().unwrap();
+            panic!("the operating system call blew up");
+        }));
+        assert!(
+            died.is_err(),
+            "the test must really have panicked with the lock held"
+        );
+
+        let route = test_route(80, gateway);
+        assert!(!installer.owns(&route));
+        installer.remove(&route).unwrap();
     }
 
     /// Installs and removes a real route to an unassigned TEST-NET-3 address via the

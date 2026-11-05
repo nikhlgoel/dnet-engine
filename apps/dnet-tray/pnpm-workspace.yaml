@@ -5,3 +5,9 @@
 # - Install scripts do not run unless listed here. None is.
 minimumReleaseAge: 20160
 onlyBuiltDependencies: []
+
+# The test tooling (vitest, jsdom) pulls in an HTTP client with published advisories (GHSA-xjj6-f33q-929c and others,
+# fixed in 8.12.2). It never ships (`pnpm audit --prod` is clean), but a developer's machine runs it, so it is held at
+# the fixed version.
+overrides:
+  undici: ">=8.12.2"

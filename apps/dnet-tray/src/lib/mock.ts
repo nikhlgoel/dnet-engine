@@ -7,6 +7,7 @@
 import type { Bridge, Capabilities, NewEndpointInput, Outcome } from './bridge';
 import type {
   ActivityItem,
+  ComponentsView,
   EncryptedDnsSetting,
   EndpointView,
   FailureCause,
@@ -17,7 +18,12 @@ import type {
   RulesView,
   Snapshot,
 } from './model';
-import { parseSnapshot } from './model';
+import { parseComponents, parseSnapshot } from './model';
+
+/** The service's rule for a device's name (`dnet_config::invite::valid_name`). */
+const DEVICE_NAME = /^(?! )[A-Za-z0-9 ._-]{1,32}(?<! )$/;
+/** A public key as the service prints one: 32 bytes in base64, not all zero. */
+const MOCK_DEVICE_KEY = 'BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=';
 
 export type MockState = 'off' | 'probe' | 'ok' | 'warn' | 'fail';
 export type MockNetworks = 'one' | 'two' | 'three';
@@ -159,8 +165,13 @@ export interface MockOptions {
   disclosed?: boolean;
   /** Start with aggressive speed mode (Brutal) on for the Hysteria 2 method. */
   brutalOn?: boolean;
+  /** Pretend the service is too old to list its parts (it does not know `GetComponents`). */
+  noComponents?: boolean;
   /** Pretend this build has no list of server downloads, so setting a server up is unavailable. */
   noServerDownloads?: boolean;
+  /** Hold a new server until it is approved, as the installed service does (T160). Off by default here, so the
+   * rest of the window can be developed without approving each server first. */
+  holdChanges?: boolean;
 }
 
 export interface MockController extends Bridge {
@@ -171,8 +182,9 @@ export interface MockController extends Bridge {
   emit(event: string, because: string): void;
   /** Make the next `stabilize(true)` fail with this reason. */
   failNext(reason: string): void;
-  /** Put a change that redirects traffic in the waiting list, as the service does; returns its id. */
-  hold(what: string): string;
+  /** Put a change that redirects traffic in the waiting list, as the service does; returns its id. Approving it
+   * runs `apply`, as the service applies exactly the change it held. */
+  hold(what: string, apply?: () => void): string;
 }
 
 const BUILTIN_RULES: RuleView[] = [
@@ -193,6 +205,7 @@ export function createMockBridge(options: MockOptions = {}): MockController {
   let ownRules: RuleView[] = [];
   let held: PendingView[] = [];
   let heldCount = 0;
+  const heldApply = new Map<string, () => void>();
   let profiles: ProfileView[] = [
     { id: 'awg-default', kind: 'AmneziaWg', tier: 'Tier2', brutal: false },
     { id: 'hy2-default', kind: 'Hysteria2', tier: 'Tier2', brutal: options.brutalOn === true },
@@ -217,6 +230,34 @@ export function createMockBridge(options: MockOptions = {}): MockController {
   const refuse = (reason: string, code: 'ServiceBusy' | 'Refused' = 'Refused'): Outcome => ({ ok: false, reason, code });
   const idleOnly = (): Outcome | null =>
     connected() ? refuse('disconnect before changing endpoints or encrypted-name settings', 'Refused') : null;
+  const hold = (what: string, apply?: () => void): string => {
+    heldCount += 1;
+    const id = `c${heldCount}`;
+    held = [...held, { id, what, expiresUnixMs: now() + 10 * 60 * 1000 }];
+    if (apply) heldApply.set(id, apply);
+    return id;
+  };
+  /** Apply `apply` now, or, as the service does with a change that sends traffic somewhere new, hold it and say so
+   * in the service's words (`dnet_ipc::IpcError::ApprovalRequired`). */
+  const applyOrHold = (what: string, apply: () => string): Outcome & { id?: string } => {
+    if (options.holdChanges !== true) return { ok: true, id: apply() };
+    const change = hold(what, () => void apply());
+    return {
+      ok: false,
+      code: 'ApprovalRequired',
+      reason: `${what} waits for approval (change ${change}). Approve it with \`dnetctl approve ${change}\` and answer the Windows prompt; it is dropped after ten minutes`,
+    };
+  };
+  /** A friend's computer that has asked to join, and the devices an owner has made a script for. */
+  let joining: { name: string } | null = null;
+  const preparedDevices = new Set<string>();
+  /** Invites made after an approval and waiting to be asked for once. */
+  const readyInvites = new Set<string>();
+  const addServer = (label: string, host: string) => (): string => {
+    const id = `e${endpoints.length + 2}`;
+    endpoints = [...endpoints, { id, label, address: `${host}:44443`, enabled: true, health: 'Unknown' }];
+    return id;
+  };
 
   return {
     capabilities,
@@ -278,9 +319,7 @@ export function createMockBridge(options: MockOptions = {}): MockController {
       if (blocked) return blocked;
       if (endpoints.some((e) => e.label === input.label)) return refuse('an endpoint with that label already exists');
       if (input.credentials.trim() === '') return refuse('`credentials` holds no connection method');
-      const id = `e${endpoints.length + 2}`;
-      endpoints = [...endpoints, { id, label: input.label, address: `${input.host}:44443`, enabled: true, health: 'Unknown' }];
-      return { ok: true, id };
+      return applyOrHold(`Adding the server "${input.label}" at ${input.host}`, addServer(input.label, input.host));
     },
     async prepareServer(arch) {
       if (options.noServerDownloads === true) {
@@ -307,9 +346,75 @@ export function createMockBridge(options: MockOptions = {}): MockController {
         return refuse('the result cannot be used: the server printed no bootstrap report');
       }
       if (endpoints.some((e) => e.label === input.label)) return refuse('an endpoint with that label already exists');
-      const id = `e${endpoints.length + 2}`;
-      endpoints = [...endpoints, { id, label: input.label, address: `${input.host}:44443`, enabled: true, health: 'Unknown' }];
-      return { ok: true, id };
+      return applyOrHold(`Adding the server "${input.label}" at ${input.host} made by the setup guide`, addServer(input.label, input.host));
+    },
+    async requestJoin(name) {
+      if (!DEVICE_NAME.test(name)) {
+        return refuse('`name` must be 1 to 32 letters, digits, spaces, dots, dashes or underscores');
+      }
+      joining = { name };
+      return {
+        ok: true,
+        request: {
+          name,
+          text: `DNET-DEVICE-REQUEST ${JSON.stringify({ version: 1, name, public_key: MOCK_DEVICE_KEY })}`,
+          validForMinutes: 360,
+        },
+      };
+    },
+    async acceptInvite(invite, label) {
+      const blocked = idleOnly();
+      if (blocked) return blocked;
+      if (joining === null) return refuse('this computer has not asked to join a server; start from the first step');
+      if (!/DNET-INVITE-1:[A-Za-z0-9_-]+/.test(invite)) return refuse('the invite cannot be used: that is not an invite');
+      const name = (label ?? '').trim() === '' ? 'Shared server' : (label ?? '').trim();
+      if (endpoints.some((e) => e.label === name)) return refuse('an endpoint with that label already exists');
+      return applyOrHold(`Adding the server "${name}" at 203.0.113.9 from a friend's invite`, () => {
+        joining = null;
+        return addServer(name, '203.0.113.9')();
+      });
+    },
+    async prepareDevice(endpoint, request) {
+      if (!endpoints.some((e) => e.id === endpoint)) return refuse('there is no endpoint with that id');
+      const name = /"name":"([^"]{1,32})"/.exec(request)?.[1];
+      if (!request.includes('DNET-DEVICE-REQUEST ') || name === undefined || !DEVICE_NAME.test(name)) {
+        return refuse('the request cannot be used: that is not a device request');
+      }
+      preparedDevices.add(`${endpoint}:${name}`);
+      return {
+        ok: true,
+        prepared: { name, script: `#!/bin/sh\n# mock script: add ${name}\necho "DNET-DEVICE-REPORT {}"\n`, validForMinutes: 360 },
+      };
+    },
+    async finishDevice(endpoint, request, report) {
+      const name = /"name":"([^"]{1,32})"/.exec(request)?.[1] ?? '';
+      const key = `${endpoint}:${name}`;
+      const invited = { name, address: '10.9.0.3', invite: 'DNET-INVITE-1:bW9jay1pbnZpdGU' };
+      // As the service does: an invite holds the server's access details, so making one waits for approval, and
+      // asking again once it is approved returns it.
+      if (readyInvites.delete(key)) return { ok: true, invited };
+      if (!preparedDevices.has(key)) {
+        return refuse('no device is being added with that request on that server; start again from the first step');
+      }
+      if (!report.includes('DNET-DEVICE-REPORT')) return refuse('the result cannot be used: the server printed no device report');
+      const label = endpoints.find((e) => e.id === endpoint)?.label ?? '';
+      const make = (): string => {
+        preparedDevices.delete(key);
+        readyInvites.add(key);
+        return key;
+      };
+      if (options.holdChanges !== true) {
+        make();
+        readyInvites.delete(key);
+        return { ok: true, invited };
+      }
+      const what = `Making an invite for the device "${name}" on the server "${label}"; it holds that server's access details`;
+      const change = hold(what, () => void make());
+      return {
+        ok: false,
+        code: 'ApprovalRequired',
+        reason: `${what} waits for approval (change ${change}). Approve it with \`dnetctl approve ${change}\` and answer the Windows prompt; it is dropped after ten minutes`,
+      };
     },
     async removeEndpoint(id) {
       const blocked = idleOnly();
@@ -321,9 +426,38 @@ export function createMockBridge(options: MockOptions = {}): MockController {
     async setEndpointEnabled(id, enabled) {
       const blocked = idleOnly();
       if (blocked) return blocked;
-      if (!endpoints.some((e) => e.id === id)) return refuse('there is no endpoint with that id');
-      endpoints = endpoints.map((e) => (e.id === id ? { ...e, enabled } : e));
+      const target = endpoints.find((e) => e.id === id);
+      if (!target) return refuse('there is no endpoint with that id');
+      const apply = () => {
+        endpoints = endpoints.map((e) => (e.id === id ? { ...e, enabled } : e));
+        return id;
+      };
+      // As the service does: turning a server on sends traffic somewhere, so it waits for approval; turning one off
+      // does not.
+      if (enabled && !target.enabled) return applyOrHold(`Turning on the server "${target.label}"`, apply);
+      apply();
       return { ok: true };
+    },
+
+    async components(): Promise<ComponentsView> {
+      if (options.noComponents === true) {
+        return parseComponents({ supported: false, asOfUnixMs: null, overall: 'Unknown', parts: [] });
+      }
+      const part = (kind: string, id: string, state: string, reason: string, ageSeconds: number) => ({ kind, id, state, reason, ageSeconds });
+      const parts =
+        scenario.state === 'off'
+          ? [part('Session', 'session', 'Off', 'Not connected.', 3600)]
+          : scenario.state === 'fail'
+            ? [part('Session', 'session', 'Failed', 'No network path is usable right now.', 12)]
+            : scenario.state === 'probe'
+              ? [part('Session', 'session', 'Starting', 'Testing each connection method.', 2)]
+              : [
+                  part('NetworkPath', 'wi-fi', scenario.state === 'warn' ? 'Degraded' : 'Ok', scenario.state === 'warn' ? 'Lossy: 8% of probes were lost.' : 'Answering.', 95),
+                  part('NetworkPath', 'ethernet', 'Ok', 'Answering.', 95),
+                  part('Session', 'session', 'Ok', 'Carrying traffic.', 94),
+                ];
+      const overall = scenario.state === 'ok' ? 'Ok' : scenario.state === 'warn' ? 'Degraded' : scenario.state === 'fail' ? 'Failed' : scenario.state === 'probe' ? 'Starting' : 'Off';
+      return parseComponents({ supported: true, asOfUnixMs: now(), overall, parts });
     },
 
     async profiles() {
@@ -350,13 +484,19 @@ export function createMockBridge(options: MockOptions = {}): MockController {
         return refuse('`value` must be an address range such as 198.51.100.0/24');
       }
       if (rule.value.trim() === '') return refuse('`value` is not a pattern this kind of rule can match');
-      const precedence = Math.max(199, ...ownRules.map((r) => r.precedence)) + 1;
-      const id = `r${precedence}`;
-      ownRules = [
-        ...ownRules,
-        { id, kind: rule.kind, value: rule.value, precedence, action: rule.action === 'tunnel' ? 'Tunnel' : 'Bypass', reliability: 'Deterministic', builtin: false },
-      ];
-      return { ok: true, id };
+      const add = (): string => {
+        const precedence = Math.max(199, ...ownRules.map((r) => r.precedence)) + 1;
+        const id = `r${precedence}`;
+        ownRules = [
+          ...ownRules,
+          { id, kind: rule.kind, value: rule.value, precedence, action: rule.action === 'tunnel' ? 'Tunnel' : 'Bypass', reliability: 'Deterministic', builtin: false },
+        ];
+        return id;
+      };
+      // Only a rule that sends traffic around the tunnel is held; one that keeps it in can only make things stricter.
+      if (rule.action === 'tunnel') return { ok: true, id: add() };
+      const target = rule.kind === 'domain_suffix' ? `${rule.value} and its subdomains` : rule.value;
+      return applyOrHold(`Sending traffic to ${target} around the tunnel`, add);
     },
     async removeRule(id) {
       const blocked = idleOnly();
@@ -365,22 +505,27 @@ export function createMockBridge(options: MockOptions = {}): MockController {
       ownRules = ownRules.filter((r) => r.id !== id);
       return { ok: true };
     },
-    hold(what: string) {
-      heldCount += 1;
-      const id = `c${heldCount}`;
-      held = [...held, { id, what, expiresUnixMs: now() + 10 * 60 * 1000 }];
-      return id;
-    },
+    hold,
     async pending() {
       return held.map((h) => ({ ...h }));
     },
     async approveChange(id) {
       if (!held.some((h) => h.id === id)) return refuse('no change is waiting under that name');
+      // As the service does: the change is applied, then taken off the list, so a reader never finds it in
+      // neither place. One that cannot be applied now (a connection is up) stays held.
+      const apply = heldApply.get(id);
+      if (apply) {
+        const blocked = idleOnly();
+        if (blocked) return blocked;
+        apply();
+      }
+      heldApply.delete(id);
       held = held.filter((h) => h.id !== id);
       return { ok: true };
     },
     async rejectChange(id) {
       if (!held.some((h) => h.id === id)) return refuse('no change is waiting under that name');
+      heldApply.delete(id);
       held = held.filter((h) => h.id !== id);
       return { ok: true };
     },

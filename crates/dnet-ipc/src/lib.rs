@@ -8,6 +8,7 @@
 pub mod authz;
 pub mod client;
 pub mod componentview;
+pub mod devices;
 pub mod frame;
 pub mod netview;
 pub mod protocol;

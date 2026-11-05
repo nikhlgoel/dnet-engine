@@ -778,6 +778,53 @@ mod tests {
         );
     }
 
+    /// Mutation testing: the move budget's window was only tried well inside and well outside it. A move
+    /// exactly one window old has left it, and the explanation must agree with the decision.
+    #[test]
+    fn a_move_exactly_one_window_old_no_longer_holds_back_a_better_path() {
+        let c = Clock::new();
+        let tight = FailoverConfig {
+            max_moves: 1,
+            min_dwell: Duration::ZERO,
+            ..cfg()
+        };
+        let mut s = FailoverState::carrying_on(id(1), c.at(0));
+        let (next, _) = s.evaluate(&[down(1, 0), poor(2, 0)], c.at(0), &tight);
+        s = next;
+        let paths = [down(1, 0), poor(2, 0), good(3, 0)];
+        let window = tight.window.as_secs();
+        assert_eq!(
+            s.explain_staying(&paths, c.at(window - 1), &tight),
+            NoMove::Budget,
+            "one second inside the window"
+        );
+        assert_eq!(
+            s.explain_staying(&paths, c.at(window), &tight),
+            NoMove::Proving,
+            "exactly one window old has left it"
+        );
+    }
+
+    /// With no usable path left there is nothing to carry, and every timer is cleared: a network that
+    /// comes back is judged on its own evidence, not on a dwell or a bad spell that belonged to a path
+    /// that is gone.
+    #[test]
+    fn losing_every_path_clears_the_dwell_and_the_bad_spell_clocks() {
+        let c = Clock::new();
+        let mut s = FailoverState::carrying_on(id(1), c.at(0));
+        step(&mut s, &[poor(1, 0)], c.at(5));
+        s.moved_at = Some(c.at(5));
+        s.unusable_since = Some(c.at(5));
+        assert!(s.below_good_since.is_some(), "the poor spell has started");
+
+        assert_eq!(step(&mut s, &[down(1, 0)], c.at(20)), Decision::NoPath);
+
+        assert_eq!(s.carrying(), None);
+        assert!(s.moved_at.is_none());
+        assert!(s.below_good_since.is_none());
+        assert!(s.unusable_since.is_none());
+    }
+
     // ------------------------------------------------------------------ weak conditions
 
     /// When every path is poor, as on a weak connection, "no better band" must not mean "stay on

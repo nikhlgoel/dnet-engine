@@ -4,7 +4,17 @@
   import { en, fill } from '../lib/messages';
   import type { PendingView } from '../lib/model';
 
-  let { app }: { app: AppState } = $props();
+  let {
+    app,
+    asked = 0,
+    onsettled,
+  }: {
+    app: AppState;
+    /** Raised by the view each time something it asked for was held, so the list is read again at once. */
+    asked?: number;
+    /** Told after a change is approved or dropped here, so the view can read what that changed. `applied` is true only when it was approved and applied. */
+    onsettled?: (applied: boolean) => void;
+  } = $props();
 
   const t = en.views.pending;
   /** How often the list is read again: a change can be asked for by another program, such as `dnetctl`. */
@@ -15,6 +25,8 @@
   /** The change being approved or dropped now; the others wait their turn. */
   let busy = $state<string | null>(null);
   let approving = $state(false);
+  /** What became of the last change is news when it went through; anything else is a problem and is announced as one. */
+  const calm = $derived(approving || message === t.approved || message === t.dropped);
 
   async function load(): Promise<void> {
     try {
@@ -26,8 +38,13 @@
     }
   }
 
-  onMount(() => {
+  // Read when shown, and again each time the view says it asked for something that was held.
+  $effect(() => {
+    void asked;
     void load();
+  });
+
+  onMount(() => {
     const timer = setInterval(() => void load(), REFRESH_MS);
     return () => clearInterval(timer);
   });
@@ -45,6 +62,7 @@
     busy = null;
     message = outcome.ok ? t.approved : outcome.reason;
     await load();
+    onsettled?.(outcome.ok);
   }
 
   async function drop(item: PendingView): Promise<void> {
@@ -53,10 +71,14 @@
     busy = null;
     message = outcome.ok ? t.dropped : outcome.reason;
     await load();
+    onsettled?.(false);
   }
 </script>
 
-{#if items.length > 0 || message}
+{#if items.length === 0 && message}
+  <!-- Nothing waits any more: only what became of the last change is said, not a card that says things wait. -->
+  <p class="notice" role={calm ? 'status' : 'alert'}>{message}</p>
+{:else if items.length > 0}
   <section class="card pending" aria-labelledby="pending-title">
     <h2 id="pending-title">{t.title}</h2>
     {#if items.length > 0}
@@ -87,7 +109,7 @@
       </ul>
     {/if}
     {#if message}
-      <p class="notice" role={approving ? 'status' : 'alert'}>{message}</p>
+      <p class="notice" role={calm ? 'status' : 'alert'}>{message}</p>
     {/if}
   </section>
 {/if}

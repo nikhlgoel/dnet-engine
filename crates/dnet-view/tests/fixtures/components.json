@@ -1,0 +1,40 @@
+{
+  "asOfUnixMs": 1730000000000,
+  "overall": "Blocked",
+  "parts": [
+    {
+      "ageSeconds": 60,
+      "id": "ethernet",
+      "kind": "NetworkPath",
+      "latencyMs": 12,
+      "lossPermille": 0,
+      "reason": "Answering.",
+      "state": "Ok"
+    },
+    {
+      "ageSeconds": 60,
+      "id": "wi-fi",
+      "kind": "NetworkPath",
+      "latencyMs": 180,
+      "lossPermille": 80,
+      "reason": "Lossy: 8% of probes were lost.",
+      "state": "Degraded"
+    },
+    {
+      "ageSeconds": 60,
+      "id": "session",
+      "kind": "Session",
+      "reason": "Carrying traffic.",
+      "restarts": 0,
+      "state": "Ok"
+    },
+    {
+      "ageSeconds": 60,
+      "id": "portal",
+      "kind": "CaptivePortal",
+      "reason": "A sign-in page is in the way.",
+      "state": "Blocked"
+    }
+  ],
+  "supported": true
+}

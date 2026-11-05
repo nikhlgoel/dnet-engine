@@ -43,6 +43,11 @@
   --hit: 36px; /* smallest interactive target; WCAG 2.5.8 asks for 24 */
   --rail-w: 188px;
   --rail-w-narrow: 56px;
+  --w-view: 760px; /* the content column of every page except Status: one width, so pages line up */
+  --w-field: 144px; /* a short field: a number */
+  --switch-w: 40px; /* the on/off switch */
+  --switch-h: 24px;
+  --dot: 10px; /* a status dot */
 
   /* ---- motion ------------------------------------------------------------------------------ */
   --dur-1: 90ms;

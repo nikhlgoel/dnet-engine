@@ -17,7 +17,7 @@ jobs:
     name: Licence obligations
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
@@ -32,7 +32,7 @@ jobs:
     needs: licence-compliance
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -54,7 +54,7 @@ jobs:
     needs: licence-compliance
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.88
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --all-targets
@@ -66,7 +66,7 @@ jobs:
     needs: licence-compliance
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -90,11 +90,11 @@ jobs:
       run:
         working-directory: apps/dnet-tray
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v5
         with:
           version: 12.4.2
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: pnpm
@@ -114,17 +114,17 @@ jobs:
     needs: ui
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: apps/dnet-tray/src-tauri
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v5
         with:
           version: 12.4.2
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: pnpm
@@ -135,6 +135,8 @@ jobs:
         working-directory: apps/dnet-tray
       - run: cargo fmt --manifest-path apps/dnet-tray/src-tauri/Cargo.toml --check
       - run: cargo clippy --manifest-path apps/dnet-tray/src-tauri/Cargo.toml --all-targets -- -D warnings
+      # The one-tray guard (a per-user named pipe) is tested for real on the runner.
+      - run: cargo test --manifest-path apps/dnet-tray/src-tauri/Cargo.toml
       - run: cargo build --manifest-path apps/dnet-tray/src-tauri/Cargo.toml --release
 
   coverage:
@@ -142,7 +144,7 @@ jobs:
     needs: build-and-test
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
@@ -185,7 +187,7 @@ jobs:
     runs-on: windows-latest
     if: false # enable at T020
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest

@@ -98,8 +98,21 @@ impl Drop for Kill {
     }
 }
 
+/// A port this test can really use: free for TCP and for UDP, on both loopback addresses it uses. Asking only for a free
+/// TCP port is not enough: Windows reserves ranges of UDP ports for itself (Hyper-V and Docker take several, and they
+/// move), and a carrier given one of those cannot bind, which failed this test at random.
 fn free_port() -> u16 {
-    pick_control_port().expect("a free loopback port")
+    use std::net::{TcpListener, UdpSocket};
+    for _ in 0..500 {
+        let port = pick_control_port().expect("a free loopback port");
+        let usable = ["127.0.0.1", CARRIER_HOST].iter().all(|host| {
+            UdpSocket::bind((*host, port)).is_ok() && TcpListener::bind((*host, port)).is_ok()
+        });
+        if usable {
+            return port;
+        }
+    }
+    panic!("no port that is free for both TCP and UDP on the loopback addresses");
 }
 
 fn run(program: &str, args: &[&str], stdin: Option<&[u8]>) -> Vec<u8> {
@@ -438,7 +451,16 @@ async fn the_session_composed_from_the_products_own_generators_carries_a_transfe
         .replace("$REALITY_UUID", REALITY_UUID)
         .replace("$REALITY_PRIVATE", &reality_private)
         .replace("$REALITY_SHORT", REALITY_SHORT)
-        .replace("$SESSION_PRIVATE", &session_private);
+        .replace("$SESSION_PRIVATE", &session_private)
+        // A fresh server's list holds the setup key, at the first address: what the server's own program prints.
+        .replace(
+            "$SESSION_PEERS",
+            &format!(
+                "        {{ \"public_key\": \"{}\", \"allowed_ips\": [ \"{}/32\" ] }}",
+                device.public_b64(),
+                dnet_config::session::session_device_address(0)
+            ),
+        );
     assert!(
         !filled.contains('$'),
         "a variable was left in the configuration"

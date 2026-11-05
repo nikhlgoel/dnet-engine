@@ -288,6 +288,30 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"keep me");
     }
 
+    /// Mutation testing: if the file's own permissions were not what stopped a read, the refusal would come
+    /// from the folder check instead and still be an error, so nothing noticed. The message says which: the
+    /// planted file is named, not its folder.
+    #[test]
+    fn a_planted_file_is_refused_by_name_and_not_blamed_on_its_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, b"planted").unwrap();
+        win::apply_protected_dacl(&path, "D:P(A;;FA;;;WD)").unwrap();
+
+        let err = TrustedFile::new(&path).read().unwrap_err().to_string();
+
+        assert!(err.contains("config.json"), "{err}");
+    }
+
+    /// Only a file that is not there reads as nothing. A path that cannot be opened for any other reason is an
+    /// error: reading "nothing" there would let a failure pass for a clean first start.
+    #[test]
+    fn a_path_that_cannot_be_opened_for_any_reason_but_absence_is_an_error_not_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let read = TrustedFile::new(dir.path()).read();
+        assert!(matches!(read, Err(TrustedFileError::Io(_))), "{read:?}");
+    }
+
     #[test]
     fn a_path_with_no_parent_directory_is_an_error_not_a_panic() {
         let file = TrustedFile::new("");

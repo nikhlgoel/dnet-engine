@@ -59,7 +59,7 @@ run 1.8 "cargo audit"
 run 2.1 "logman create trace DNetEngineAttribution -rt -ets; cargo test -p dnet-etw -- --ignored; logman query DNetEngineAttribution -ets"
 ```
 
-2.2 Control pipe and client: identity and owner checks on a real pipe (admin)
+2.2 Control pipe and client: identity and owner checks on a real pipe (admin or not, but **stop the development service first (4.6)**: these tests use the real pipe's name, so a running `dnetd` answers them and `t039_unprivileged_client_cannot_alter_routing`, `silent_clients_are_let_go_...`, `t125_...` and `session_e2e` fail)
 ```powershell
 run 2.2 "cargo test -p dnet-ipc; cargo test -p dnetctl"
 ```
@@ -132,7 +132,7 @@ run 4.6 "taskkill /im dnetd.exe /f"
 
 5.1 Add, list and remove a rule through dnetctl, with the service from 4.2 running (admin)
 ```powershell
-run 5.1 ".\target\debug\dnetctl.exe rules; .\target\debug\dnetctl.exe add-rule --suffix example.com --bypass; .\target\debug\dnetctl.exe rules; .\target\debug\dnetctl.exe add-rule --cidr 198.18.0.0/16 --tunnel; .\target\debug\dnetctl.exe --json rules"
+run 5.1 ".\target\debug\dnetctl.exe rules; .\target\debug\dnetctl.exe add-rule --suffix example.com --bypass; .\target\debug\dnetctl.exe rules; .\target\debug\dnetctl.exe add-rule --cidr 203.0.113.0/24 --tunnel; .\target\debug\dnetctl.exe --json rules"
 ```
 
 5.2 Remove the rule added in 5.1 (replace <id> with the RULE column from 5.1)
@@ -159,7 +159,17 @@ run 6.2 "cargo clippy -p dnetd -p xtask --all-targets -- -D warnings; cargo run 
 
 ## 7. New: the installer (T114). Sections 7.3 onwards on a Windows 11 VM with a snapshot
 
-7.1 Stage the payload (needs 1.1 done once; verifies, builds release `dnetd`/`dnetctl`, copies)
+**7.0 Install it on this PC (owner's decision 2026-11-04; one script, admin).** Sections 7.3 to 7.8 below are what the script does, with its own checks, so run this instead of typing them. It never connects to anything, so your network is not touched except by the installer itself; the uninstaller's rule is to restore the network or refuse to remove the service, and step 9 checks that from outside. Before: quit the tray from its icon, stop a development service (`taskkill /im dnetd.exe /f`), and (optional) make a restore point: `Checkpoint-Computer -Description 'before DNet Engine install test' -RestorePointType MODIFY_SETTINGS` (works only if System Protection is on).
+```powershell
+run 7.0 "powershell -NoProfile -ExecutionPolicy Bypass -File testing\Invoke-InstallTest.ps1 -KeepInstalled"
+```
+It stops with the program installed so you can open the window (Start menu or tray) and look at the frame, Servers, Rules and Activity. Then finish (uninstall, and compare the network):
+```powershell
+run 7.0b "powershell -NoProfile -ExecutionPolicy Bypass -File testing\Invoke-InstallTest.ps1 -UninstallOnly"
+```
+7.5 to 7.7 and 7.10 (connect, restart, crash, sleep) need an endpoint and wait for the real server. 7.9 needs a second, ordinary user.
+
+7.1 Stage the payload (needs 1.1 and 8.3 done once: 8.3 writes `target\server-cores\server-pins.json`, which the installer ships; verifies, builds release `dnetd`/`dnetctl`, copies)
 ```powershell
 run 7.1 "cargo run -p xtask -- stage-installer"
 ```
@@ -241,6 +251,15 @@ run 8.5 "cargo run -p dnet-provision --example dump_script -- target\server-core
 
 8.6 Then follow `docs/owner-gates.md` section "T149-T151": the window's guide, on a real Oracle account.
 
+8.7 The firewall we put on the server, run against real iptables in a throwaway container (needs Docker; changes only the container; takes a minute or two). It shows first that an open firewall lets everything through, then what the script lets through and refuses. Why each rule is there: `docs/security/server-firewall.md`.
+```powershell
+run 8.7 "powershell -File testing\server-firewall\Invoke-ServerFirewallCheck.ps1"
+```
+Again on the older kind of iptables that many cloud images still have (IPv6 is skipped if the kernel cannot do it):
+```powershell
+run 8.7b "powershell -File testing\server-firewall\Invoke-ServerFirewallCheck.ps1 -Mode legacy"
+```
+
 ## 9. New: network cost and the server's measurement origin (T153, T154)
 
 9.1 The new tests (the origin test runs python; the checks tests open local sockets)
@@ -271,7 +290,7 @@ If you just installed Go, open a new terminal first, so it is on the path (`go v
 Everything here only reads, or runs tests; nothing changes your network. 10.4 ends the development service.
 Where a command talks to the service it uses the development build: run 4.1 first, and 4.2 (admin) to start the new service.
 A service started earlier is the old build and does not know these commands.
-After each command, tell me the numbers (or just say "done"): I read `.local-logs\<number>.log` myself.
+After each command, its full output is in `.local-logs\<number>.log`.
 
 10.1 Rebuild the cores with the new build tags (needs Go; a few minutes; the first run after pulling)
 ```powershell
@@ -318,9 +337,25 @@ Then approve it yourself, in the same window: `dnetctl approve <id>` opens a sec
 ```powershell
 run 10.9 ".\target\debug\dnetctl.exe pending; .\target\debug\dnetctl.exe endpoints"
 ```
-The server should now be listed and nothing waiting. Remove it afterwards with `dnetctl remove-endpoint <id>` (removing needs no approval).
+The server should now be listed and nothing waiting. Keep it for 10.11, then remove it with `dnetctl remove-endpoint <uuid>` (removing needs no approval; the uuid, not the name, is in `dnetctl --json endpoints`).
 
 10.10 A made-up id is refused by both commands, and nothing is waiting (nothing to click)
 ```powershell
 run 10.10 ".\target\debug\dnetctl.exe approve zz99; .\target\debug\dnetctl.exe reject zz99; .\target\debug\dnetctl.exe pending"
 ```
+
+10.11 A change that could not be made is refused at once, with no Windows prompt (no admin; nothing to click; needs `uactest` from 10.9 still listed). The same name again must be refused with "an endpoint with that label already exists", and nothing may be waiting
+```powershell
+run 10.11 ".\target\debug\dnetctl.exe add-endpoint uactest --host <ip> --credentials-file <file>; .\target\debug\dnetctl.exe pending"
+```
+
+10.12 The same in the window (no admin; one Windows prompt). Approve starts `dnetctl.exe` from the folder the window runs in, so for a development window first copy it there: `Copy-Item target\debug\dnetctl.exe apps\dnet-tray\src-tauri\target\debug\ -Force` (the installed program has them side by side). Open the window, Servers, "Add a server you already have": a new name, `<ip>`, the file, "Add server". The page must say "The new server waits for your approval above" with no red error, and list it under "Waiting for your approval". Press Approve, answer Windows, type `yes`: the server appears in the list and the notice goes away. Nothing to log: tell me what you saw, and remove the server afterwards.
+
+## 11. Lab check: does the core match a rule by program on Windows? (not runnable yet)
+
+This decides whether the core's own matching can serve rules by program (an ADR-0001 decision for the owner). The Linux build accepts the core's
+program-matching setting either way, so only Windows can answer. **There is nothing to run yet:** `dnetctl add-rule` has no program option and the service
+refuses program rules on purpose, so a command here would only show the refusal. The cloud session's next step, if the owner agrees, is a test-first,
+development-only switch (`dnetd --console --allow-program-rules`, refused for the installed service) that lets one program rule reach the core's
+configuration with its `find_process` option on, plus `dnetctl add-rule --program`. Then this section gets its commands: connect, note the public address
+`curl.exe` sees, add a bypass rule for `curl.exe`, and compare. **Pass:** with the rule `curl.exe` shows your own address while a browser still shows the server's.

@@ -227,13 +227,26 @@ impl ServerSetup {
 /// script was given, read off the script the way the server would. For the tests that fake a server.
 #[cfg(test)]
 pub(crate) fn session_printed_by(script: &str) -> serde_json::Value {
-    let devices = script
-        .split("\"devices\": [")
-        .nth(1)
-        .and_then(|rest| rest.split("]},").next())
-        .map(|list| serde_json::from_str::<serde_json::Value>(&format!("[{list}]")))
-        .expect("the script lists its devices")
-        .expect("the devices are JSON");
+    // A new server's list is made from the keys the script hands to `dnet-devices sync`, each at the address its
+    // place gives it.
+    let keys: Vec<&str> = script
+        .lines()
+        .find(|l| l.contains("dnet-devices\" sync "))
+        .expect("the script gives its devices to the server's list")
+        .split('\'')
+        .skip(1)
+        .step_by(2)
+        .collect();
+    let devices: Vec<serde_json::Value> = keys
+        .iter()
+        .enumerate()
+        .map(|(i, key)| {
+            serde_json::json!({
+                "address": dnet_config::session::session_device_address(i).to_string(),
+                "public_key": key,
+            })
+        })
+        .collect();
     serde_json::json!({
         "server_public_key": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=",
         "port": 25182,

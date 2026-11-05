@@ -2,13 +2,16 @@
   import { onMount } from 'svelte';
   import type { AppState } from '../lib/app.svelte';
   import Consent from '../components/Consent.svelte';
+  import DisconnectNote from '../components/DisconnectNote.svelte';
   import PendingChanges from '../components/PendingChanges.svelte';
-  import { en } from '../lib/messages';
+  import { en, fill } from '../lib/messages';
   import type { EndpointView } from '../lib/model';
 
   let { app }: { app: AppState } = $props();
 
   const t = en.views.endpoints;
+  /** The lamp for what the service found out about a server; nothing is shown as fine that was not checked. */
+  const lamp: Record<EndpointView['health'], string> = { Unknown: '', Healthy: 'ok', Degraded: 'warn', Unreachable: 'fail' };
   let list = $state<EndpointView[]>([]);
   let adding = $state(false);
   let removing = $state<EndpointView | null>(null);
@@ -18,6 +21,9 @@
   let credentials = $state('');
   let busy = $state(false);
   let failedToLoad = $state(false);
+  /** What this view asked for waits for the person's approval (T160), in words: which, if any. How many times it has asked. */
+  let held = $state<string | null>(null);
+  let asked = $state(0);
 
   // Endpoints change only while disconnected: the engine and what it drives were built from the endpoints of
   // the moment. The buttons say so instead of being refused after the fact.
@@ -63,14 +69,30 @@
     if (outcome.ok) {
       close();
       await load();
+    } else if (outcome.code === 'ApprovalRequired') {
+      // Not refused: the service holds the server, with the details from the file, until the person approves it
+      // in the list above. The form's copy of the file is dropped now, as on success.
+      close();
+      held = t.held;
+      asked += 1;
     } else {
       error = outcome.reason;
     }
   }
 
+  /** A waiting change was approved or dropped in the list: the servers are read again. */
+  async function settled(): Promise<void> {
+    held = null;
+    await load();
+  }
+
   async function toggle(e: EndpointView): Promise<void> {
     const outcome = await app.bridge.setEndpointEnabled(e.id, !e.enabled);
-    error = outcome.ok ? null : outcome.reason;
+    // Turning a server on that is held for approval was not refused: it waits in the list above (T160).
+    const waits = !outcome.ok && outcome.code === 'ApprovalRequired';
+    error = outcome.ok || waits ? null : outcome.reason;
+    held = waits ? t.heldOn : null;
+    if (waits) asked += 1;
     await load();
   }
 
@@ -85,34 +107,63 @@
 </script>
 
 <section class="view" aria-labelledby="endpoints-title">
-  <h1 id="endpoints-title">{t.title}</h1>
+  <div class="head-row">
+    <h1 id="endpoints-title">{t.title}</h1>
+    {#if !adding}
+      <div class="actions">
+        <button
+          type="button"
+          class="btn primary"
+          disabled={locked}
+          onclick={() => {
+            adding = true;
+            held = null;
+          }}>{t.add}</button
+        >
+        <button type="button" class="btn" disabled={locked} onclick={() => app.go('wizard')}>{t.setup}</button>
+        <button type="button" class="btn" disabled={locked} onclick={() => app.go('join')}>{t.join}</button>
+      </div>
+    {/if}
+  </div>
 
   <p class="lede">{t.lede}</p>
 
-  <PendingChanges {app} />
+  <PendingChanges {app} {asked} onsettled={settled} />
 
+  {#if held}
+    <p class="notice" role="status">{held}</p>
+  {/if}
   {#if locked}
-    <p class="notice">{en.errors.disconnectFirst}</p>
+    <DisconnectNote {app} />
   {/if}
   {#if error}
     <p class="notice" role="alert">{error}</p>
   {/if}
 
   {#if list.length === 0 && !failedToLoad}
-    <p class="empty">{t.empty}</p>
+    <div class="panel"><p class="empty row">{t.empty}</p></div>
   {:else if failedToLoad}
     <!-- The reason is above; there is no list to show. -->
   {:else}
-    <ul class="list">
+    <ul class="panel" aria-label={t.title}>
       {#each list as e (e.id)}
-        <li class="card">
-          <div class="head">
-            <strong class="disp">{e.label}</strong>
-            <span class="state">{e.enabled ? t.enabled : t.disabled}</span>
+        <li class="row">
+          <span class={`dot ${lamp[e.health]}`} aria-hidden="true"></span>
+          <div class="text">
+            <strong class="disp title">{e.label}</strong>
+            <span class="desc"><span class="num">{e.address}</span> · {t.health[e.health]}</span>
           </div>
-          <p class="num addr">{e.address}</p>
-          <p class="health">{t.health[e.health]}</p>
+          <span class="chip" class:ok={e.enabled}>{e.enabled ? t.enabled : t.disabled}</span>
           <div class="actions">
+            <button
+              type="button"
+              class="btn"
+              aria-label={fill(t.addDeviceLabel, { server: e.label })}
+              onclick={() => {
+                app.inviteFor = e.id;
+                app.go('invite');
+              }}>{t.addDevice}</button
+            >
             <button type="button" class="btn" disabled={locked} onclick={() => toggle(e)}>
               {e.enabled ? t.disable : t.enable}
             </button>
@@ -145,11 +196,6 @@
         <button type="button" class="btn" onclick={close}>{t.form.cancel}</button>
       </div>
     </form>
-  {:else}
-    <div class="actions">
-      <button type="button" class="btn primary" disabled={locked} onclick={() => (adding = true)}>{t.add}</button>
-      <button type="button" class="btn" disabled={locked} onclick={() => app.go('wizard')}>{t.setup}</button>
-    </div>
   {/if}
 </section>
 
@@ -165,36 +211,30 @@
 />
 
 <style>
-  .list {
-    display: grid;
-    gap: var(--s-3);
-  }
-
-  .head {
-    display: flex;
-    justify-content: space-between;
-    align-items: baseline;
-    gap: var(--s-3);
-  }
-
-  .state,
-  .health {
-    color: var(--c-text-2);
-    font-size: var(--fs-sm);
-  }
-
-  .addr {
-    font-size: var(--fs-sm);
-  }
-
   .actions {
     display: flex;
     gap: var(--s-3);
     flex-wrap: wrap;
   }
 
+  .row .actions {
+    flex: none;
+    flex-wrap: nowrap;
+  }
+
+  .row .chip {
+    flex: none;
+  }
+
   .form {
     gap: var(--s-4);
-    max-width: 520px;
+  }
+
+  /* A narrow window: the state and the actions go under the name instead of squeezing it. */
+  @media (max-width: 640px) {
+    .row {
+      flex-wrap: wrap;
+      gap: var(--s-3);
+    }
   }
 </style>
