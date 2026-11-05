@@ -16,7 +16,7 @@ use dnet_core::session::ConnectionEvent;
 use dnet_ipc::authz::ConsoleSession;
 use dnet_ipc::frame;
 use dnet_ipc::protocol::{IpcError, Request};
-use dnet_ipc::server::{accept_one, PIPE_NAME};
+use dnet_ipc::server::accept_one_on;
 use dnet_ipc::service::Service;
 use dnet_ipc::wire::{EventBus, Subscription};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -54,9 +54,14 @@ async fn read_frame(client: &mut NamedPipeClient) -> serde_json::Value {
     }
 }
 
-async fn connect_client() -> NamedPipeClient {
+/// A pipe name of this test's own (the real one belongs to an installed service, if there is one).
+fn pipe_name() -> String {
+    format!(r"\\.\pipe\DNetEngine\test-stream-{}", std::process::id())
+}
+
+async fn connect_client(name: &str) -> NamedPipeClient {
     for _ in 0..50 {
-        if let Ok(client) = ClientOptions::new().open(PIPE_NAME) {
+        if let Ok(client) = ClientOptions::new().open(name) {
             return client;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -70,9 +75,12 @@ async fn t125_a_real_client_subscribes_and_receives_the_session_then_live_events
         bus: EventBus::new(),
     });
     service.bus.publish(&ConnectionEvent::ProbeStarted).unwrap();
-    let server = tokio::spawn(accept_one(Arc::clone(&service) as Arc<dyn Service>));
+    let name = pipe_name();
+    let served = name.clone();
+    let for_server = Arc::clone(&service) as Arc<dyn Service>;
+    let server = tokio::spawn(async move { accept_one_on(&served, for_server).await });
 
-    let mut client = connect_client().await;
+    let mut client = connect_client(&name).await;
     let subscribe = frame::encode(r#"{"request":"Subscribe"}"#).unwrap();
     client.write_all(&subscribe).await.unwrap();
 

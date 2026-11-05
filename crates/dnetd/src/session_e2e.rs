@@ -98,8 +98,21 @@ impl Drop for Kill {
     }
 }
 
+/// A port this test can really use: free for TCP and for UDP, on both loopback addresses it uses. Asking only for a free
+/// TCP port is not enough: Windows reserves ranges of UDP ports for itself (Hyper-V and Docker take several, and they
+/// move), and a carrier given one of those cannot bind, which failed this test at random.
 fn free_port() -> u16 {
-    pick_control_port().expect("a free loopback port")
+    use std::net::{TcpListener, UdpSocket};
+    for _ in 0..500 {
+        let port = pick_control_port().expect("a free loopback port");
+        let usable = ["127.0.0.1", CARRIER_HOST].iter().all(|host| {
+            UdpSocket::bind((*host, port)).is_ok() && TcpListener::bind((*host, port)).is_ok()
+        });
+        if usable {
+            return port;
+        }
+    }
+    panic!("no port that is free for both TCP and UDP on the loopback addresses");
 }
 
 fn run(program: &str, args: &[&str], stdin: Option<&[u8]>) -> Vec<u8> {

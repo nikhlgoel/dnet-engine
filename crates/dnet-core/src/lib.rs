@@ -14,6 +14,8 @@ pub mod doh_consent;
 pub mod endpoint;
 pub mod endpoint_health;
 pub mod engine;
+#[cfg(test)]
+mod engine_sequences;
 pub mod error;
 pub mod failover;
 pub mod failure;
