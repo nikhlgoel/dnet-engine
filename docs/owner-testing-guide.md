@@ -123,6 +123,7 @@ Run these and tell me the numbers; I read the logs.
   `Test-NetConnection <server-ip> -Port 8443` should succeed; a scan of other ports should show closed or filtered.
 - On the server: `journalctl -u dnet-net` (the firewall service log), `systemctl list-timers` shows
   `dnet-keepalive.timer` and `dnet-housekeeping.timer`, `journalctl --disk-usage` under 100 MB.
+- **A crashed transport program comes back (T182).** With the connection on, in an elevated PowerShell run `Stop-Process -Name primary-core -Force`. Within a few seconds the window should show it starting again and then connected, and Activity should say the transport program stopped on its own and was started again (restart 1 of 2). Do it a third time within five minutes: it should stop restarting, treat the profile as blocked and try the others. Tell me what you saw.
 - Measure throughput through the tunnel with a large download from the server's origin; write it next to the shape used.
 - After a week idle, check the server is still running. If Oracle reclaimed it, tell me when.
 

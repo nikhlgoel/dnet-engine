@@ -7,6 +7,7 @@
 
 pub mod builtin_rules;
 pub mod catalogue;
+pub mod crash;
 pub mod credential;
 pub mod degraded;
 pub mod doh_block;

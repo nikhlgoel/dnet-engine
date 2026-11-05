@@ -115,7 +115,9 @@ fn natural(rng: &mut Rng, phase: &Phase) -> Input {
                 Input::StartFailed(FailureCause::NoEndpointReachable)
             }
         }
-        // Mostly failing checks: three in a row is a block, which is the road to Recovering.
+        // Mostly failing checks: three in a row is a block, which is the road to Recovering. Now and then the
+        // transport process exits instead (T182): restarted twice, and the third is the other road to Recovering.
+        Phase::Connected { .. } if rng.chance(15) => core_exited(rng),
         Phase::Connected { .. } => Input::LiveCheck(if rng.chance(70) {
             crate::reprobe::LiveCheck::Failed
         } else {
@@ -124,11 +126,18 @@ fn natural(rng: &mut Rng, phase: &Phase) -> Input {
     }
 }
 
+fn core_exited(rng: &mut Rng) -> Input {
+    Input::CoreExited {
+        code: rng.chance(60).then(|| rng.below(256) as i32),
+    }
+}
+
 fn input(rng: &mut Rng, endpoints: &[EndpointId], phase: &Phase) -> Input {
     if rng.chance(55) {
         return natural(rng, phase);
     }
-    match rng.below(14) {
+    match rng.below(15) {
+        13 => core_exited(rng),
         0 | 1 => Input::Connect {
             profile: rng.chance(35).then(|| profile_id(rng)),
         },

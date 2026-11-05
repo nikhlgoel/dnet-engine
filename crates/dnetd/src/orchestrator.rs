@@ -168,6 +168,14 @@ enum Msg {
         attempt: u64,
         input: Input,
     },
+    /// A transport process has just been seen to exit on its own (T182). Not tied to an attempt: the watcher
+    /// reports only the moment a process turns from running to exited (and looks again once a connection is up),
+    /// so a lingering reading does not repeat. A report can still wait a moment in the queue, behind a
+    /// disconnect and a reconnect; the engine acts on it only if it is connected, which in that rare case it could
+    /// not tell from a real exit, and the cost is one extra restart from a budget of two.
+    CoreExited {
+        code: Option<i32>,
+    },
 }
 
 struct Work {
@@ -377,10 +385,19 @@ pub fn spawn<E: Effects>(engine: Engine, effects: Arc<E>, bus: EventBus, timing:
         message_tx.clone(),
         timing,
     ));
-    tokio::spawn(watch_cores(Arc::downgrade(&effects), telemetry.clone()));
+    // Set by the actor whenever a connection comes up: the watcher then forgets what it last saw, so a process that
+    // is already dead at that moment is news and not a reading it had already reported (T182).
+    let rewatch = Arc::new(AtomicBool::new(false));
+    tokio::spawn(watch_cores(
+        Arc::downgrade(&effects),
+        telemetry.clone(),
+        message_tx.clone(),
+        Arc::clone(&rewatch),
+    ));
     let actor = Actor {
         engine,
         effects,
+        rewatch,
         bus,
         timing,
         work: work_tx,
@@ -406,16 +423,53 @@ const CORE_WATCH_EVERY: Duration = Duration::from_secs(1);
 
 /// Publish what the effects say about the transport processes, once a second, until the effects are gone. It holds
 /// them weakly, so it never keeps a replaced orchestrator's effects alive.
-async fn watch_cores<E: Effects>(effects: std::sync::Weak<E>, telemetry: Telemetry) {
+async fn watch_cores<E: Effects>(
+    effects: std::sync::Weak<E>,
+    telemetry: Telemetry,
+    messages: mpsc::Sender<Msg>,
+    rewatch: Arc<AtomicBool>,
+) {
     let mut tick = tokio::time::interval(CORE_WATCH_EVERY);
+    let mut previous: Vec<(CoreBinding, CoreHealth)> = Vec::new();
     loop {
         tick.tick().await;
         let Some(effects) = effects.upgrade() else {
             telemetry.publish_cores(Vec::new());
             return;
         };
-        telemetry.publish_cores(effects.core_health().await);
+        let current = effects.core_health().await;
+        // A connection has just come up: whatever was reported while it was starting was ignored, so what is
+        // dead now is news.
+        if rewatch.swap(false, Ordering::SeqCst) {
+            previous.clear();
+        }
+        // Told once, at the moment it happens (T182); what the engine does about it depends on its phase.
+        if let Some(code) = newly_exited(&previous, &current) {
+            if messages.send(Msg::CoreExited { code }).await.is_err() {
+                return;
+            }
+        }
+        telemetry.publish_cores(current.clone());
+        previous = current;
     }
+}
+
+/// The exit code (if it left one) of a transport process that has exited since `previous` was read, or `None` when
+/// none has. Only the change counts: a process that was already seen exited, or that is gone, is nothing new, so a
+/// reading that lingers after a restart can never cause a second one.
+fn newly_exited(
+    previous: &[(CoreBinding, CoreHealth)],
+    current: &[(CoreBinding, CoreHealth)],
+) -> Option<Option<i32>> {
+    current.iter().find_map(|(core, health)| {
+        let CoreHealth::Exited { code } = health else {
+            return None;
+        };
+        let already = previous
+            .iter()
+            .any(|(c, h)| c == core && matches!(h, CoreHealth::Exited { .. }));
+        (!already).then_some(*code)
+    })
 }
 
 // ------------------------------------------------------------------ the actor
@@ -423,6 +477,8 @@ async fn watch_cores<E: Effects>(effects: std::sync::Weak<E>, telemetry: Telemet
 struct Actor<E: Effects> {
     engine: Engine,
     effects: Arc<E>,
+    /// See `spawn`: raised when a connection comes up, for the core watcher.
+    rewatch: Arc<AtomicBool>,
     bus: EventBus,
     timing: Timing,
     work: mpsc::UnboundedSender<Work>,
@@ -464,6 +520,7 @@ impl<E: Effects> Actor<E> {
                         tracing::debug!(attempt, current = self.attempt, "dropped a stale report");
                     }
                 }
+                Msg::CoreExited { code } => self.step(Input::CoreExited { code }, false),
             }
             self.publish_state();
             if was_connect {
@@ -486,6 +543,10 @@ impl<E: Effects> Actor<E> {
     /// reachability check ahead of the step's other work: the engine wants it before a race result.
     fn step(&mut self, input: Input, check_reach: bool) {
         let was_connected = matches!(self.engine.phase(), Phase::Connected { .. });
+        // A transport process that died is stopped and started for real. A live move answers "already on that
+        // carrier" without looking at the process, so folding the pair into one would announce a restart and do
+        // nothing (T182 review).
+        let is_restart = matches!(input, Input::CoreExited { .. });
         let actions = self.engine.step(input, now());
 
         let mut work = Vec::new();
@@ -511,7 +572,7 @@ impl<E: Effects> Actor<E> {
             }
         }
 
-        let mut work = fold_moves(work);
+        let mut work = if is_restart { work } else { fold_moves(work) };
         if !work.is_empty() {
             // Everything this step starts shares one attempt number; whatever the previous step
             // started is now stale.
@@ -534,6 +595,7 @@ impl<E: Effects> Actor<E> {
         }
         if !was_connected {
             if let Phase::Connected { profile, endpoint } = self.engine.phase().clone() {
+                self.rewatch.store(true, Ordering::SeqCst);
                 self.telemetry.begin_session(now());
                 self.start_monitor(profile.clone(), endpoint);
                 self.start_path_watch(&profile, endpoint);
@@ -902,6 +964,8 @@ mod tests {
         watch: Mutex<Option<TestWatch>>,
         /// Whether a live move of the connection succeeds.
         movable: AtomicBool,
+        /// The next process started dies while its tunnel is still being started (T182).
+        dies_during_start: AtomicBool,
     }
 
     /// A watch: the machine says which adapter carries the tunnel. By default it only follows; one
@@ -997,6 +1061,7 @@ mod tests {
                 failing_endpoint: Mutex::new(None),
                 watch: Mutex::new(None),
                 movable: AtomicBool::new(false),
+                dies_during_start: AtomicBool::new(false),
             })
         }
         fn record(&self, call: impl Into<String>) {
@@ -1055,6 +1120,19 @@ mod tests {
             _endpoint: EndpointId,
         ) -> Result<(), FailureCause> {
             self.record(format!("start[{profile}]"));
+            // A new process replaces whatever was said about the old one, as the real runtime's map does; one
+            // that dies while it starts is exited from the first moment.
+            {
+                let died = self.dies_during_start.swap(false, Ordering::SeqCst);
+                let mut cores = self.cores.lock().unwrap();
+                for (_, health) in cores.iter_mut() {
+                    *health = if died {
+                        dnet_supervisor::runtime::CoreHealth::Exited { code: Some(3) }
+                    } else {
+                        dnet_supervisor::runtime::CoreHealth::Running
+                    };
+                }
+            }
             let delay = *self.start_delay.lock().unwrap();
             tokio::time::sleep(delay).await;
             self.tunnels.lock().unwrap().pop_front().unwrap_or(Ok(()))
@@ -2196,6 +2274,172 @@ mod tests {
         r.script.cores.lock().unwrap().clear();
         tokio::time::sleep(Duration::from_millis(1500)).await;
         assert!(r.handle.cores().is_empty());
+    }
+
+    // ---------------------------------------------------------------------------- a core that exits (T182)
+
+    #[test]
+    fn only_the_moment_a_core_turns_from_running_to_exited_is_reported() {
+        use dnet_core::profile::CoreBinding::{AmneziaWgCore as AmneziaWg, PrimaryCore};
+        use dnet_supervisor::runtime::CoreHealth::{Exited, Running, Unknown};
+        let exited = |code| Exited { code };
+        // The edge, with its exit code (or none).
+        assert_eq!(
+            newly_exited(
+                &[(PrimaryCore, Running)],
+                &[(PrimaryCore, exited(Some(139)))]
+            ),
+            Some(Some(139))
+        );
+        assert_eq!(
+            newly_exited(&[(PrimaryCore, Running)], &[(PrimaryCore, exited(None))]),
+            Some(None)
+        );
+        // Still exited, never running, or gone: nothing new, so a stale reading cannot restart anything twice.
+        assert_eq!(
+            newly_exited(
+                &[(PrimaryCore, exited(Some(1)))],
+                &[(PrimaryCore, exited(Some(1)))]
+            ),
+            None
+        );
+        assert_eq!(
+            newly_exited(&[(PrimaryCore, Running)], &[(PrimaryCore, Running)]),
+            None
+        );
+        assert_eq!(newly_exited(&[(PrimaryCore, exited(Some(1)))], &[]), None);
+        assert_eq!(
+            newly_exited(&[(PrimaryCore, Running)], &[(PrimaryCore, Unknown)]),
+            None
+        );
+        // A core first seen already exited is news; one that stays exited beside another that just exited is not.
+        assert_eq!(
+            newly_exited(&[], &[(PrimaryCore, exited(Some(2)))]),
+            Some(Some(2))
+        );
+        assert_eq!(
+            newly_exited(
+                &[(PrimaryCore, exited(Some(1))), (AmneziaWg, Running)],
+                &[(PrimaryCore, exited(Some(1))), (AmneziaWg, exited(Some(7)))]
+            ),
+            Some(Some(7))
+        );
+        // The same core restarted and exiting again is a new edge.
+        let restarted = [(PrimaryCore, Running)];
+        assert_eq!(
+            newly_exited(&restarted, &[(PrimaryCore, exited(Some(1)))]),
+            Some(Some(1))
+        );
+    }
+
+    fn starts_of(calls: &[String], profile: &str) -> usize {
+        let wanted = format!("start[{profile}]");
+        calls.iter().filter(|c| **c == wanted).count()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_transport_process_that_exits_while_connected_is_started_again_without_being_called_blocked(
+    ) {
+        use dnet_core::profile::CoreBinding::PrimaryCore;
+        use dnet_supervisor::runtime::CoreHealth::{Exited, Running};
+        let script = Script::new();
+        // A live move would answer "already on that carrier" without looking at the process, which is exactly what
+        // must not happen to a process that has died: a restart is a real stop and a real start, never a move.
+        script.movable.store(true, Ordering::SeqCst);
+        script
+            .races
+            .lock()
+            .unwrap()
+            .push_back(Some(selected("hy2-default")));
+        let rig = rig_with(script, vec![endpoint("only")]);
+        rig.handle.connect(None).unwrap();
+        until(&rig.handle, |s| s.status == ConnectionStatus::Connected).await;
+        *rig.script.cores.lock().unwrap() = vec![(PrimaryCore, Running)];
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert_eq!(starts_of(&rig.script.calls(), "hy2-default"), 1);
+
+        *rig.script.cores.lock().unwrap() = vec![(PrimaryCore, Exited { code: Some(139) })];
+        tokio::time::sleep(Duration::from_millis(3000)).await;
+        until(&rig.handle, |s| s.status == ConnectionStatus::Connected).await;
+
+        let calls = rig.script.calls();
+        assert_eq!(starts_of(&calls, "hy2-default"), 2, "{calls:?}");
+        assert!(calls.iter().any(|c| c == "stop"), "a real stop: {calls:?}");
+        assert!(
+            !calls.iter().any(|c| c.starts_with("move")),
+            "a restart is never asked of the live-move path: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|c| c.starts_with("start[reality")),
+            "no other profile is tried: {calls:?}"
+        );
+    }
+
+    /// The watcher reports a process at the moment it dies. If that is while the tunnel is still starting, the
+    /// engine (not yet connected) ignores it, and it must not be lost for good: once the connection is up the
+    /// watcher looks again, so a tunnel never sits "connected" on a dead process (T182 review).
+    #[tokio::test(start_paused = true)]
+    async fn a_process_that_died_while_its_tunnel_was_starting_is_found_once_connected_and_restarted(
+    ) {
+        use dnet_core::profile::CoreBinding::PrimaryCore;
+        use dnet_supervisor::runtime::CoreHealth::Running;
+        let script = Script::new();
+        script.dies_during_start.store(true, Ordering::SeqCst);
+        *script.start_delay.lock().unwrap() = Duration::from_millis(2500);
+        *script.cores.lock().unwrap() = vec![(PrimaryCore, Running)];
+        script
+            .races
+            .lock()
+            .unwrap()
+            .push_back(Some(selected("hy2-default")));
+        let rig = rig_with(script, vec![endpoint("only")]);
+        rig.handle.connect(None).unwrap();
+        until(&rig.handle, |s| s.status == ConnectionStatus::Connected).await;
+        // Time for the watcher to look again and the restart to run (a start takes 2.5 s here).
+        tokio::time::sleep(Duration::from_millis(6000)).await;
+        until(&rig.handle, |s| s.status == ConnectionStatus::Connected).await;
+
+        let calls = rig.script.calls();
+        assert_eq!(starts_of(&calls, "hy2-default"), 2, "{calls:?}");
+        assert_eq!(
+            rig.handle.cores(),
+            vec![(PrimaryCore, Running)],
+            "the new process is the one that is shown"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_transport_process_that_keeps_exiting_is_given_up_on_after_two_restarts() {
+        use dnet_core::profile::CoreBinding::PrimaryCore;
+        use dnet_supervisor::runtime::CoreHealth::{Exited, Running};
+        let script = Script::new();
+        script
+            .races
+            .lock()
+            .unwrap()
+            .push_back(Some(selected("hy2-default")));
+        let rig = rig_with(script, vec![endpoint("only")]);
+        rig.handle.connect(None).unwrap();
+        until(&rig.handle, |s| s.status == ConnectionStatus::Connected).await;
+
+        for round in 1..=3 {
+            *rig.script.cores.lock().unwrap() = vec![(PrimaryCore, Running)];
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            *rig.script.cores.lock().unwrap() = vec![(PrimaryCore, Exited { code: Some(1) })];
+            tokio::time::sleep(Duration::from_millis(3000)).await;
+            if round < 3 {
+                until(&rig.handle, |s| s.status == ConnectionStatus::Connected).await;
+            }
+        }
+
+        let calls = rig.script.calls();
+        // The first start and two restarts; the third exit is not restarted.
+        assert_eq!(starts_of(&calls, "hy2-default"), 3, "{calls:?}");
+        assert_ne!(
+            rig.handle.snapshot().status,
+            ConnectionStatus::Connected,
+            "{calls:?}"
+        );
     }
 
     #[tokio::test(start_paused = true)]

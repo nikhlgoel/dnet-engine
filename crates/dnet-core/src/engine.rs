@@ -37,6 +37,7 @@
 
 use std::time::Instant;
 
+use crate::crash::{CrashDecision, CrashTracker, CRASH_WINDOW, RESTARTS_ALLOWED};
 use crate::degraded::Change;
 use crate::endpoint::Endpoint;
 use crate::endpoint_health::rank;
@@ -120,6 +121,13 @@ pub enum Input {
     StartFailed(FailureCause),
     /// A periodic check of the carrying profile.
     LiveCheck(LiveCheck),
+    /// A transport process exited on its own while connected (T182). Not a `LiveCheck`: that would mark the
+    /// profile blocked, and a crash is not a block. It is started again up to [`RESTARTS_ALLOWED`] times; one
+    /// more in [`CRASH_WINDOW`] is judged a block. Ignored in every other phase (while starting, the tunnel's
+    /// own failure arrives as `StartFailed`).
+    CoreExited {
+        code: Option<i32>,
+    },
     /// One health probe of an endpoint.
     EndpointProbe {
         endpoint: EndpointId,
@@ -183,6 +191,8 @@ pub struct Engine {
     replacing: Option<ProfileId>,
     /// The profile the user named on the current connect, if any.
     requested: Option<ProfileId>,
+    /// The exits of the transport process on this connection, for the restart budget (T182).
+    crashes: CrashTracker,
 }
 
 impl Engine {
@@ -198,6 +208,7 @@ impl Engine {
             raced: Vec::new(),
             replacing: None,
             requested: None,
+            crashes: CrashTracker::new(),
         }
     }
 
@@ -231,6 +242,7 @@ impl Engine {
                 _ => Vec::new(),
             },
             Input::LiveCheck(check) => self.live_check(check, now),
+            Input::CoreExited { code } => self.core_exited(code, now),
             Input::EndpointProbe { endpoint, outcome } => {
                 self.endpoint_probe(endpoint, outcome, now)
             }
@@ -257,6 +269,7 @@ impl Engine {
             profile.reset_viability();
         }
         self.detector.reset();
+        self.crashes.reset();
         self.raced.clear();
         self.replacing = None;
         self.reach.clear();
@@ -498,6 +511,63 @@ impl Engine {
             return actions;
         }
         let reason = format!("stopped carrying traffic: {failures} live checks failed in a row");
+        self.recover_from_block(&profile, endpoint, now, reason)
+    }
+
+    /// A transport process exited on its own while connected (T182). Started again, with the tunnel stopped first
+    /// (the same stop-then-start as moving to another endpoint), until it has exited more often than
+    /// [`RESTARTS_ALLOWED`] in [`CRASH_WINDOW`]; then the profile is treated as blocked and the road is the one a
+    /// profile that stopped carrying traffic takes. The machine is ruled out first, as for a failed live check: a
+    /// lost network or a missing privilege is not the program's fault.
+    fn core_exited(&mut self, code: Option<i32>, now: Instant) -> Vec<Action> {
+        let Phase::Connected { profile, endpoint } = self.phase.clone() else {
+            return Vec::new();
+        };
+        if let Some(cause) = self.classify(false) {
+            return self.fail(cause, true);
+        }
+        let how = match code {
+            Some(code) => format!("exit code {code}"),
+            None => "without an exit code".to_owned(),
+        };
+        match self.crashes.record(now) {
+            CrashDecision::Restart { attempt } => {
+                self.detector.reset();
+                self.phase = Phase::Starting {
+                    profile: profile.clone(),
+                    endpoint,
+                };
+                let because = format!(
+                    "the transport program for {profile} stopped on its own ({how}), so it is being started again (restart {attempt} of {RESTARTS_ALLOWED})"
+                );
+                vec![
+                    Action::Emit(ConnectionEvent::ProfileSelected {
+                        profile: profile.clone(),
+                        because,
+                    }),
+                    Action::StopTunnel,
+                    Action::StartTunnel { profile, endpoint },
+                ]
+            }
+            CrashDecision::GiveUp { exits } => {
+                let reason = format!(
+                    "the transport program stopped on its own {exits} times in {} minutes (last: {how})",
+                    CRASH_WINDOW.as_secs() / 60
+                );
+                self.recover_from_block(&profile, endpoint, now, reason)
+            }
+        }
+    }
+
+    /// The carrying profile is blocked for `reason`: stop, then look for another.
+    fn recover_from_block(
+        &mut self,
+        profile: &ProfileId,
+        endpoint: EndpointId,
+        now: Instant,
+        reason: String,
+    ) -> Vec<Action> {
+        let profile = profile.clone();
         // Stop first: with nothing carrying traffic the posture is fail-closed while another
         // profile is found, so nothing leaks around the dead tunnel.
         let mut actions = self.mark_blocked(&profile, now, reason);
@@ -636,6 +706,9 @@ impl Engine {
             .find(|p| p.id() == &profile)
             .is_some_and(|p| p.tier() == FailoverTier::Tier2);
         self.detector.reset();
+        // A profile started afresh (the first one, or the one that takes over from a blocked one) has not used any of
+        // the restart budget; a restart after a crash does not come through here.
+        self.crashes.reset();
         self.phase = Phase::Starting {
             profile: profile.clone(),
             endpoint,
@@ -1501,6 +1574,291 @@ mod tests {
             profile: id("awg"),
             endpoint: eid
         }));
+    }
+
+    // ------------------------------------------------------------ found by mutation testing
+
+    fn because_of(actions: &[Action]) -> String {
+        events(actions)
+            .into_iter()
+            .find_map(|ev| match ev {
+                ConnectionEvent::ProfileSelected { because, .. } => Some(because.clone()),
+                _ => None,
+            })
+            .expect("a ProfileSelected event")
+    }
+
+    /// The existing test only checked that the text contained "85", which a wrong unit still satisfies.
+    #[test]
+    fn the_reason_for_a_winner_states_its_throughput_in_megabits_exactly() {
+        let (mut e, _) = engine();
+        step(&mut e, connect());
+        let actions = step(
+            &mut e,
+            Input::RaceFinished {
+                decision: RaceDecision::Selected {
+                    profile: id("reality"),
+                    tier: FailoverTier::Tier2,
+                    bits_per_sec: 12_500_000,
+                },
+                results: vec![(id("reality"), good(1_000_000))],
+            },
+        );
+        let because = because_of(&actions);
+        assert!(because.contains("at about 12.5 Mbit/s"), "{because}");
+        assert!(
+            !because.contains("replaces"),
+            "nothing was replaced: {because}"
+        );
+    }
+
+    #[test]
+    fn a_direct_fallback_after_a_block_says_what_it_replaces_and_one_at_first_connect_does_not() {
+        let (mut e, _) = connected();
+        for _ in 0..BLOCK_AFTER {
+            step(&mut e, Input::LiveCheck(LiveCheck::Failed));
+        }
+        let actions = step(
+            &mut e,
+            Input::RaceFinished {
+                decision: RaceDecision::NoneUsable,
+                results: vec![(id("reality"), ProfileProbe::HandshakeFailed)],
+            },
+        );
+        let after_block = because_of(&actions);
+        assert!(after_block.contains("started directly"), "{after_block}");
+        assert!(after_block.contains("replaces hy2"), "{after_block}");
+
+        let (mut fresh, _) = engine();
+        step(&mut fresh, connect());
+        let actions = step(
+            &mut fresh,
+            Input::RaceFinished {
+                decision: RaceDecision::NoneUsable,
+                results: vec![(id("hy2"), ProfileProbe::HandshakeFailed)],
+            },
+        );
+        let first = because_of(&actions);
+        assert!(first.contains("started directly"), "{first}");
+        assert!(!first.contains("replaces"), "{first}");
+    }
+
+    /// With a single profile there is no "other" profile to find, so a lookup that matched the wrong one
+    /// would find nothing and drop the warning and the path-change record altogether.
+    #[test]
+    fn with_only_one_profile_the_tier_warning_and_the_path_change_record_still_come() {
+        let only = vec![profile("hy2", ProfileKind::Hysteria2)];
+        let mut e = Engine::new(only, vec![healthy("main", 30)]);
+        step(&mut e, connect());
+        let actions = step(
+            &mut e,
+            Input::RaceFinished {
+                decision: selected("hy2", 50),
+                results: vec![(id("hy2"), good(1_000_000))],
+            },
+        );
+        assert!(
+            actions.contains(&Action::WarnTier2 { profile: id("hy2") }),
+            "the person must be warned before a Tier 2 profile connects"
+        );
+        step(&mut e, Input::TunnelUp);
+        let to = InterfaceId::new(9);
+        let actions = step(&mut e, Input::PathChanged { from: None, to });
+        assert_eq!(
+            events(&actions),
+            [&ConnectionEvent::PathChanged {
+                from: None,
+                to,
+                tier_at_time: FailoverTier::Tier2
+            }]
+        );
+    }
+
+    // ------------------------------------------------------------ a transport process that exits (T182)
+
+    fn core_exited(code: Option<i32>) -> Input {
+        Input::CoreExited { code }
+    }
+
+    #[test]
+    fn a_transport_process_that_exits_is_started_again_on_the_same_profile_and_endpoint() {
+        let (mut e, eid) = connected();
+        let actions = step(&mut e, core_exited(Some(1)));
+
+        // Stop first so nothing half-alive carries traffic, then start: the pair the service folds into one move.
+        let stop = actions
+            .iter()
+            .position(|a| *a == Action::StopTunnel)
+            .unwrap();
+        let start = actions
+            .iter()
+            .position(|a| {
+                *a == Action::StartTunnel {
+                    profile: id("hy2"),
+                    endpoint: eid,
+                }
+            })
+            .unwrap();
+        assert_eq!(stop + 1, start, "{actions:?}");
+        assert_eq!(
+            e.phase(),
+            &Phase::Starting {
+                profile: id("hy2"),
+                endpoint: eid
+            }
+        );
+        let because = because_of(&actions);
+        assert!(because.contains("stopped on its own"), "{because}");
+        assert!(because.contains("exit code 1"), "{because}");
+        assert!(because.contains("restart 1 of 2"), "{because}");
+        // The profile is not blamed: a crash is not a block.
+        assert!(
+            matches!(
+                e.profiles()
+                    .iter()
+                    .find(|p| p.id() == &id("hy2"))
+                    .unwrap()
+                    .viability(),
+                Viability::Working { .. }
+            ),
+            "a crash is not a block"
+        );
+    }
+
+    #[test]
+    fn an_exit_with_no_code_says_so_and_is_still_restarted() {
+        let (mut e, _) = connected();
+        let because = because_of(&step(&mut e, core_exited(None)));
+        assert!(because.contains("without an exit code"), "{because}");
+        assert!(matches!(e.phase(), Phase::Starting { .. }));
+    }
+
+    #[test]
+    fn an_exit_when_nothing_is_connected_is_ignored() {
+        let (mut idle, _) = engine();
+        assert!(step(&mut idle, core_exited(Some(1))).is_empty());
+        assert_eq!(idle.phase(), &Phase::Idle);
+
+        let (mut probing, _) = engine();
+        step(&mut probing, connect());
+        assert!(step(&mut probing, core_exited(Some(1))).is_empty());
+        assert_eq!(probing.phase(), &Phase::Probing);
+
+        // While a tunnel is being brought up, its own failure is reported through StartFailed.
+        let (mut starting, _) = engine();
+        step(&mut starting, connect());
+        step(
+            &mut starting,
+            Input::RaceFinished {
+                decision: selected("hy2", 50),
+                results: vec![(id("hy2"), good(1_000_000))],
+            },
+        );
+        assert!(matches!(starting.phase(), Phase::Starting { .. }));
+        assert!(step(&mut starting, core_exited(Some(1))).is_empty());
+    }
+
+    #[test]
+    fn a_process_that_keeps_exiting_is_given_up_on_and_the_profile_is_treated_as_blocked() {
+        let (mut e, eid) = connected();
+        for attempt in 1..=RESTARTS_ALLOWED {
+            let actions = step(&mut e, core_exited(Some(139)));
+            assert!(
+                because_of(&actions).contains(&format!("restart {attempt} of {RESTARTS_ALLOWED}"))
+            );
+            step(&mut e, Input::TunnelUp);
+            assert!(
+                matches!(e.phase(), Phase::Connected { .. }),
+                "restart {attempt}"
+            );
+        }
+        let last = step(&mut e, core_exited(Some(139)));
+
+        // The same road as a profile that stopped carrying traffic: stop first (fail closed), then try what is left.
+        assert_eq!(e.phase(), &Phase::Recovering);
+        let stop = last.iter().position(|a| *a == Action::StopTunnel).unwrap();
+        let race = last
+            .iter()
+            .position(|a| matches!(a, Action::StartRace { .. }))
+            .unwrap();
+        assert!(stop < race, "{last:?}");
+        assert!(last.contains(&Action::StartRace {
+            profiles: vec![id("reality")],
+            endpoint: eid
+        }));
+        let hy2 = e.profiles().iter().find(|p| p.id() == &id("hy2")).unwrap();
+        let Viability::Blocked { reason, .. } = hy2.viability() else {
+            panic!("hy2 should be blocked: {:?}", hy2.viability());
+        };
+        assert!(reason.contains("stopped on its own"), "{reason}");
+        assert!(reason.contains("3 times"), "{reason}");
+    }
+
+    #[test]
+    fn a_new_connection_starts_with_a_clean_restart_budget() {
+        let (mut e, _) = connected();
+        for _ in 0..RESTARTS_ALLOWED {
+            step(&mut e, core_exited(Some(1)));
+            step(&mut e, Input::TunnelUp);
+        }
+        step(&mut e, Input::Disconnect);
+        step(&mut e, connect());
+        step(
+            &mut e,
+            Input::RaceFinished {
+                decision: selected("hy2", 100),
+                results: vec![(id("hy2"), good(1_000_000))],
+            },
+        );
+        step(&mut e, Input::TunnelUp);
+        let because = because_of(&step(&mut e, core_exited(Some(1))));
+        assert!(because.contains("restart 1 of 2"), "{because}");
+    }
+
+    /// The budget belongs to the profile that was running, not to the whole connection: the profile that takes
+    /// over after one is given up on has not used any of it (T182 review).
+    #[test]
+    fn a_replacement_profile_gets_a_restart_budget_of_its_own() {
+        let (mut e, _) = connected();
+        for _ in 0..RESTARTS_ALLOWED {
+            step(&mut e, core_exited(Some(1)));
+            step(&mut e, Input::TunnelUp);
+        }
+        step(&mut e, core_exited(Some(1)));
+        assert_eq!(e.phase(), &Phase::Recovering);
+        step(
+            &mut e,
+            Input::RaceFinished {
+                decision: selected("reality", 40),
+                results: vec![(id("reality"), good(1_000_000))],
+            },
+        );
+        step(&mut e, Input::TunnelUp);
+        assert!(matches!(e.phase(), Phase::Connected { profile, .. } if *profile == id("reality")));
+
+        let because = because_of(&step(&mut e, core_exited(Some(1))));
+        assert!(because.contains("restart 1 of 2"), "{because}");
+        assert!(because.contains("reality"), "{because}");
+    }
+
+    /// With the network gone, a program that stopped is not the cause: say what is wrong with the machine,
+    /// as a failed live check does, rather than restarting into a network that is not there.
+    #[test]
+    fn with_no_usable_network_an_exit_is_reported_as_that_and_not_restarted() {
+        let (mut e, _) = connected();
+        step(
+            &mut e,
+            Input::Environment(Environment {
+                usable_paths: 0,
+                ..Environment::default()
+            }),
+        );
+        let actions = step(&mut e, core_exited(Some(1)));
+        assert!(actions.contains(&Action::StopTunnel), "{actions:?}");
+        assert!(!actions
+            .iter()
+            .any(|a| matches!(a, Action::StartTunnel { .. })));
+        assert!(matches!(e.phase(), Phase::Failed(_)));
     }
 
     // ------------------------------------------------------------ endpoints

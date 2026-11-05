@@ -273,6 +273,29 @@ mod windows_check {
             _ => path.to_path_buf(),
         }
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// Mutation testing found the share case untested: dropping the prefix from `\\?\UNC\server\share`
+        /// would leave `UNC\server\share`, a different path that the permission walk would then judge instead.
+        #[test]
+        fn the_verbatim_prefix_is_dropped_from_a_drive_path_and_kept_for_a_share() {
+            assert_eq!(
+                strip_verbatim(Path::new(r"\\?\C:\x\y.exe")),
+                PathBuf::from(r"C:\x\y.exe")
+            );
+            assert_eq!(
+                strip_verbatim(Path::new(r"\\?\UNC\srv\share\a.exe")),
+                PathBuf::from(r"\\?\UNC\srv\share\a.exe")
+            );
+            assert_eq!(
+                strip_verbatim(Path::new(r"C:\plain")),
+                PathBuf::from(r"C:\plain")
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -416,6 +439,115 @@ mod tests {
     }
 
     // ------------------------------------------------------------------ which objects are judged
+
+    /// Mutation testing showed each right was only ever tried as part of a bigger mask, so dropping or
+    /// mangling any single one of them went unnoticed. Each is now granted to an ordinary group on its own.
+    #[test]
+    fn every_dangerous_right_on_its_own_refuses_an_ordinary_group_for_the_roles_it_matters_to() {
+        let grant = |mask: u32| format!("O:BAD:P(A;;FA;;;SY)(A;;0x{mask:x};;;BU)");
+        // (right, dangerous on the program and its folder, dangerous on a folder above)
+        let rights: [(&str, u32, bool, bool); 11] = [
+            ("write data / create a file", bit::WRITE_DATA, true, false),
+            (
+                "append data / create a folder",
+                bit::APPEND_DATA,
+                true,
+                false,
+            ),
+            ("write extended attributes", bit::WRITE_EA, true, false),
+            ("delete a child", bit::DELETE_CHILD, true, true),
+            ("write attributes", bit::WRITE_ATTRIBUTES, true, false),
+            ("delete", bit::DELETE, true, true),
+            ("change the permissions", bit::WRITE_DAC, true, true),
+            ("take ownership", bit::WRITE_OWNER, true, true),
+            ("generic all", bit::GENERIC_ALL, true, true),
+            ("generic write", bit::GENERIC_WRITE, true, true),
+            ("maximum allowed", bit::MAXIMUM_ALLOWED, true, true),
+        ];
+        for (what, mask, on_program, on_ancestor) in rights {
+            for role in [Role::Program, Role::ProgramFolder] {
+                assert_eq!(
+                    assess_sddl(&grant(mask), role).is_err(),
+                    on_program,
+                    "{what} on {role:?}"
+                );
+            }
+            assert_eq!(
+                assess_sddl(&grant(mask), Role::Ancestor).is_err(),
+                on_ancestor,
+                "{what} on a folder above"
+            );
+        }
+        // Rights that read or run but change nothing are fine for everyone.
+        for harmless in [
+            0x0000_0001,
+            0x0002_0000,
+            0x0000_0020,
+            0x0012_00a9,
+            0x8000_0000,
+            0x2000_0000,
+        ] {
+            for role in [Role::Program, Role::ProgramFolder, Role::Ancestor] {
+                assert_eq!(
+                    assess_sddl(&grant(harmless), role),
+                    Ok(()),
+                    "{harmless:#x} on {role:?}"
+                );
+            }
+        }
+    }
+
+    /// The names are Windows' own (`FA` is FILE_ALL_ACCESS, 0x1F01FF, and so on), so this table is checked
+    /// against the documented values, not against the code.
+    #[test]
+    fn each_right_name_means_what_windows_says_and_anything_else_is_every_right() {
+        for (name, value) in [
+            ("FA", 0x001f_01ff),
+            ("FR", 0x0012_0089),
+            ("FW", 0x0012_0116),
+            ("FX", 0x0012_00a0),
+            ("GA", 0x1000_0000),
+            ("GR", 0x8000_0000),
+            ("GW", 0x4000_0000),
+            ("GX", 0x2000_0000),
+            ("SD", 0x0001_0000),
+            ("RC", 0x0002_0000),
+            ("WD", 0x0004_0000),
+            ("WO", 0x0008_0000),
+            ("CC", 0x1),
+            ("DC", 0x2),
+            ("LC", 0x4),
+            ("SW", 0x8),
+            ("RP", 0x10),
+            ("WP", 0x20),
+            ("DT", 0x40),
+            ("LO", 0x80),
+            ("CR", 0x100),
+        ] {
+            assert_eq!(mask_of(name), value, "{name}");
+        }
+        assert_eq!(mask_of("FRFX"), 0x0012_0089 | 0x0012_00a0, "names combine");
+        assert_eq!(mask_of("0x10"), 0x10);
+        assert_eq!(mask_of("0X10"), 0x10);
+        // What is not understood is not trusted.
+        for unknown in ["", "ZZ", "F", "FRF", "FRZZ", "0x", "0xZZ", "0x1ffffffff"] {
+            assert_eq!(mask_of(unknown), u32::MAX, "{unknown:?}");
+        }
+    }
+
+    #[test]
+    fn creator_owner_is_ignored_in_either_spelling_but_a_named_group_is_not() {
+        for owner in ["CO", "S-1-3-0"] {
+            let sddl = format!("O:BAD:P(A;;FA;;;SY)(A;;GA;;;{owner})");
+            assert_eq!(assess_sddl(&sddl, Role::Program), Ok(()), "{owner}");
+        }
+        assert!(assess_sddl("O:BAD:P(A;;FA;;;SY)(A;;GA;;;BU)", Role::Program).is_err());
+        assert!(assess_sddl(
+            "O:BAD:P(A;;FA;;;SY)(A;;GA;;;S-1-5-21-1-2-3-1001)",
+            Role::Program
+        )
+        .is_err());
+    }
 
     #[test]
     fn the_program_its_folder_and_every_folder_above_are_judged_once_each() {

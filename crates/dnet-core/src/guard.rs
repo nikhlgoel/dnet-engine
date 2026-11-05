@@ -841,6 +841,122 @@ mod tests {
 
     // ------------------------------------------------------------------ the lint can fail
 
+    /// Added after mutation testing: the checks for "something blocks everything else" and "something keeps other
+    /// programs off the control port" were only tried with everything removed at once, so a check that ignored
+    /// the direction, the family, the conditions or the weight went unnoticed. Each of the four blocks, and each
+    /// family's control-port block, must be missed on its own, and a look-alike must not stand in for it.
+    #[test]
+    fn each_block_is_needed_on_its_own_and_a_look_alike_does_not_stand_in() {
+        let is_block_of_everything = |f: &Filter, family: Family, direction: Direction| {
+            f.action == Action::Block
+                && f.conditions.is_empty()
+                && f.family == family
+                && f.direction == direction
+        };
+        for family in BOTH_FAMILIES {
+            for direction in BOTH_DIRECTIONS {
+                let wanted = format!(
+                    "nothing blocks everything else ({} {})",
+                    dir_name(direction),
+                    fam_name(family)
+                );
+                // Gone: exactly that one is reported.
+                let mut gone = built();
+                gone.retain(|f| !is_block_of_everything(f, family, direction));
+                assert_eq!(leaks(&gone), vec![wanted.clone()]);
+                // Changed so that it is no longer the block of everything else: it does not count.
+                let mut with_condition = built();
+                for f in &mut with_condition {
+                    if is_block_of_everything(f, family, direction) {
+                        f.conditions = vec![Condition::Tcp];
+                    }
+                }
+                assert!(
+                    leaks(&with_condition).contains(&wanted),
+                    "a block with a condition"
+                );
+                let mut above_the_floor = built();
+                for f in &mut above_the_floor {
+                    if is_block_of_everything(f, family, direction) {
+                        f.weight = BLOCK_WEIGHT + 1;
+                    }
+                }
+                assert!(
+                    leaks(&above_the_floor).contains(&wanted),
+                    "a block above the floor"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn each_familys_control_port_block_is_needed_on_its_own_and_a_look_alike_does_not_stand_in() {
+        let is_control_block = |f: &Filter, family: Family| {
+            f.action == Action::Block
+                && f.family == family
+                && f.direction == Direction::Outbound
+                && f.weight > BLOCK_WEIGHT
+                && f.conditions.contains(&Condition::Loopback)
+        };
+        for family in BOTH_FAMILIES {
+            let wanted = format!(
+                "nothing keeps other programs off the control port ({})",
+                fam_name(family)
+            );
+            let mut gone = built();
+            gone.retain(|f| !is_control_block(f, family));
+            assert_eq!(
+                leaks(&gone),
+                vec![wanted.clone()],
+                "removed for {family:?} only"
+            );
+
+            let mut inbound = built();
+            for f in &mut inbound {
+                if is_control_block(f, family) {
+                    f.direction = Direction::Inbound;
+                }
+            }
+            assert!(leaks(&inbound).contains(&wanted), "inbound does not count");
+
+            let mut at_the_floor = built();
+            for f in &mut at_the_floor {
+                if is_control_block(f, family) {
+                    f.weight = BLOCK_WEIGHT;
+                }
+            }
+            assert!(
+                leaks(&at_the_floor).contains(&wanted),
+                "a block at the floor does not count"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rule_reads_as_words_with_its_weight_direction_and_family() {
+        for f in built() {
+            let words = f.to_string();
+            assert_eq!(words, describe(&f));
+            assert!(words.contains(dir_name(f.direction)), "{words}");
+            assert!(words.contains(fam_name(f.family)), "{words}");
+            assert!(words.len() > 10, "{words}");
+        }
+    }
+
+    #[test]
+    fn the_shortest_full_path_is_accepted_and_every_malformed_start_is_not() {
+        assert!(
+            full_path(r"C:\a"),
+            "four bytes is the shortest path that names a file"
+        );
+        assert!(!full_path(r"C:\"), "no file name");
+        // Each wrong in exactly one way, so a check that weakened any one of them is noticed.
+        assert!(!full_path(r"1:\a"), "not a drive letter");
+        assert!(!full_path(r"Cx\a"), "no colon");
+        assert!(!full_path(r"C:xa"), "no backslash after the colon");
+        assert!(!full_path(r"C:/a"), "a forward slash");
+    }
+
     #[test]
     fn a_list_without_its_blocks_leaks_and_says_where() {
         let mut list = built();

@@ -1019,6 +1019,73 @@ mod tests {
         }
     }
 
+    /// Mutation testing: the limit was only tried with something far larger, so an off-by-one went unnoticed.
+    #[test]
+    fn a_form_of_exactly_the_size_limit_is_read_and_one_byte_more_is_not() {
+        let at_limit = vec![b' '; MAX_STORED_LEN];
+        assert!(
+            matches!(
+                EndpointCredentials::from_plaintext_json(&at_limit),
+                Err(CredentialsError::Malformed(_))
+            ),
+            "the limit itself is allowed, so this fails later, as unreadable, not as too large"
+        );
+    }
+
+    #[test]
+    fn the_reality_flow_none_is_stored_and_read_back_like_vision() {
+        let mut bundle = full();
+        bundle.reality.as_mut().unwrap().endpoint.flow = VlessFlow::None;
+        let stored = bundle.to_plaintext_json().unwrap();
+        assert_eq!(
+            EndpointCredentials::from_plaintext_json(&stored).unwrap(),
+            bundle
+        );
+    }
+
+    #[test]
+    fn a_certificate_pin_is_exactly_64_lowercase_hex_digits_and_reads_back_exactly() {
+        let expected: [u8; 32] = core::array::from_fn(|i| (i * 8 + 1) as u8);
+        let pin: String = expected.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(parse_spki_sha256_hex(&pin), Some(expected));
+        // Another value, so a function that returns one fixed answer is noticed.
+        assert_eq!(parse_spki_sha256_hex(&"ab".repeat(32)), Some([0xab; 32]));
+        for bad in [
+            String::new(),
+            pin[..63].to_owned(),
+            format!("{pin}0"),
+            pin.to_uppercase(),
+            format!("g{}", &pin[1..]),
+            format!(" {}", &pin[1..]),
+        ] {
+            assert_eq!(parse_spki_sha256_hex(&bad), None, "{bad:?}");
+        }
+    }
+
+    /// A bundle is mostly secrets, so the error for a form that cannot be read says what kind of wrong and
+    /// where, and nothing of the content.
+    #[test]
+    fn a_form_that_cannot_be_read_is_described_by_kind_and_position_only() {
+        let cases = [
+            (format!("not json {SENTINEL}"), "not valid JSON"),
+            (
+                format!(r#"{{"version":1,"x":"{SENTINEL}""#),
+                "ends unexpectedly",
+            ),
+            (format!(r#"{{"version":"{SENTINEL}"}}"#), "wrong type"),
+        ];
+        for (input, kind) in cases {
+            let Err(CredentialsError::Malformed(said)) =
+                EndpointCredentials::from_plaintext_json(input.as_bytes())
+            else {
+                panic!("{input:?} was not refused as malformed");
+            };
+            assert!(said.contains(kind), "{said}");
+            assert!(said.contains("line 1, column"), "{said}");
+            assert!(!said.contains(SENTINEL), "the content leaked: {said}");
+        }
+    }
+
     #[test]
     fn an_oversized_form_is_refused_before_it_is_parsed() {
         let big = vec![b' '; MAX_STORED_LEN + 1];
