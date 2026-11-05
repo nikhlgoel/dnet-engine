@@ -198,8 +198,14 @@ impl UndoRegistry {
         })
     }
 
+    /// The lock is held across the caller's OS mutation, so a panic there poisons it. The undo path must still
+    /// work afterwards: it is what puts the network back. That is safe because the journal is consistent at every
+    /// point a panic can unwind from (a record is persisted before its mutation runs, and `journal` is assigned
+    /// only after a successful save), and reversal is idempotent.
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
-        self.inner.lock().expect("undo registry mutex poisoned")
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Records not yet reversed, oldest first.
@@ -370,6 +376,43 @@ mod tests {
             }
             self.inner.save(journal)
         }
+    }
+
+    /// A panic inside the OS call must not take the undo path down with it. The registry holds its lock across
+    /// the mutation, so a panic there poisons it; the journal is consistent at every point a panic can unwind
+    /// from (the record is written before the mutation runs), so the registry must keep answering, and the
+    /// record the dying mutation may have applied must still be reversible.
+    #[test]
+    fn a_panicking_mutation_does_not_stop_the_undo_path() {
+        let store = MemoryStore::new();
+        let registry = UndoRegistry::open(Box::new(store.clone())).unwrap();
+
+        let died = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = registry.apply(route(7), || panic!("the operating system call blew up"));
+        }));
+        assert!(
+            died.is_err(),
+            "the test must really have panicked inside the mutation"
+        );
+
+        // The write-ahead record is still there, in memory and on disk.
+        assert_eq!(registry.outstanding().len(), 1);
+        assert_eq!(stored_records(&store), vec![route(7)]);
+
+        // And it can be reversed, so nothing the mutation may have done is left behind.
+        let executor = Recorder::default();
+        let report = registry.replay(&executor).unwrap();
+        assert_eq!(report.restored, 1);
+        assert_eq!(*executor.reversed.borrow(), vec![route(7)]);
+        assert!(stored_records(&store).is_empty());
+
+        // New work still goes through.
+        let id = registry
+            .apply(route(8), || Ok(Mutation::Applied))
+            .unwrap()
+            .expect("applied");
+        registry.undo(id, &executor).unwrap();
+        assert!(registry.outstanding().is_empty());
     }
 
     #[test]
