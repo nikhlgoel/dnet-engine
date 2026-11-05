@@ -199,9 +199,10 @@
           <h4>{t.whatYouGet}</h4>
           <ul class="features">
             {#each option.features as feature (feature.text)}
-              <li>
-                <span class={feature.included ? 'yes' : 'no'}>{feature.included ? t.included : t.notIncluded}</span>
-                {feature.text}
+              <li class="feat" class:off={!feature.included}>
+                <span class="mark" aria-hidden="true">{feature.included ? '✓' : '–'}</span>
+                <span class="sr-only">{feature.included ? t.included : t.notIncluded}</span>
+                <span>{feature.text}</span>
               </li>
             {/each}
           </ul>
@@ -361,7 +362,8 @@
     {/if}
   {/if}
 
-  <div class="actions">
+  <!-- Leaving the guide is set apart from moving through it. -->
+  <div class="actions leave">
     <button type="button" class="btn" onclick={() => app.go('endpoints')}>{t.close}</button>
   </div>
 </section>
@@ -418,13 +420,21 @@
     color: var(--c-text-2);
   }
 
-  .features .yes,
-  .features .no {
+  .feat {
+    display: flex;
+    gap: var(--s-2);
     font-size: var(--fs-sm);
-    margin-right: var(--s-2);
   }
 
-  .features .no,
+  .feat .mark {
+    flex: none;
+    width: 1.2em;
+    text-align: center;
+    color: var(--c-ok);
+  }
+
+  .feat.off,
+  .feat.off .mark,
   .help,
   .steps-of {
     color: var(--c-text-2);
@@ -495,5 +505,11 @@
     display: flex;
     gap: var(--s-3);
     flex-wrap: wrap;
+  }
+
+  .leave {
+    margin-top: var(--s-4);
+    padding-top: var(--s-4);
+    border-top: 1px solid var(--c-line);
   }
 </style>
