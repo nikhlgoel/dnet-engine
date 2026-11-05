@@ -74,7 +74,10 @@ pub(crate) struct ModulePatch {
 
 const TUN_DLL_LOADER_PATCH: ModulePatch = ModulePatch {
     module: "github.com/sagernet/sing-tun",
-    version: "v0.9.0-beta.4",
+    // What v1.14.4 requires. Nothing under `internal/wintun` differs from the earlier v0.9.0-beta.4 (compared on
+    // 2026-11-05: 24 commits, none in that directory), so the overlay applies unchanged; `fetch-vendor` still refuses
+    // if the pinned source asks for any other version.
+    version: "v0.9.7-0.20261023115432-040db71fcd33",
     overlay: "patches/sing-tun",
     remove: &[
         "internal/wintun/dll_windows_386.go",
@@ -94,8 +97,8 @@ pub(crate) const GO_SOURCES: &[GoSource] = &[
     GoSource {
         dest: "primary-core",
         repo: "https://github.com/SagerNet/sing-box",
-        version: "v1.14.0",
-        commit: "0b8995879f29a9b98ee027bc17b75e101445b238",
+        version: "v1.14.4",
+        commit: "c005f35300ce76427dc285481ec5695f5b179cd2",
         package: "./cmd/sing-box",
         binary: "primary-core.exe",
         // with_quic               -> Hysteria 2 (Profile B)

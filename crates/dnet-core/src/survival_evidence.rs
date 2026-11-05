@@ -23,7 +23,7 @@ use crate::profile::ProfileKind;
 use crate::tier::SurvivalMeasurement;
 
 /// The commit of the primary core the client is built from (`xtask` pins the same; a test there compares).
-pub const PINNED_PRIMARY_COMMIT: &str = "0b8995879f29a9b98ee027bc17b75e101445b238";
+pub const PINNED_PRIMARY_COMMIT: &str = "c005f35300ce76427dc285481ec5695f5b179cd2";
 /// The commit of the AmneziaWG core the client is built from.
 pub const PINNED_AMNEZIAWG_COMMIT: &str = "b5928efb6ca19f0153958460c3d141f04abc5c2e";
 /// The fewest runs that can show survival.

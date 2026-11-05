@@ -1985,6 +1985,17 @@ own, made by DNet Engine's wizard on Oracle Cloud Always Free (or any Linux serv
   > the script, twice, then three kernels that cannot do everything (no owner match: refuses to start; no REJECT: refusals become drops; no limit modules: no caps but nothing blocked).
   > **Not shown, so not claimed:** a real Oracle server or real systemd (the container's kernel is Docker Desktop's, the image's rules were imitated, the units are checked as text); how a scanner sees the three doors; the core's own
   > `ip_is_private` coverage; the REALITY cover site; a provider's own rules.
+- [~] T177 [US1] Known vulnerabilities in everything we depend on and ship: audit, fix, and keep watching (`docs/security/dependencies-and-advisories.md`, `.github/workflows/advisories.yml`)
+  > **First pass 2026-11-05.** `cargo audit` (workspace, and the window shell's own lock file), `pnpm audit`, the published advisories and the commit history after each pin of the two bundled programs, Tauri, NSIS, Wintun, WebView2 and the Go
+  > toolchain. **Fixed:** the primary core was 4 releases behind (v1.14.0, now v1.14.4: 174 commits, including panics and crashes a broken or hostile peer could trigger, spinning read loops, HTTP/2 data races, Hysteria port hopping to another
+  > address, and fixes to the selector and WireGuard session endpoint our carrier switching relies on); `tokio` 1.53.1 to 1.53.3 (RUSTSEC-2026-0386; we never used the affected API); `undici` held at the fixed version in the test tools. **Added:** a
+  > weekly advisory run (Rust, both lock files; JavaScript; and a warning when a pinned program falls behind its upstream). **Accepted, each with its reason:** `deepmerge` (low, build tool only, no patch exists), `glib` and `proc-macro-error`
+  > warnings in Tauri's Linux and compile-time parts, NSIS 3.11 (CVE-2026-42171 needs an installer run as SYSTEM).
+  > **The core upgrade, verified:** the build pin and the code pin agree (a test compares them; the recorded survival evidence is empty, so none referred to the old commit); `fetch-vendor` rebuilt both cores from the pinned commits, the driver-loader
+  > patch applied (nothing under `internal/wintun` differs between the two `sing-tun` versions, 24 commits compared) and its own test passed against the real Wintun DLL; `verify-vendor` OK (no embedded DLL, signature valid); the real core's own
+  > `check` accepted every configuration we generate (6 tests); 999 tests in the four affected crates pass; and the Docker harness, rebuilt from the new commit, matched all six hostile-network scenarios (baseline, UDP dropped, either port dropped,
+  > both dropped, 150 kbit ceiling), the two negative controls included. **Checked on this PC:** the service path is quoted, the install folder is not writable by ordinary users, the data folder refuses them even its permissions, the window's
+  > Content Security Policy and 28-command capability list are minimal. **Not shown:** that no unknown bug exists (an audit finds only reported ones); the WebView2 runtime's version; advisories published after today (the weekly run).
 
 ## Dependencies
 
