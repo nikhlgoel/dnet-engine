@@ -380,6 +380,12 @@ BASE=/opt/dnet
 BIN="$BASE/bin"
 STATE=/var/lib/dnet
 mkdir -p "$BIN" "$STATE/awg" "$STATE/primary"
+# One of these scripts at a time: the scripts that add or remove a device take the same lock, so a setup run and a
+# device change never write the configuration together.
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$STATE/primary/.script.lock"
+  flock 9
+fi
 # $STATE can be walked through (not listed or read) so the unprivileged core can reach its own directory.
 chmod 711 "$STATE"
 # The programs are public and no secret lives under $BASE: the accounts the services run as must be able to walk to
@@ -515,6 +521,18 @@ SESSION_PUBLIC=$(clean < "$STATE/primary/session.public")
 [ "${#SESSION_PRIVATE}" -eq 44 ] && [ "${#SESSION_PUBLIC}" -eq 44 ] \
   || { echo "could not make the session key" >&2; exit 1; }
 
+# ---- who may use the session. The list of devices lives here on the server (devices.json) and this script only ever
+# ADDS to it, so a device added later by the "add a device" script is not dropped by running this one again, and a
+# device keeps the address it was given. The program that keeps the list is written first.
+cat > "$BIN/dnet-devices" <<'DEVICES_EOF'
+@@DEVICES_PROGRAM@@
+DEVICES_EOF
+chmod 755 "$BIN/dnet-devices"
+DEVICES="$STATE/primary/devices.json"
+python3 "$BIN/dnet-devices" sync "$DEVICES" "$STATE/primary/server.json" @@SESSION_KEYS@@
+SESSION_PEERS=$(python3 "$BIN/dnet-devices" peers "$DEVICES")
+SESSION_DEVICES=$(python3 "$BIN/dnet-devices" json "$DEVICES")
+
 # ---- the primary core's server configuration: checked by the core itself before anything starts.
 # It is derived from the keys above and the devices in this script, so it is rewritten every time and
 # replaced only if the core accepts it; the service is restarted only if it actually changed.
@@ -564,7 +582,7 @@ cat > "$STATE/primary/server.json.new" <<CONFIG_EOF
       "private_key": "$SESSION_PRIVATE",
       "listen_port": @@SESSION_PORT@@,
       "peers": [
-@@SESSION_PEERS@@
+$SESSION_PEERS
       ]
     }
   ],
@@ -1072,7 +1090,7 @@ fi
 AWG_PUB="$AWG_PUB" HY2_SPKI="$HY2_SPKI" HY2_AUTH="$HY2_AUTH" HY2_OBFS="$HY2_OBFS" CERT_ALG="$CERT_ALG" \
 REALITY_PUBLIC="$REALITY_PUBLIC" REALITY_SHORT="$REALITY_SHORT" REALITY_UUID="$REALITY_UUID" \
 SESSION_PUBLIC="$SESSION_PUBLIC" \
-PRIMARY_SHA='@@PRIMARY_SHA@@' AWG_SHA='@@AWG_SHA@@' python3 - <<'REPORT_EOF'
+SESSION_DEVICES="$SESSION_DEVICES" PRIMARY_SHA='@@PRIMARY_SHA@@' AWG_SHA='@@AWG_SHA@@' python3 - <<'REPORT_EOF'
 import json, os
 e = os.environ
 report = {
@@ -1088,7 +1106,7 @@ report = {
                 "uuid": e["REALITY_UUID"], "flow": "xtls-rprx-vision"},
     "session": {"server_public_key": e["SESSION_PUBLIC"], "port": @@SESSION_PORT@@,
                 "server_address": "@@SESSION_SERVER@@",
-                "devices": [@@SESSION_DEVICES@@]},
+                "devices": json.loads(e["SESSION_DEVICES"])},
     "cores": {"primary_core": {"version": "@@PRIMARY_VERSION@@", "sha256": e["PRIMARY_SHA"]},
               "amneziawg": {"version": "@@AWG_VERSION@@", "sha256": e["AWG_SHA"]}},
 }
@@ -1096,27 +1114,15 @@ print("DNET-BOOTSTRAP-REPORT " + json.dumps(report, separators=(",", ":")))
 REPORT_EOF
 "##;
 
-/// The peers of the server's session endpoint, one per device, as JSON for the configuration. The keys were
-/// checked to be base64 of 32 bytes, so nothing in them is shell or JSON syntax.
-fn session_peers(session: &SessionPlan) -> String {
+/// The keys the script gives the server's list of devices, each in single quotes. They were checked to be base64 of
+/// 32 bytes, so nothing in them is shell syntax.
+fn session_keys(session: &SessionPlan) -> String {
     session
-        .devices()
-        .map(|(address, key)| {
-            format!(
-                "        {{ \"public_key\": \"{key}\", \"allowed_ips\": [ \"{address}/32\" ] }}"
-            )
-        })
+        .device_public_keys
+        .iter()
+        .map(|key| format!("'{key}'"))
         .collect::<Vec<_>>()
-        .join(",\n")
-}
-
-/// The devices as the report prints them (a Python literal that is also valid JSON).
-fn session_devices_literal(session: &SessionPlan) -> String {
-    session
-        .devices()
-        .map(|(address, key)| format!("{{\"address\": \"{address}\", \"public_key\": \"{key}\"}}"))
-        .collect::<Vec<_>>()
-        .join(", ")
+        .join(" ")
 }
 
 /// The bootstrap script for `plan`. Fails, without making any text, if a value is not allowed in it.
@@ -1170,14 +1176,15 @@ pub fn script(plan: &BootstrapPlan) -> Result<String, BootstrapError> {
         ("SESSION_ORIGIN", SESSION_ORIGIN.to_string()),
         ("SESSION_PREFIX", SESSION_PREFIX.to_string()),
         ("SESSION_PORT", SESSION_PORT.to_string()),
-        ("SESSION_PEERS", session_peers(&plan.session)),
-        ("SESSION_DEVICES", session_devices_literal(&plan.session)),
+        ("SESSION_KEYS", session_keys(&plan.session)),
     ];
     // The keepalive is the standalone one, without its interpreter line: it is tested by itself, and the
     // same text is used here so the two cannot drift apart.
     let keepalive = crate::keepalive::script(&crate::keepalive::KeepalivePlan::default());
     let keepalive: String = keepalive.lines().skip(1).collect::<Vec<_>>().join("\n");
-    let mut text = TEMPLATE.replace("@@KEEPALIVE@@", &keepalive);
+    let mut text = TEMPLATE
+        .replace("@@KEEPALIVE@@", &keepalive)
+        .replace("@@DEVICES_PROGRAM@@", crate::devices::program().trim_end());
     for (name, value) in &fills {
         text = text.replace(&format!("@@{name}@@"), value);
     }

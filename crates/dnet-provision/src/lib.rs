@@ -12,6 +12,7 @@ pub mod capacity;
 pub mod cleanup;
 pub mod client_keys;
 pub mod credential;
+pub mod devices;
 pub mod keepalive;
 pub mod ledger;
 pub mod manual;

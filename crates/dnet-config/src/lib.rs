@@ -26,6 +26,7 @@ pub mod error;
 pub mod hysteria2;
 #[cfg(windows)]
 pub mod install_trust;
+pub mod invite;
 pub mod persist;
 pub mod primary;
 pub mod probe;

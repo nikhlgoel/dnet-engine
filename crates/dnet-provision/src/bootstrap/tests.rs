@@ -1664,21 +1664,97 @@ fn a_device_key_with_shell_syntax_is_refused_before_any_text_is_made() {
     }
 }
 
+/// The peers the server's own device program prints for these keys, as `$SESSION_PEERS` holds them on a server: the
+/// program is run, exactly as the script runs it (`sync`, then `peers`).
+fn session_peers_as_the_server_has_them(keys: &[String]) -> String {
+    let python = ["python3", "python"]
+        .into_iter()
+        .find(|p| {
+            std::process::Command::new(p)
+                .arg("-c")
+                .arg("pass")
+                .output()
+                .is_ok_and(|o| o.status.success())
+        })
+        .expect("python is needed to run the server's device program");
+    let dir = tempfile::tempdir().unwrap();
+    let program = dir.path().join("dnet-devices.py");
+    std::fs::write(&program, crate::devices::program()).unwrap();
+    let registry = dir.path().join("devices.json");
+    let config = dir.path().join("server.json");
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(python)
+            .arg(&program)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n")
+    };
+    let mut sync = vec![
+        "sync".to_owned(),
+        registry.to_string_lossy().into_owned(),
+        config.to_string_lossy().into_owned(),
+    ];
+    sync.extend(keys.iter().cloned());
+    run(&sync.iter().map(String::as_str).collect::<Vec<_>>());
+    run(&["peers", &registry.to_string_lossy()])
+        .trim_end()
+        .to_owned()
+}
+
 #[test]
 fn each_device_is_a_peer_with_an_address_of_its_own_and_nothing_else() {
+    // The script hands the keys it was made for to the server's list, in order, and the list makes the peers.
     let text = script(&plan()).unwrap();
+    assert!(
+        text.contains(&format!(
+            "sync \"$DEVICES\" \"$STATE/primary/server.json\" '{}' '{}'",
+            device_key(1),
+            device_key(2)
+        )),
+        "the setup keys are not given to the list"
+    );
+    let peers = session_peers_as_the_server_has_them(&[device_key(1), device_key(2)]);
     for (address, key) in [("10.9.0.2", device_key(1)), ("10.9.0.3", device_key(2))] {
         assert!(
-            text.contains(&format!(
+            peers.contains(&format!(
                 "{{ \"public_key\": \"{key}\", \"allowed_ips\": [ \"{address}/32\" ] }}"
             )),
-            "no peer for {address}"
+            "no peer for {address}: {peers}"
         );
     }
     // No device is a router: a peer's allowed address is its own single address.
     assert!(!text.contains("\"allowed_ips\": [ \"0.0.0.0/0\""));
+    assert!(!peers.contains("0.0.0.0/0"));
     assert_eq!(session_device_address(0).to_string(), "10.9.0.2");
     assert_eq!(session_device_address(7).to_string(), "10.9.0.9");
+    // The configuration takes its peers from the list, and nothing about a device is baked into it.
+    assert!(text.contains("$SESSION_PEERS\n      ]"));
+}
+
+/// The setup script only ever adds to the server's list: the program that keeps it is written first, it is told the
+/// setup keys with `sync` (which adds and never removes), and the configuration and the report are made from the list.
+#[test]
+fn the_setup_script_takes_the_devices_from_the_servers_list_and_never_replaces_it() {
+    let text = script(&plan()).unwrap();
+    let write = text.find("cat > \"$BIN/dnet-devices\"").unwrap();
+    let sync = text.find("dnet-devices\" sync").unwrap();
+    let peers = text.find("dnet-devices\" peers").unwrap();
+    let config = text.find("<<CONFIG_EOF").unwrap();
+    assert!(write < sync && sync < peers && peers < config);
+    // It never writes the list itself, never deletes it, and never asks for a device to be removed.
+    assert!(!text.contains("rm -f \"$DEVICES\""));
+    assert!(!text.contains("dnet-devices\" remove"));
+    assert!(text.contains(&crate::devices::program()));
+    // The setup keys are the first device(s).
+    let owner = device_key(1);
+    let after_setup = session_peers_as_the_server_has_them(std::slice::from_ref(&owner));
+    assert!(after_setup.contains(&owner));
 }
 
 #[test]
@@ -2013,11 +2089,10 @@ fn the_script_reports_the_session_with_every_device_it_was_given() {
     let text = script(&plan()).unwrap();
     assert!(text.contains("\"session\": {\"server_public_key\": e[\"SESSION_PUBLIC\"]"));
     assert!(text.contains("\"version\": 2,"));
-    for (address, key) in [("10.9.0.2", device_key(1)), ("10.9.0.3", device_key(2))] {
-        assert!(text.contains(&format!(
-            "{{\"address\": \"{address}\", \"public_key\": \"{key}\"}}"
-        )));
-    }
+    // The devices in the report are the server's own list, as the program prints it for the report.
+    assert!(text.contains("\"devices\": json.loads(e[\"SESSION_DEVICES\"])"));
+    assert!(text.contains("SESSION_DEVICES=$(python3 \"$BIN/dnet-devices\" json \"$DEVICES\")"));
+    assert!(text.contains("SESSION_DEVICES=\"$SESSION_DEVICES\" PRIMARY_SHA="));
     // Only the public half of the server's session key is reported; the private half never leaves.
     let report = text.split("REPORT_EOF").nth(1).unwrap();
     assert!(!report.contains("SESSION_PRIVATE"));
@@ -2064,6 +2139,16 @@ fn written_configuration(
     state: &std::path::Path,
     core: &std::path::Path,
 ) -> serde_json::Value {
+    let filled = written_configuration_text(text, state, core);
+    serde_json::from_str(&filled).unwrap_or_else(|e| panic!("not JSON ({e}): {filled}"))
+}
+
+/// The same, as the text the server would have on disk.
+fn written_configuration_text(
+    text: &str,
+    state: &std::path::Path,
+    core: &std::path::Path,
+) -> String {
     let template = text
         .split("<<CONFIG_EOF\n")
         .nth(1)
@@ -2078,9 +2163,14 @@ fn written_configuration(
         .replace("$REALITY_UUID", "bf000d23-0752-40b4-affe-68f7707a9661")
         .replace("$REALITY_PRIVATE", &reality_private)
         .replace("$REALITY_SHORT", "0123456789abcdef")
-        .replace("$SESSION_PRIVATE", &session_private);
+        .replace("$SESSION_PRIVATE", &session_private)
+        // What the server's own device program makes of the setup keys, so the core checks the true result.
+        .replace(
+            "$SESSION_PEERS",
+            &session_peers_as_the_server_has_them(&[device_key(1), device_key(2)]),
+        );
     assert!(!filled.contains('$'), "a variable was left in: {filled}");
-    serde_json::from_str(&filled).unwrap_or_else(|e| panic!("not JSON ({e}): {filled}"))
+    filled
 }
 
 fn state_with_certificate(core: &std::path::Path) -> tempfile::TempDir {
@@ -2137,6 +2227,101 @@ fn the_real_core_accepts_the_configuration_the_script_writes() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+/// The proof that matters for friends: a device added to the configuration the real script writes is accepted by the
+/// real core, every other part of the configuration is untouched, and the devices already there keep their entries.
+#[test]
+fn a_device_added_to_the_real_configuration_is_accepted_by_the_real_core_and_nothing_else_changes()
+{
+    let Some(core) = vendored_core() else {
+        eprintln!("SKIPPED: vendor/primary-core not fetched (cargo run -p xtask -- fetch-vendor)");
+        return;
+    };
+    let python = ["python3", "python"]
+        .into_iter()
+        .find(|p| {
+            std::process::Command::new(p)
+                .arg("-c")
+                .arg("pass")
+                .output()
+                .is_ok_and(|o| o.status.success())
+        })
+        .expect("python is needed to run the server's device program");
+    let state = state_with_certificate(&core);
+    let before = written_configuration_text(&script(&plan()).unwrap(), state.path(), &core);
+    let config = state.path().join("server.json");
+    std::fs::write(&config, &before).unwrap();
+    let program = state.path().join("dnet-devices.py");
+    std::fs::write(&program, crate::devices::program()).unwrap();
+    let registry = state.path().join("devices.json");
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(python)
+            .arg(&program)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let reg = registry.to_string_lossy().into_owned();
+    let cfg = config.to_string_lossy().into_owned();
+    run(&["sync", &reg, &cfg, &device_key(1), &device_key(2)]);
+
+    let friend = device_key(9);
+    let added = run(&["add", &reg, &cfg, &friend, "Ravi"]);
+    assert!(added.contains("10.9.0.4"), "{added}");
+
+    // The real core accepts what was staged, and the control: it rejects a broken one.
+    let staged = state.path().join("server.json.new");
+    let check = |path: &std::path::Path| {
+        std::process::Command::new(&core)
+            .args(["check", "-c"])
+            .arg(path)
+            .output()
+            .unwrap()
+    };
+    let out = check(&staged);
+    assert!(
+        out.status.success(),
+        "the core rejected the configuration with a device added:
+{}
+{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let broken = state.path().join("broken.json");
+    std::fs::write(
+        &broken,
+        std::fs::read_to_string(&staged)
+            .unwrap()
+            .replace("session-in", ""),
+    )
+    .ok();
+    std::fs::write(&broken, "{ not json").unwrap();
+    assert!(
+        !check(&broken).status.success(),
+        "the control passed: the check proves nothing"
+    );
+
+    // Only the peers changed: the two devices that were there are as they were, and the friend is new.
+    let old: serde_json::Value = serde_json::from_str(&before).unwrap();
+    let mut new: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&staged).unwrap()).unwrap();
+    let peers = new["endpoints"][0]["peers"].as_array().unwrap().clone();
+    assert_eq!(peers.len(), 3);
+    assert_eq!(
+        peers[..2],
+        old["endpoints"][0]["peers"].as_array().unwrap()[..]
+    );
+    assert_eq!(peers[2]["public_key"], friend.as_str());
+    assert_eq!(peers[2]["allowed_ips"][0], "10.9.0.4/32");
+    new["endpoints"][0]["peers"] = old["endpoints"][0]["peers"].clone();
+    assert_eq!(new, old, "something other than the peers changed");
 }
 
 #[test]

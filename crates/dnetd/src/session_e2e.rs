@@ -451,7 +451,16 @@ async fn the_session_composed_from_the_products_own_generators_carries_a_transfe
         .replace("$REALITY_UUID", REALITY_UUID)
         .replace("$REALITY_PRIVATE", &reality_private)
         .replace("$REALITY_SHORT", REALITY_SHORT)
-        .replace("$SESSION_PRIVATE", &session_private);
+        .replace("$SESSION_PRIVATE", &session_private)
+        // A fresh server's list holds the setup key, at the first address: what the server's own program prints.
+        .replace(
+            "$SESSION_PEERS",
+            &format!(
+                "        {{ \"public_key\": \"{}\", \"allowed_ips\": [ \"{}/32\" ] }}",
+                device.public_b64(),
+                dnet_config::session::session_device_address(0)
+            ),
+        );
     assert!(
         !filled.contains('$'),
         "a variable was left in the configuration"

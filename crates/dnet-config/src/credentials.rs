@@ -592,7 +592,7 @@ fn serde_error_summary(e: &serde_json::Error) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Appears in every secret below. If it ever shows up in an error, a log line or a `Debug`
@@ -679,7 +679,8 @@ mod tests {
         }
     }
 
-    fn with_session() -> EndpointCredentials {
+    /// A bundle with every profile and a session: the sample other modules' tests build on.
+    pub(crate) fn with_session() -> EndpointCredentials {
         EndpointCredentials {
             session: Some(session()),
             ..full()
