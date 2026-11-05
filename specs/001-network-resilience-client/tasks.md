@@ -1958,6 +1958,33 @@ own, made by DNet Engine's wizard on Oracle Cloud Always Free (or any Linux serv
   > profile is left the connection fails with `AllProfilesBlocked`. Nothing leaks meanwhile (with no core, nothing carries traffic), so this is recovery speed and wording, not safety. The question: a crash
   > is not censorship, so should a core that exits be restarted once on the same endpoint before any profile is called blocked, and after how many exits in how long is it blocked? `CoreRuntime::core_health`
   > already gives the signal (`Exited { code }`); the missing parts are an engine input for it (not a `LiveCheck` variant, which would mark the profile blocked) and that policy, test first, in `dnet-core`.
+- [~] T176 [US1] The server's firewall: what the setup script opens, what a device that is let in may and may not reach, and a check of it against real iptables (`docs/security/server-firewall.md`)
+  > **Built 2026-11-05.** Read in the script before the change: exactly three ports were opened (kept), but the AmneziaWG exit was forwarded with no filter at all, so a device with the key could reach the cloud's private network
+  > and its instance metadata, send mail, and reach the server's own ssh from inside the tunnel; and on an image whose own rules reject forwarded traffic the exit would not forward at all (an imitation of such an image, not a real one).
+  > Now `dnet-net-up` adds, after the three ports and the masquerade, one rule at a time (an unsupported rule is a note, never a reason the server does not start, except a refusal, which falls back to a DROP; the firewall's lock is waited
+  > for; running it twice changes nothing; a changed script restarts the firewall unit on a running server): for traffic from the tunnel, refusals of private, loopback, link-local and reserved ranges (`EXIT_DENIED_V4/V6`, one list, tested
+  > to contain everything the client calls local, the cloud metadata addresses, and no public address), port 25 and every protocol but TCP, UDP and ICMP, then a cap on new connections (30 a second to one address, 60 a second overall after a
+  > burst of 300; the drop exists only if its accept was made); for what the tunnel may ask of the server itself, only the measurement origin (at most 64 connections), replies and a ping; and for the account the carriers run as, replies,
+  > its own session port and origin, and only the resolvers of `/etc/resolv.conf` first, then the server's own addresses, the private ranges, port 25 and the same caps, IPv4 and IPv6. The session's own UDP port is dropped from outside.
+  > The origin now runs as the unprivileged account; the AmneziaWG unit has the lighter sandbox settings. The script **warns**, on the error stream, when ssh takes passwords. The wizard's port step says to keep the ssh rule, open nothing
+  > else and leave IPv6 off.
+  > **Independent review (2026-11-05)** of the first version found, by reading, nine real problems that the first container check had not tried: the exit could reach the server's own addresses, port 53 bypassed the caps and the refusals,
+  > IPv6 had no cap, a stranger hammering the REALITY door could drain the shared cap, IP-in-IP and GRE were forwarded, a refusal the kernel could not install failed open, replies to clients on private addresses were refused, rule
+  > changes never reached a running server, and the session's port was not closed to the network. All fixed, test first, and each is now a check in the container. Not taken: swapping chains atomically (the window exists only for a
+  > by-hand run with tunnels up), and sandboxing the AmneziaWG program further (needs a real systemd to try).
+  > **A second review of the fixes** rated five of the nine closed and found more, all fixed test first: with no iptables installed nothing was made and nothing said so (now installed with the other tools, and the three jumps
+  > that carry the protection are checked afterwards: the server does not start without them, IPv6 only if the machine has an IPv6 route); a changed unit file waited for the next reboot (units compared before and after, the services
+  > restarted, and every service waited for before the report); the lock wait did not cover the three doors (moved up); the tunnel's forwarding jump now names the interface, a spoofed tunnel-subnet source from elsewhere is
+  > dropped; one stranger could still starve the exit through the REALITY door (5 a second per address, burst 20); the stub resolver `127.0.0.53` is always allowed; a REALITY door on the origin's port is refused. Not taken:
+  > `addrtype BROADCAST` (the reserved range already covers the limited broadcast).
+  > **Found on the way, not a firewall matter:** under `umask 077` the script made `/opt/dnet` and `/opt/dnet/bin` root-only, so the core (which runs as `dnet`) could not execute its program and, with `systemctl enable --now` under
+  > `set -e`, the setup would have stopped before printing its report on a fresh server. Fixed (`chmod 755`), with a test; seen only by reading, because no real server run (T098) has happened.
+  > **Tests:** 19 on the script text (order, conditionality, the three ports exactly three, the ranges, the units, the directories) and `testing/server-firewall` (entry 8.7 in `LOCAL-COMMANDS.md`): the rendered script in a throwaway container
+  > with real iptables and network namespaces, 64 checks on the nftables-backed iptables and 56 on the older kind (`-Mode legacy`; that kernel has no IPv6 filtering for it, so IPv6 is skipped and said to be). The control first (an
+  > open firewall lets a device reach private hosts, mail, ssh, a GRE tunnel gets through, the carriers' account reaches the server's own address and port 53 anywhere, floods all get through), then an image-style firewall plus
+  > the script, twice, then three kernels that cannot do everything (no owner match: refuses to start; no REJECT: refusals become drops; no limit modules: no caps but nothing blocked).
+  > **Not shown, so not claimed:** a real Oracle server or real systemd (the container's kernel is Docker Desktop's, the image's rules were imitated, the units are checked as text); how a scanner sees the three doors; the core's own
+  > `ip_is_private` coverage; the REALITY cover site; a provider's own rules.
 
 ## Dependencies
 

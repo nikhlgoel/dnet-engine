@@ -118,8 +118,10 @@ const OPEN_PORTS: Step = {
     'A port is a door into your server. The program needs exactly these three open, and nothing else.',
     'In your provider’s page for the server, find its network firewall rules (the rules for traffic coming in).',
     'Add one rule for each row below: where from is everywhere, the protocol and port are as listed.',
+    'Each of these three only works for someone who holds your secret keys, which is why they can be open to everywhere. Opening anything else is not safe.',
+    'Leave the ssh rule (port 22) that your provider made for you, so you can still log in. Do not open any other port, and do not turn on IPv6 for this server.',
   ],
-  see: 'Three new rules in the list, one for each row.',
+  see: 'Three new rules in the list, one for each row, next to the ssh rule that was already there.',
   stuck: [
     'If the provider has a second place with firewall rules for the server itself, add the same three there too.',
     WORDING,

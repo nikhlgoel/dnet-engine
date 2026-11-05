@@ -251,6 +251,15 @@ run 8.5 "cargo run -p dnet-provision --example dump_script -- target\server-core
 
 8.6 Then follow `docs/owner-gates.md` section "T149-T151": the window's guide, on a real Oracle account.
 
+8.7 The firewall we put on the server, run against real iptables in a throwaway container (needs Docker; changes only the container; takes a minute or two). It shows first that an open firewall lets everything through, then what the script lets through and refuses. Why each rule is there: `docs/security/server-firewall.md`.
+```powershell
+run 8.7 "powershell -File testing\server-firewall\Invoke-ServerFirewallCheck.ps1"
+```
+Again on the older kind of iptables that many cloud images still have (IPv6 is skipped if the kernel cannot do it):
+```powershell
+run 8.7b "powershell -File testing\server-firewall\Invoke-ServerFirewallCheck.ps1 -Mode legacy"
+```
+
 ## 9. New: network cost and the server's measurement origin (T153, T154)
 
 9.1 The new tests (the origin test runs python; the checks tests open local sockets)

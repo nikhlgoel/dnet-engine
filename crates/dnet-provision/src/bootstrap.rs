@@ -75,6 +75,30 @@ pub use dnet_config::session::{
 
 /// The port of the measurement origin on the server's tunnel address.
 pub const ORIGIN_PORT: u16 = 8080;
+
+/// Where the server will not carry traffic for the people who use it, IPv4: this machine, the private network a provider
+/// puts it on, the link-local range where a cloud keeps its instance metadata, and the ranges that are never a public
+/// website. A device that is lost, or whose key leaks, then cannot use the server to reach the inside of its cloud.
+/// Everything the client calls "local" (`LOCAL_BYPASS_CIDRS`) is inside it, and a test pins that.
+pub const EXIT_DENIED_V4: &[&str] = &[
+    "0.0.0.0/8",
+    "10.0.0.0/8",
+    "100.64.0.0/10",
+    "127.0.0.0/8",
+    // Azure's control plane, which answers on a public address.
+    "168.63.129.16/32",
+    "169.254.0.0/16",
+    "172.16.0.0/12",
+    "192.0.0.0/24",
+    "192.168.0.0/16",
+    "198.18.0.0/15",
+    "224.0.0.0/4",
+    "240.0.0.0/4",
+];
+
+/// The same for IPv6: the NAT64 prefix (it maps IPv4 addresses, private ones included), unique-local (where a cloud's
+/// IPv6 metadata lives), link-local and multicast.
+pub const EXIT_DENIED_V6: &[&str] = &["64:ff9b::/96", "fc00::/7", "fe80::/10", "ff00::/8"];
 /// The most the origin gives out in one answer. A race asks for a few hundred kilobytes; nothing needs more.
 pub const ORIGIN_MAX_BYTES: usize = 1_048_576;
 
@@ -329,6 +353,15 @@ impl BootstrapPlan {
         if ports.contains(&0) || self.ports.amneziawg_udp == self.ports.hysteria2_udp {
             return Err(BootstrapError::Invalid("the ports"));
         }
+        // The session's own UDP port is closed to everything but this machine (the firewall script drops it from
+        // outside), so a public UDP door on the same number would be a door that never opens.
+        if self.ports.amneziawg_udp == SESSION_PORT || self.ports.hysteria2_udp == SESSION_PORT {
+            return Err(BootstrapError::Invalid("the ports"));
+        }
+        // The REALITY door listens on every address, this machine's loopback included, where the session's origin is.
+        if self.ports.reality_tcp == ORIGIN_PORT {
+            return Err(BootstrapError::Invalid("the ports"));
+        }
         Ok(())
     }
 }
@@ -349,6 +382,12 @@ STATE=/var/lib/dnet
 mkdir -p "$BIN" "$STATE/awg" "$STATE/primary"
 # $STATE can be walked through (not listed or read) so the unprivileged core can reach its own directory.
 chmod 711 "$STATE"
+# The programs are public and no secret lives under $BASE: the accounts the services run as must be able to walk to
+# and run them, and umask 077 made these directories root-only.
+chmod 755 "$BASE" "$BIN"
+# The units as they were, to tell below whether this run changed any (a new sandbox setting or account would otherwise
+# wait for the next reboot).
+UNITS_BEFORE=$(cat /etc/systemd/system/dnet-*.service /etc/systemd/system/dnet-*.timer 2>/dev/null | cksum)
 chmod 700 "$STATE/awg"
 # $STATE/primary is made 700 by mkdir (umask 077) the first time; the end of this script gives it its final
 # owner and mode, and later runs leave it alone, so a running core never loses its directory in the middle.
@@ -374,6 +413,8 @@ ensure curl curl curl
 ensure openssl openssl openssl
 ensure python3 python3 python3
 ensure ip iproute2 iproute
+# Without it the firewall script would add nothing at all, and a lost device would reach everything it can reach.
+ensure iptables iptables iptables
 ensure sha256sum coreutils coreutils
 
 # ---- the core that faces the internet runs as a user of its own, with no shell and no home: a flaw in it
@@ -609,11 +650,19 @@ chmod 0755 "$BIN/dnet-awg-configure"
 # ---- the machine's own firewall: these three ports are opened, and the AmneziaWG tunnel's exit is forwarded.
 # It adds accept rules and sets no default of its own: what else is closed is up to the image's own rules
 # and the provider's network rules (the guide has the person open exactly these three there).
+HAD_NET_UP=0
+NET_CHANGED=0
+if [ -f "$BIN/dnet-net-up" ]; then cp "$BIN/dnet-net-up" "$BIN/dnet-net-up.old"; HAD_NET_UP=1; fi
 cat > "$BIN/dnet-net-up" <<'NET_EOF'
 #!/bin/sh
 set -eu
 if command -v sysctl >/dev/null 2>&1; then sysctl -qw net.ipv4.ip_forward=1; fi
 if command -v iptables >/dev/null 2>&1; then
+  # Another tool holding the firewall's lock (a package, another firewall manager) is waited for, for every rule below,
+  # the three ports included: on the older kind of iptables it would otherwise fail this unit at boot, and the
+  # services that need it would stay down.
+  if command iptables -w -S >/dev/null 2>&1; then iptables() { command iptables -w "$@"; }; fi
+  if command -v ip6tables >/dev/null 2>&1 && command ip6tables -w -S >/dev/null 2>&1; then ip6tables() { command ip6tables -w "$@"; }; fi
   allow() { iptables -C INPUT -p "$1" --dport "$2" -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -p "$1" --dport "$2" -j ACCEPT; }
   allow udp @@AWG_PORT@@
   allow udp @@HY2_PORT@@
@@ -623,9 +672,155 @@ if command -v iptables >/dev/null 2>&1; then
     iptables -t nat -C POSTROUTING -s @@TUN_SERVER@@/@@TUN_PREFIX@@ -o "$IFACE" -j MASQUERADE 2>/dev/null \
       || iptables -t nat -A POSTROUTING -s @@TUN_SERVER@@/@@TUN_PREFIX@@ -o "$IFACE" -j MASQUERADE
   fi
+
+  # ---- what this server will and will not do for the people who use it. A lost device, or a leaked key, must not
+  # turn the server into a way into its cloud's private network or its instance metadata, a source of mail or of a
+  # flood: that is how a free server is taken away or its address banned. These are extras on top of a server that
+  # already works, so each rule is tried on its own and one the kernel does not support is a note, never a reason
+  # for the server not to start. Each chain is emptied and made again on every run, so running it twice changes
+  # nothing.
+  harden() {
+    DENIED4="@@EXIT_DENIED_V4@@"
+    DENIED6="@@EXIT_DENIED_V6@@"
+    rule() { "$@" || echo "dnet-net-up: skipped (not supported here): $*" >&2; }
+    fresh() { iptables -N "$1" 2>/dev/null || iptables -F "$1"; }
+    fresh6() { ip6tables -N "$1" 2>/dev/null || ip6tables -F "$1"; }
+    jump() { iptables -C "$@" 2>/dev/null || iptables -I "$@"; }
+    jump6() { ip6tables -C "$@" 2>/dev/null || ip6tables -I "$@"; }
+    # A refusal is REJECT, or DROP on a kernel that has no REJECT: a refusal that was skipped would be a hole.
+    fresh DNET-PROBE
+    if iptables -A DNET-PROBE -j REJECT 2>/dev/null; then DENY=REJECT; else DENY=DROP; fi
+    iptables -F DNET-PROBE 2>/dev/null || true
+    iptables -X DNET-PROBE 2>/dev/null || true
+
+    # cap <chain> <verdict>: what may start new connections. At most 30 a second to any one address (a flood at one
+    # target, or a stranger making a carrier dial out again and again, is stopped there) and, over all, 60 a second
+    # after a burst of 300: far above what a person needs, slow enough to make a scan crawl. The drop after the
+    # overall limit exists only if that limit's own accept was made, so a kernel without the module cannot turn the
+    # cap into a block of everything.
+    cap() {
+      fresh "$1"
+      rule iptables -A "$1" -m hashlimit --hashlimit-name "$1" --hashlimit-mode dstip --hashlimit-above 30/second --hashlimit-burst 60 -j DROP
+      if iptables -A "$1" -m limit --limit 60/second --limit-burst 300 -j "$2"; then
+        rule iptables -A "$1" -j DROP
+      fi
+    }
+
+    # Traffic that comes in through the AmneziaWG tunnel and leaves through this machine. Nothing private, local or
+    # reserved; no mail sent straight to other servers; new connections capped. Only TCP, UDP and ICMP leave (IP-in-IP
+    # and GRE from this address are a way to have it reported for reflected attacks). The chain ends in the accepts
+    # that forwarding needs, so an image whose own rules reject forwarded traffic does not break the exit; the
+    # replies are accepted by a rule of their own.
+    cap DNET-CAP-FWD ACCEPT
+    fresh DNET-FORWARD
+    for range in $DENIED4; do rule iptables -A DNET-FORWARD -d "$range" -j "$DENY"; done
+    rule iptables -A DNET-FORWARD -p tcp --dport 25 -j "$DENY"
+    rule iptables -A DNET-FORWARD -m conntrack --ctstate NEW -p tcp -j DNET-CAP-FWD
+    rule iptables -A DNET-FORWARD -m conntrack --ctstate NEW -p udp -j DNET-CAP-FWD
+    rule iptables -A DNET-FORWARD -m conntrack --ctstate NEW -p icmp -j DNET-CAP-FWD
+    rule iptables -A DNET-FORWARD -p tcp -j ACCEPT
+    rule iptables -A DNET-FORWARD -p udp -j ACCEPT
+    rule iptables -A DNET-FORWARD -p icmp -j ACCEPT
+    rule iptables -A DNET-FORWARD -j DROP
+    rule jump FORWARD -i awg0 -s @@TUN_SERVER@@/@@TUN_PREFIX@@ -j DNET-FORWARD
+    rule jump FORWARD -o awg0 -d @@TUN_SERVER@@/@@TUN_PREFIX@@ -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    # A packet that claims a tunnel address but did not come through the tunnel (a neighbour on the provider's network
+    # with a source it made up) is dropped. Inserted last, so it is looked at first.
+    rule jump FORWARD -s @@TUN_SERVER@@/@@TUN_PREFIX@@ ! -i awg0 -j DROP
+
+    # What the tunnel may ask of this machine itself: the measurement origin on the tunnel address (a few
+    # connections at a time), replies, and a ping. Not its ssh, not its other services, not the three public ports
+    # from the inside. And the session's own port is for the carriers on this machine only: the core gives the
+    # session no listen address, so this is what keeps it off the network.
+    fresh DNET-INPUT
+    rule iptables -A DNET-INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    rule iptables -A DNET-INPUT -p tcp -d @@TUN_SERVER@@ --dport @@ORIGIN_PORT@@ -m connlimit --connlimit-above 64 --connlimit-mask 32 -j DROP
+    rule iptables -A DNET-INPUT -p tcp -d @@TUN_SERVER@@ --dport @@ORIGIN_PORT@@ -j ACCEPT
+    rule iptables -A DNET-INPUT -p icmp --icmp-type echo-request -m limit --limit 5/second -j ACCEPT
+    rule iptables -A DNET-INPUT -j DROP
+    rule jump INPUT -i awg0 -j DNET-INPUT
+    rule jump INPUT ! -i lo -p udp --dport @@SESSION_PORT@@ -j DROP
+    # Every stranger's connection to the REALITY door that does not hold the key makes the server call the cover site
+    # once, as the account whose exit is capped. A device keeps one connection to the door, so a few a second from one
+    # address is more than it needs, and a flood from one address is stopped here instead of using up the cap.
+    rule jump INPUT -p tcp --dport @@REALITY_PORT@@ -m conntrack --ctstate NEW -m hashlimit --hashlimit-name dnet-reality --hashlimit-mode srcip --hashlimit-above 5/second --hashlimit-burst 20 -j DROP
+
+    # The account the carriers run as makes the connections of the session's exit. What it may reach is decided
+    # before anything is refused: replies (a client may sit on a private address), this machine's own session port
+    # and origin and nothing else on it, and the resolvers the machine itself uses (not port 53 anywhere, which
+    # would skip the caps and the refusals). Then this machine's other addresses, its public one included (a device
+    # must not reach services the provider's firewall hides), the private ranges, mail, and the caps.
+    NS4=$(awk '$1 == "nameserver" && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { print $2 }' /etc/resolv.conf 2>/dev/null || true)
+    cap DNET-CAP-OUT RETURN
+    fresh DNET-OUT
+    rule iptables -A DNET-OUT -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+    rule iptables -A DNET-OUT -d 127.0.0.1 -p udp --dport @@SESSION_PORT@@ -j RETURN
+    rule iptables -A DNET-OUT -d 127.0.0.1 -p tcp --dport @@ORIGIN_PORT@@ -j RETURN
+    rule iptables -A DNET-OUT -d 127.0.0.53 -p udp --dport 53 -j RETURN
+    rule iptables -A DNET-OUT -d 127.0.0.53 -p tcp --dport 53 -j RETURN
+    for ns in $NS4; do
+      rule iptables -A DNET-OUT -d "$ns" -p udp --dport 53 -j RETURN
+      rule iptables -A DNET-OUT -d "$ns" -p tcp --dport 53 -j RETURN
+    done
+    rule iptables -A DNET-OUT -m addrtype --dst-type LOCAL -j "$DENY"
+    for range in $DENIED4; do rule iptables -A DNET-OUT -d "$range" -j "$DENY"; done
+    rule iptables -A DNET-OUT -p tcp --dport 25 -j "$DENY"
+    rule iptables -A DNET-OUT -m conntrack --ctstate NEW -j DNET-CAP-OUT
+    rule jump OUTPUT -m owner --uid-owner dnet -j DNET-OUT
+
+    # The same for IPv6, which the carriers also listen on.
+    if command -v ip6tables >/dev/null 2>&1; then
+      fresh6 DNET-PROBE6
+      if ip6tables -A DNET-PROBE6 -j REJECT 2>/dev/null; then DENY6=REJECT; else DENY6=DROP; fi
+      ip6tables -F DNET-PROBE6 2>/dev/null || true
+      ip6tables -X DNET-PROBE6 2>/dev/null || true
+      NS6=$(awk '$1 == "nameserver" && $2 ~ /^[0-9a-fA-F:]+$/ && $2 ~ /:/ { print $2 }' /etc/resolv.conf 2>/dev/null || true)
+      cap6() {
+        fresh6 "$1"
+        rule ip6tables -A "$1" -m hashlimit --hashlimit-name "$1" --hashlimit-mode dstip --hashlimit-above 30/second --hashlimit-burst 60 -j DROP
+        if ip6tables -A "$1" -m limit --limit 60/second --limit-burst 300 -j "$2"; then
+          rule ip6tables -A "$1" -j DROP
+        fi
+      }
+      cap6 DNET-CAP-OUT6 RETURN
+      fresh6 DNET-OUT6
+      rule ip6tables -A DNET-OUT6 -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+      for ns in $NS6; do
+        rule ip6tables -A DNET-OUT6 -d "$ns" -p udp --dport 53 -j RETURN
+        rule ip6tables -A DNET-OUT6 -d "$ns" -p tcp --dport 53 -j RETURN
+      done
+      rule ip6tables -A DNET-OUT6 -m addrtype --dst-type LOCAL -j "$DENY6"
+      for range in $DENIED6; do rule ip6tables -A DNET-OUT6 -d "$range" -j "$DENY6"; done
+      rule ip6tables -A DNET-OUT6 -p tcp --dport 25 -j "$DENY6"
+      rule ip6tables -A DNET-OUT6 -m conntrack --ctstate NEW -j DNET-CAP-OUT6
+      rule jump6 OUTPUT -m owner --uid-owner dnet -j DNET-OUT6
+      rule jump6 INPUT ! -i lo -p udp --dport @@SESSION_PORT@@ -j DROP
+      rule jump6 INPUT -p tcp --dport @@REALITY_PORT@@ -m conntrack --ctstate NEW -m hashlimit --hashlimit-name dnet-reality6 --hashlimit-mode srcip --hashlimit-above 5/second --hashlimit-burst 20 -j DROP
+    fi
+
+    # The jumps that carry the protection must exist now. `rule` only notes a rule it could not make, so look: a server
+    # that looks protected and is not is worse than one that does not start.
+    present=1
+    iptables -C FORWARD -i awg0 -s @@TUN_SERVER@@/@@TUN_PREFIX@@ -j DNET-FORWARD 2>/dev/null || present=0
+    iptables -C INPUT -i awg0 -j DNET-INPUT 2>/dev/null || present=0
+    iptables -C OUTPUT -m owner --uid-owner dnet -j DNET-OUT 2>/dev/null || present=0
+    # IPv6 is required only if this machine can reach anything over it: with no IPv6 default route there is nothing to
+    # protect, and a kernel with no IPv6 filtering is then no reason to refuse to start.
+    if [ -n "$(ip -6 route show default 2>/dev/null)" ]; then
+      ip6tables -C OUTPUT -m owner --uid-owner dnet -j DNET-OUT6 2>/dev/null || present=0
+    fi
+    [ "$present" = 1 ]
+  }
+  harden || { echo "dnet-net-up: the rules that keep a lost device out of this server's inside could not all be made (see above); not starting" >&2; exit 1; }
 fi
 NET_EOF
 chmod 0755 "$BIN/dnet-net-up"
+# A firewall script that changed must be run again on a server that is already up: its unit stays "active" after it
+# ran, so starting it again does nothing. A first run has no earlier script and starts the units itself.
+if [ "$HAD_NET_UP" = 1 ]; then
+  cmp -s "$BIN/dnet-net-up" "$BIN/dnet-net-up.old" || NET_CHANGED=1
+  rm -f "$BIN/dnet-net-up.old"
+fi
 
 # ---- housekeeping: a free server has no one watching its disk, so nothing here may grow without bound.
 # Only logs and package downloads are touched, never a key, a certificate or the configuration.
@@ -712,9 +907,18 @@ Description=DNet Engine endpoint: measurement origin (tunnel address only)
 After=network-online.target dnet-awg.service
 Requires=dnet-awg.service
 [Service]
+User=dnet
+Group=dnet
 ExecStart=/usr/bin/python3 /opt/dnet/bin/dnet-origin @@TUN_SERVER@@
 Restart=always
 RestartSec=2
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET
 [Install]
 WantedBy=multi-user.target
 UNIT_EOF
@@ -797,14 +1001,43 @@ RuntimeDirectory=amneziawg
 ExecStart=/opt/dnet/bin/amneziawg-go -f awg0
 ExecStartPost=/opt/dnet/bin/dnet-awg-configure
 Restart=on-failure
+# This program listens on a public port and parses what strangers send, as root, because it makes a network device.
+# It keeps what it needs for that (it must open /dev/net/tun, so no sandboxing of devices) and gives up the rest.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
 [Install]
 WantedBy=multi-user.target
 UNIT_EOF
+UNITS_AFTER=$(cat /etc/systemd/system/dnet-*.service /etc/systemd/system/dnet-*.timer 2>/dev/null | cksum)
+UNITS_CHANGED=0
+if [ "$HAD_NET_UP" = 1 ] && [ "$UNITS_BEFORE" != "$UNITS_AFTER" ]; then UNITS_CHANGED=1; fi
 systemctl daemon-reload
 systemctl enable --now dnet-net.service dnet-primary.service dnet-awg.service dnet-origin.service dnet-origin-session.service >/dev/null
 systemctl enable --now dnet-housekeeping.timer >/dev/null
 # A configuration that changed (a device added or removed) takes effect now, not at the next restart.
 if [ "$CONFIG_CHANGED" = 1 ]; then systemctl restart dnet-primary.service; fi
+# The same for the firewall and for the units: restarting the firewall unit restarts the services that need it, so no
+# tunnel is up while the rules are rebuilt. The session's origin does not need it, so it is named.
+if [ "$NET_CHANGED" = 1 ] || [ "$UNITS_CHANGED" = 1 ]; then
+  systemctl restart dnet-net.service
+  systemctl try-restart dnet-origin-session.service
+fi
+# No report is printed for a server whose services are not running: each is waited for, and the first that does not
+# come up is named, with where to read why.
+for unit in dnet-net dnet-primary dnet-awg dnet-origin dnet-origin-session; do
+  waited=0
+  until systemctl is-active --quiet "$unit.service"; do
+    waited=$((waited + 1))
+    if [ "$waited" -gt 20 ]; then
+      echo "dnet: $unit.service is not running; see: journalctl -u $unit.service" >&2
+      exit 6
+    fi
+    sleep 0.5
+  done
+done
 
 # ---- security updates: a server nobody logs in to has to patch itself. Best effort on purpose: a failure
 # here must not undo a server that otherwise works, and it is reported by the next run's output.
@@ -827,6 +1060,13 @@ elif need dnf; then
 fi
 
 @@KEEPALIVE@@
+
+# ---- a warning, not a change. A server that takes passwords over ssh is guessed at all day by strangers, and a
+# server that is taken over is how its address ends up banned. Turning that off is the person's call (a wrong change
+# could lock them out), so this only says so, on the error stream: the report below stays the one line the client reads.
+if command -v sshd >/dev/null 2>&1 && sshd -T 2>/dev/null | grep -qi '^passwordauthentication yes'; then
+  echo "WARNING: this server lets people log in to ssh with a password. Turn that off (PasswordAuthentication no in /etc/ssh/sshd_config, then restart ssh) and use only your key file." >&2
+fi
 
 # ---- the report: public material, and the shared secrets the client has to hold
 AWG_PUB="$AWG_PUB" HY2_SPKI="$HY2_SPKI" HY2_AUTH="$HY2_AUTH" HY2_OBFS="$HY2_OBFS" CERT_ALG="$CERT_ALG" \
@@ -917,6 +1157,8 @@ pub fn script(plan: &BootstrapPlan) -> Result<String, BootstrapError> {
         ("ARCH", plan.cores.arch.as_str().to_owned()),
         ("ORIGIN_PORT", ORIGIN_PORT.to_string()),
         ("ORIGIN_MAX", ORIGIN_MAX_BYTES.to_string()),
+        ("EXIT_DENIED_V4", EXIT_DENIED_V4.join(" ")),
+        ("EXIT_DENIED_V6", EXIT_DENIED_V6.join(" ")),
         ("TUN_SERVER", TUNNEL_SERVER.to_string()),
         ("TUN_CLIENT", TUNNEL_CLIENT.to_string()),
         ("TUN_PREFIX", TUNNEL_PREFIX.to_string()),
