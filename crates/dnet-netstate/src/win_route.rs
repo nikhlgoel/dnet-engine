@@ -124,7 +124,12 @@ pub fn best_route_to(dest: IpAddr) -> Result<BestRoute, NetstateError> {
 /// The physical default gateway, read **before** any TUN exists (afterwards the best
 /// route to an arbitrary address is the TUN itself).
 pub fn default_gateway() -> Result<IpAddr, NetstateError> {
-    let route = best_route_to(IpAddr::V4(DEFAULT_ROUTE_PROBE))?;
+    gateway_of(&best_route_to(IpAddr::V4(DEFAULT_ROUTE_PROBE))?)
+}
+
+/// The gateway of a best route, if it is a default route (prefix length 0) that has one. Anything else, a
+/// more specific route or an on-link default, is not a way out through a gateway.
+fn gateway_of(route: &BestRoute) -> Result<IpAddr, NetstateError> {
     match (route.prefix_len, route.next_hop) {
         (0, Some(gw)) => Ok(gw),
         _ => Err(NetstateError::Operation(
@@ -533,5 +538,288 @@ mod tests {
             next_hop: gateway,
         };
         WindowsUndoExecutor.reverse(&record).unwrap();
+    }
+}
+
+/// What the mutation run showed the route code's own tests did not pin: how it reads the system's answers and
+/// how the installer keeps track of the routes it owns. Nothing here changes a route: the interface used for
+/// the records does not exist, so reversing one is a no-op, and the ones that read the table only read it.
+#[cfg(test)]
+mod bookkeeping_tests {
+    use super::*;
+    use crate::undo::MemoryStore;
+    use dnet_config::ActiveEndpointBypass;
+    use dnet_core::endpoint::EndpointAddress;
+
+    /// A LUID no interface has.
+    const GONE: u64 = 0xDEAD_BEEF_0000_0001;
+    const GATEWAY: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1));
+    const OTHER_GATEWAY: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 9, 8, 7));
+
+    fn route(last_octet: u8, gateway: IpAddr) -> HostRoute {
+        let host = format!("203.0.113.{last_octet}");
+        let bypass = ActiveEndpointBypass::new(&EndpointAddress::new(host, 1).unwrap());
+        HostRoute::for_endpoint(&bypass, gateway)
+    }
+
+    fn installer() -> (WindowsRouteInstaller, Arc<UndoRegistry>) {
+        let registry = Arc::new(UndoRegistry::open(Box::new(MemoryStore::new())).unwrap());
+        (WindowsRouteInstaller::new(registry.clone()), registry)
+    }
+
+    /// Make the installer own `route`, with an undo record that is safe to reverse.
+    fn own(installer: &WindowsRouteInstaller, registry: &UndoRegistry, route: &HostRoute) {
+        let destination: IpAddr = route.destination().parse().unwrap();
+        let id = registry
+            .apply(
+                UndoRecord::HostRoute {
+                    interface_luid: GONE,
+                    destination,
+                    next_hop: route.gateway(),
+                },
+                || Ok(Mutation::Applied),
+            )
+            .unwrap()
+            .expect("the record is kept");
+        installer.owned_routes().push(OwnedRoute {
+            destination: route.destination().to_string(),
+            gateway: route.gateway(),
+            id,
+        });
+    }
+
+    // ---------------------------------------------------------------- the system's answers
+
+    #[test]
+    fn no_error_is_success_and_any_other_code_is_an_error_that_names_the_call_and_the_code() {
+        assert!(win32(WIN32_ERROR(0), "SomeCall").is_ok());
+        for code in [1u32, 5, 87, 1168, 1392, 0xFFFF] {
+            let error = win32(WIN32_ERROR(code), "SomeCall")
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("SomeCall"), "{error}");
+            assert!(error.contains(&code.to_string()), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_best_route_to_the_machine_itself_is_on_link_with_no_next_hop() {
+        let route = best_route_to(IpAddr::V4(Ipv4Addr::LOCALHOST)).unwrap();
+        assert_eq!(
+            route.next_hop, None,
+            "an on-link route has no next hop to name"
+        );
+    }
+
+    #[test]
+    fn a_default_route_with_a_gateway_gives_the_gateway() {
+        let route = BestRoute {
+            interface_index: 5,
+            interface_luid: 9,
+            prefix_len: 0,
+            next_hop: Some(GATEWAY),
+        };
+        assert_eq!(gateway_of(&route).unwrap(), GATEWAY);
+    }
+
+    #[test]
+    fn anything_but_a_default_route_with_a_gateway_is_no_usable_path() {
+        for (prefix_len, next_hop) in [
+            (0u8, None),
+            (1, Some(GATEWAY)),
+            (8, Some(GATEWAY)),
+            (24, Some(GATEWAY)),
+            (32, Some(GATEWAY)),
+            (255, None),
+        ] {
+            let route = BestRoute {
+                interface_index: 5,
+                interface_luid: 9,
+                prefix_len,
+                next_hop,
+            };
+            let error = gateway_of(&route).unwrap_err().to_string();
+            assert!(
+                error.contains("no usable path"),
+                "/{prefix_len} {next_hop:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_interface_that_does_not_exist_is_not_there_and_the_loopback_is() {
+        assert!(!interface_exists(GONE));
+        assert!(!interface_exists(0));
+        assert!(!interface_exists(u64::MAX));
+        let loopback = best_route_to(IpAddr::V4(Ipv4Addr::LOCALHOST))
+            .unwrap()
+            .interface_luid;
+        assert!(interface_exists(loopback));
+    }
+
+    // ---------------------------------------------------------------- the row that is built
+
+    #[test]
+    fn an_ipv4_host_route_is_a_slash_32_and_an_ipv6_one_a_slash_128() {
+        let v4 = route_row(GONE, "203.0.113.9".parse().unwrap(), GATEWAY);
+        assert_eq!(v4.DestinationPrefix.PrefixLength, 32);
+        let v6 = route_row(
+            GONE,
+            "2001:db8::9".parse().unwrap(),
+            "fe80::1".parse().unwrap(),
+        );
+        assert_eq!(v6.DestinationPrefix.PrefixLength, 128);
+    }
+
+    #[test]
+    fn the_row_carries_the_interface_the_destination_and_the_next_hop_it_was_given() {
+        let dest: IpAddr = "203.0.113.9".parse().unwrap();
+        let row = route_row(GONE, dest, GATEWAY);
+        // SAFETY: reading the `Value` view of the LUID union, which every view shares.
+        assert_eq!(unsafe { row.InterfaceLuid.Value }, GONE);
+        assert_eq!(
+            from_sockaddr_inet(&row.DestinationPrefix.Prefix),
+            Some(dest)
+        );
+        assert_eq!(from_sockaddr_inet(&row.NextHop), Some(GATEWAY));
+    }
+
+    /// Metric zero and the management protocol: the route is ours, and it wins over the default route.
+    #[test]
+    fn the_row_has_metric_zero_and_is_marked_as_made_by_a_manager() {
+        let row = route_row(GONE, "203.0.113.9".parse().unwrap(), GATEWAY);
+        assert_eq!(row.Metric, 0);
+        assert_eq!(row.Protocol, MIB_IPPROTO_NETMGMT);
+    }
+
+    #[test]
+    fn a_route_on_an_interface_that_does_not_exist_does_not_exist() {
+        let row = route_row(GONE, "203.0.113.9".parse().unwrap(), GATEWAY);
+        assert!(!route_exists(&row));
+    }
+
+    #[test]
+    fn the_loopback_hosts_own_route_exists() {
+        let loopback = best_route_to(IpAddr::V4(Ipv4Addr::LOCALHOST))
+            .unwrap()
+            .interface_luid;
+        let row = route_row(
+            loopback,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        );
+        assert!(
+            route_exists(&row),
+            "every machine has a route to its own loopback address"
+        );
+    }
+
+    // ---------------------------------------------------------------- reversing a record
+
+    #[test]
+    fn reversing_a_record_whose_interface_has_gone_is_success_for_both_families() {
+        for (destination, next_hop) in [("203.0.113.9", "192.168.1.1"), ("2001:db8::9", "fe80::1")]
+        {
+            let record = UndoRecord::HostRoute {
+                interface_luid: GONE,
+                destination: destination.parse().unwrap(),
+                next_hop: next_hop.parse().unwrap(),
+            };
+            WindowsUndoExecutor
+                .reverse(&record)
+                .expect("nothing of ours remains");
+        }
+    }
+
+    // ---------------------------------------------------------------- what the installer owns
+
+    #[test]
+    fn an_installer_owns_nothing_to_begin_with() {
+        let (installer, _) = installer();
+        assert!(!installer.owns(&route(1, GATEWAY)));
+    }
+
+    #[test]
+    fn a_route_is_owned_only_when_both_its_destination_and_its_gateway_match() {
+        let (installer, registry) = installer();
+        own(&installer, &registry, &route(1, GATEWAY));
+        assert!(installer.owns(&route(1, GATEWAY)));
+        assert!(
+            !installer.owns(&route(1, OTHER_GATEWAY)),
+            "same destination, another gateway"
+        );
+        assert!(
+            !installer.owns(&route(2, GATEWAY)),
+            "another destination, same gateway"
+        );
+        assert!(!installer.owns(&route(2, OTHER_GATEWAY)), "neither");
+    }
+
+    #[test]
+    fn removing_a_route_takes_it_out_of_the_list_and_out_of_the_journal() {
+        let (installer, registry) = installer();
+        let r = route(1, GATEWAY);
+        own(&installer, &registry, &r);
+        assert_eq!(registry.outstanding().len(), 1);
+        installer.remove(&r).unwrap();
+        assert!(!installer.owns(&r));
+        assert!(
+            registry.outstanding().is_empty(),
+            "its undo record was reversed and removed"
+        );
+    }
+
+    #[test]
+    fn removing_one_route_leaves_every_other_route_owned() {
+        let (installer, registry) = installer();
+        let (a, b, c) = (
+            route(1, GATEWAY),
+            route(1, OTHER_GATEWAY),
+            route(2, GATEWAY),
+        );
+        for r in [&a, &b, &c] {
+            own(&installer, &registry, r);
+        }
+        installer.remove(&a).unwrap();
+        assert!(!installer.owns(&a));
+        assert!(
+            installer.owns(&b),
+            "same destination, another gateway, is a different route"
+        );
+        assert!(
+            installer.owns(&c),
+            "another destination is a different route"
+        );
+        assert_eq!(registry.outstanding().len(), 2);
+    }
+
+    #[test]
+    fn removing_a_route_that_is_not_owned_is_success_and_changes_nothing() {
+        let (installer, registry) = installer();
+        own(&installer, &registry, &route(1, GATEWAY));
+        installer.remove(&route(9, GATEWAY)).unwrap();
+        installer.remove(&route(1, OTHER_GATEWAY)).unwrap();
+        assert!(installer.owns(&route(1, GATEWAY)));
+        assert_eq!(registry.outstanding().len(), 1);
+    }
+
+    #[test]
+    fn removing_twice_is_success_the_second_time() {
+        let (installer, registry) = installer();
+        let r = route(1, GATEWAY);
+        own(&installer, &registry, &r);
+        installer.remove(&r).unwrap();
+        installer.remove(&r).unwrap();
+    }
+
+    /// Pointing a route at the gateway it already uses changes nothing, and asks the system for nothing.
+    #[test]
+    fn rewriting_a_route_to_itself_is_success_and_touches_nothing() {
+        let (installer, registry) = installer();
+        let r = route(1, GATEWAY);
+        own(&installer, &registry, &r);
+        installer.rewrite(&r, &r.clone()).unwrap();
+        assert!(installer.owns(&r));
+        assert_eq!(registry.outstanding().len(), 1);
     }
 }

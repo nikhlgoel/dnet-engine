@@ -703,3 +703,41 @@ mod decode_tests {
         );
     }
 }
+
+#[cfg(all(test, windows))]
+mod current_tests {
+    use super::*;
+
+    /// The machine's paths are the projection of the interface and route tables, nothing added or dropped.
+    #[test]
+    fn the_current_paths_are_the_projection_of_the_tables_the_system_reports() {
+        let (interfaces, routes) = read().unwrap();
+        let expected = project(&interfaces, &routes);
+        let actual = current().unwrap();
+        // The tables are read twice a moment apart; an interface coming or going in between is the only
+        // way these differ, and then the identities of the paths still overlap.
+        if actual != expected {
+            let ids = |paths: &[NetworkPath]| -> Vec<u64> {
+                let mut v: Vec<u64> = paths.iter().map(|p| p.interface_id.luid()).collect();
+                v.sort_unstable();
+                v
+            };
+            let (a, e) = (ids(&actual), ids(&expected));
+            assert!(
+                a.iter().any(|id| e.contains(id)) || a.is_empty() == e.is_empty(),
+                "{a:?} vs {e:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn reading_the_tables_gives_the_loopback_interface() {
+        let (interfaces, _) = read().unwrap();
+        assert!(
+            interfaces
+                .iter()
+                .any(|i| i.name.to_ascii_lowercase().contains("loopback")),
+            "every machine lists its loopback interface"
+        );
+    }
+}

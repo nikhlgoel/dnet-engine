@@ -61,3 +61,45 @@ pub trait CoreRuntime {
     /// (SUP-04, data-model §Cross-cutting 1).
     async fn replay_undo(&self) -> Result<(), SupervisorError>;
 }
+
+#[cfg(test)]
+mod default_tests {
+    use super::*;
+
+    /// A runtime that overrides nothing optional.
+    struct Bare;
+
+    impl CoreRuntime for Bare {
+        async fn reap_orphans(&self) -> Result<(), SupervisorError> {
+            Ok(())
+        }
+        async fn spawn_core(&self, _: CoreBinding) -> Result<(), SupervisorError> {
+            Ok(())
+        }
+        async fn await_adapter(&self) -> Result<(), SupervisorError> {
+            Ok(())
+        }
+        async fn kill_core(&self, _: CoreBinding) -> Result<(), SupervisorError> {
+            Ok(())
+        }
+        async fn replay_undo(&self) -> Result<(), SupervisorError> {
+            Ok(())
+        }
+    }
+
+    /// A runtime that does not know a core's process id says so, which makes the check that needs it refuse
+    /// and not guess: a made-up id would let the wrong program receive the control secret.
+    #[tokio::test]
+    async fn a_runtime_that_does_not_know_a_process_id_gives_none_for_every_core() {
+        for core in [CoreBinding::PrimaryCore, CoreBinding::AmneziaWgCore] {
+            assert_eq!(Bare.core_pid(core).await, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_runtime_that_cannot_tell_says_unknown_and_never_fine() {
+        for core in [CoreBinding::PrimaryCore, CoreBinding::AmneziaWgCore] {
+            assert_eq!(Bare.core_health(core).await, CoreHealth::Unknown);
+        }
+    }
+}

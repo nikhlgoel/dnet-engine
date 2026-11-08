@@ -480,3 +480,30 @@ mod unix_tests {
         core.kill(Duration::from_secs(5)).await.unwrap();
     }
 }
+
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+
+    /// The cap is a documented number, not whatever its arithmetic happens to give.
+    #[test]
+    fn a_line_is_cut_at_eight_kilobytes() {
+        assert_eq!(MAX_LINE_BYTES, 8192);
+    }
+
+    #[tokio::test]
+    async fn a_line_of_exactly_the_limit_is_kept_whole_and_one_more_byte_is_dropped() {
+        for (length, kept) in [
+            (8191usize, 8191usize),
+            (8192, 8192),
+            (8193, 8192),
+            (20_000, 8192),
+        ] {
+            let mut input = vec![b'z'; length];
+            input.push(b'\n');
+            let mut lines = Vec::new();
+            for_each_line(&input[..], |l| lines.push(l.len())).await;
+            assert_eq!(lines, [kept], "a line of {length} bytes");
+        }
+    }
+}

@@ -271,3 +271,41 @@ mod windows_tests {
         assert_eq!(interface_index(u64::MAX), None);
     }
 }
+
+#[cfg(all(test, windows))]
+mod interface_index_tests {
+    use super::windows_probe::interface_index;
+    use crate::paths;
+
+    #[test]
+    fn an_interface_that_does_not_exist_has_no_index() {
+        for luid in [0u64, 0xDEAD_BEEF_0000_0001, u64::MAX] {
+            assert_eq!(interface_index(luid), None, "{luid:#x}");
+        }
+    }
+
+    #[test]
+    fn every_interface_the_system_lists_has_a_nonzero_index_or_is_gone() {
+        let (interfaces, _) = paths::read().unwrap();
+        let mut seen = 0;
+        for interface in interfaces.iter().take(20) {
+            if let Some(index) = interface_index(interface.luid) {
+                assert_ne!(index, 0, "{}", interface.name);
+                seen += 1;
+            }
+        }
+        assert!(seen > 0, "at least the loopback interface resolves");
+    }
+
+    #[test]
+    fn the_same_interface_gives_the_same_index_twice() {
+        let (interfaces, _) = paths::read().unwrap();
+        let luid = interfaces
+            .iter()
+            .find(|i| i.name.to_ascii_lowercase().contains("loopback"))
+            .unwrap()
+            .luid;
+        assert_eq!(interface_index(luid), interface_index(luid));
+        assert!(interface_index(luid).is_some());
+    }
+}

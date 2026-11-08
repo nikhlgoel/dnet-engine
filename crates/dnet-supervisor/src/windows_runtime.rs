@@ -216,3 +216,292 @@ mod tests {
         );
     }
 }
+
+/// What the mutation run found the first tests did not pin: the process id the runtime reports, whether it
+/// notices an exit, that it reaps what was left behind, and that the adapter wait and the undo replay do
+/// what their names say and report what went wrong.
+#[cfg(all(test, windows))]
+mod pinned_tests {
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+
+    use super::*;
+
+    fn cmd(program: &str, script: &str, core: CoreBinding) -> CoreCommand {
+        CoreCommand {
+            core,
+            program: PathBuf::from(program),
+            args: ["/c", script].iter().map(OsString::from).collect(),
+            working_dir: None,
+            ready_marker: None,
+            ready_timeout: Duration::from_secs(5),
+        }
+    }
+
+    fn runtime(primary: &str) -> WindowsCoreRuntime {
+        WindowsCoreRuntime::new(
+            cmd("cmd.exe", primary, CoreBinding::PrimaryCore),
+            cmd(
+                "dnet-never-runs-1.exe",
+                "exit 0",
+                CoreBinding::AmneziaWgCore,
+            ),
+            "dnet-test-adapter",
+            Duration::from_millis(300),
+            Box::new(|| Ok(())),
+        )
+    }
+
+    /// The image name of a running process, from the system's own task list.
+    fn image_of(pid: u32) -> String {
+        let out = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+            .output()
+            .expect("tasklist is part of Windows");
+        String::from_utf8_lossy(&out.stdout).to_lowercase()
+    }
+
+    // ---------------------------------------------------------------- the process id
+
+    #[tokio::test]
+    async fn the_id_reported_is_the_id_of_the_process_that_was_started() {
+        let rt = runtime("ping -n 30 127.0.0.1 > nul");
+        rt.spawn_core(CoreBinding::PrimaryCore).await.unwrap();
+        let pid = rt
+            .pid(CoreBinding::PrimaryCore)
+            .await
+            .expect("a running core has an id");
+        assert!(
+            pid > 4,
+            "{pid} is not a plausible process id (0 and 4 belong to the system)"
+        );
+        assert!(
+            image_of(pid).contains("cmd.exe"),
+            "{pid}: {}",
+            image_of(pid)
+        );
+        rt.kill_core(CoreBinding::PrimaryCore).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_runtime_trait_gives_the_same_id_as_the_runtime() {
+        let rt = runtime("ping -n 30 127.0.0.1 > nul");
+        rt.spawn_core(CoreBinding::PrimaryCore).await.unwrap();
+        let direct = rt.pid(CoreBinding::PrimaryCore).await;
+        assert!(direct.is_some());
+        assert_eq!(
+            CoreRuntime::core_pid(&rt, CoreBinding::PrimaryCore).await,
+            direct
+        );
+        rt.kill_core(CoreBinding::PrimaryCore).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_core_that_was_never_started_or_was_stopped_has_no_id() {
+        let rt = runtime("ping -n 30 127.0.0.1 > nul");
+        assert_eq!(rt.pid(CoreBinding::PrimaryCore).await, None);
+        assert_eq!(
+            CoreRuntime::core_pid(&rt, CoreBinding::PrimaryCore).await,
+            None
+        );
+        rt.spawn_core(CoreBinding::PrimaryCore).await.unwrap();
+        rt.kill_core(CoreBinding::PrimaryCore).await.unwrap();
+        assert_eq!(rt.pid(CoreBinding::PrimaryCore).await, None);
+        assert_eq!(
+            CoreRuntime::core_pid(&rt, CoreBinding::PrimaryCore).await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn each_core_has_its_own_id() {
+        let rt = WindowsCoreRuntime::new(
+            cmd(
+                "cmd.exe",
+                "ping -n 30 127.0.0.1 > nul",
+                CoreBinding::PrimaryCore,
+            ),
+            cmd(
+                "cmd.exe",
+                "ping -n 30 127.0.0.1 > nul",
+                CoreBinding::AmneziaWgCore,
+            ),
+            "dnet-test-adapter",
+            Duration::from_millis(300),
+            Box::new(|| Ok(())),
+        );
+        rt.spawn_core(CoreBinding::PrimaryCore).await.unwrap();
+        rt.spawn_core(CoreBinding::AmneziaWgCore).await.unwrap();
+        let a = rt.pid(CoreBinding::PrimaryCore).await.unwrap();
+        let b = rt.pid(CoreBinding::AmneziaWgCore).await.unwrap();
+        assert_ne!(a, b);
+        rt.kill_core(CoreBinding::PrimaryCore).await.unwrap();
+        assert!(
+            rt.pid(CoreBinding::AmneziaWgCore).await.is_some(),
+            "stopping one leaves the other"
+        );
+        rt.kill_core(CoreBinding::AmneziaWgCore).await.unwrap();
+    }
+
+    // ---------------------------------------------------------------- noticing an exit
+
+    #[tokio::test]
+    async fn a_running_core_has_not_exited_and_an_unknown_one_counts_as_exited() {
+        let rt = runtime("ping -n 30 127.0.0.1 > nul");
+        assert!(
+            rt.has_exited(CoreBinding::PrimaryCore).await,
+            "never started"
+        );
+        rt.spawn_core(CoreBinding::PrimaryCore).await.unwrap();
+        assert!(!rt.has_exited(CoreBinding::PrimaryCore).await, "running");
+        rt.kill_core(CoreBinding::PrimaryCore).await.unwrap();
+        assert!(
+            rt.has_exited(CoreBinding::PrimaryCore).await,
+            "stopped on purpose"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_core_that_ends_by_itself_is_noticed() {
+        let rt = runtime("ping -n 3 127.0.0.1 > nul & exit 0");
+        rt.spawn_core(CoreBinding::PrimaryCore).await.unwrap();
+        assert!(!rt.has_exited(CoreBinding::PrimaryCore).await);
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        assert!(rt.has_exited(CoreBinding::PrimaryCore).await);
+    }
+
+    // ---------------------------------------------------------------- reaping what was left behind
+
+    /// A uniquely named copy of this test binary, started as a sleeper, stands for a core left running by
+    /// a service that crashed.
+    fn start_orphan(dir: &std::path::Path, tag: &str) -> (PathBuf, std::process::Child) {
+        let image = dir.join(format!(
+            "dnet-runtime-orphan-{tag}-{}.exe",
+            std::process::id()
+        ));
+        std::fs::copy(std::env::current_exe().unwrap(), &image).unwrap();
+        let child = std::process::Command::new(&image)
+            .args([
+                "--ignored",
+                "--exact",
+                "orphans::tests::orphan_probe_sleeper",
+            ])
+            .env("DNET_ORPHAN_PROBE", "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        (image, child)
+    }
+
+    #[tokio::test]
+    async fn a_core_left_running_by_a_crashed_service_is_ended_before_anything_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        let (image, mut orphan) = start_orphan(dir.path(), "a");
+        let rt = WindowsCoreRuntime::new(
+            CoreCommand {
+                program: image,
+                ..cmd("cmd.exe", "exit 0", CoreBinding::PrimaryCore)
+            },
+            cmd(
+                "dnet-never-runs-2.exe",
+                "exit 0",
+                CoreBinding::AmneziaWgCore,
+            ),
+            "dnet-test-adapter",
+            Duration::from_millis(300),
+            Box::new(|| Ok(())),
+        );
+        // The process list may lag the start by a moment.
+        for _ in 0..50 {
+            if orphan.try_wait().unwrap().is_some() {
+                panic!("the sleeper ended by itself");
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            if crate::orphans::find_by_image(std::slice::from_ref(&rt.primary.program))
+                .unwrap()
+                .len()
+                == 1
+            {
+                break;
+            }
+        }
+        rt.reap_orphans().await.unwrap();
+        let status = orphan.wait().unwrap();
+        assert!(!status.success(), "it was ended, not left to finish");
+    }
+
+    #[tokio::test]
+    async fn reaping_when_nothing_was_left_is_quiet_success() {
+        let rt = runtime("exit 0");
+        rt.reap_orphans().await.unwrap();
+    }
+
+    // ---------------------------------------------------------------- the adapter and the undo
+
+    /// There is no such adapter pipe, so waiting for it fails after the time given, and the failure
+    /// names the adapter and the core that needed it.
+    #[tokio::test]
+    async fn waiting_for_an_adapter_that_never_appears_fails_naming_it() {
+        let rt = runtime("exit 0");
+        match rt.await_adapter().await {
+            Err(SupervisorError::NotReady { core, detail }) => {
+                assert_eq!(core, CoreBinding::AmneziaWgCore);
+                assert!(detail.contains("dnet-test-adapter"), "{detail}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_undo_replay_runs_the_undo_and_hands_back_its_answer() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let seen = Arc::clone(&calls);
+        let rt = WindowsCoreRuntime::new(
+            cmd("cmd.exe", "exit 0", CoreBinding::PrimaryCore),
+            cmd(
+                "dnet-never-runs-3.exe",
+                "exit 0",
+                CoreBinding::AmneziaWgCore,
+            ),
+            "dnet-test-adapter",
+            Duration::from_millis(300),
+            Box::new(move || {
+                seen.fetch_add(1, Ordering::SeqCst);
+                Err(SupervisorError::Runtime(
+                    "the table would not change".into(),
+                ))
+            }),
+        );
+        let error = rt.replay_undo().await.unwrap_err().to_string();
+        assert!(error.contains("would not change"), "{error}");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        // And again: each replay is a fresh run.
+        let _ = rt.replay_undo().await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn an_undo_that_succeeds_is_success_and_still_runs() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let seen = Arc::clone(&calls);
+        let rt = WindowsCoreRuntime::new(
+            cmd("cmd.exe", "exit 0", CoreBinding::PrimaryCore),
+            cmd(
+                "dnet-never-runs-4.exe",
+                "exit 0",
+                CoreBinding::AmneziaWgCore,
+            ),
+            "dnet-test-adapter",
+            Duration::from_millis(300),
+            Box::new(move || {
+                seen.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }),
+        );
+        rt.replay_undo().await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+}

@@ -126,3 +126,134 @@ impl TunnelBringup for WindowsTunnelBringup {
         Ok(())
     }
 }
+
+/// The production bring-up against an adapter that does not exist. Nothing real is configured: the adapter
+/// and its control pipe are absent, so every step that needs them must fail, say which step it was, and
+/// leave the routing table alone. That is what a service sees when the adapter never appeared.
+#[cfg(test)]
+mod absent_adapter_tests {
+    use std::time::Instant;
+
+    use dnet_config::amneziawg::{ObfuscationParams, PeerConfig, PrivateKey};
+
+    use super::*;
+    use crate::undo::MemoryStore;
+    use dnet_config::ActiveEndpointBypass;
+    use dnet_core::endpoint::EndpointAddress;
+
+    const ADAPTER: &str = "dnet-absent-adapter-5b1c";
+
+    fn bringup(address: IpAddr) -> WindowsTunnelBringup {
+        let undo = Arc::new(UndoRegistry::open(Box::new(MemoryStore::new())).unwrap());
+        WindowsTunnelBringup::new(
+            TunnelSpec {
+                adapter: ADAPTER.to_owned(),
+                address,
+                prefix_len: 32,
+                private_key: PrivateKey::new("00".repeat(32)),
+                obfuscation: ObfuscationParams {
+                    jc: 4,
+                    jmin: 40,
+                    jmax: 70,
+                    s1: 15,
+                    s2: 23,
+                    h1: 1_000_000_001,
+                    h2: 1_000_000_002,
+                    h3: 1_000_000_003,
+                    h4: 1_000_000_004,
+                },
+                peer: PeerConfig {
+                    public_key: "11".repeat(32),
+                    endpoint: "203.0.113.10:51820".to_owned(),
+                    allowed_ips: vec!["0.0.0.0/0".to_owned()],
+                    persistent_keepalive: Some(25),
+                },
+            },
+            undo,
+        )
+    }
+
+    fn v4() -> IpAddr {
+        IpAddr::V4(std::net::Ipv4Addr::new(10, 66, 0, 2))
+    }
+
+    fn route(gateway: &str) -> HostRoute {
+        let address = EndpointAddress::new("203.0.113.10", 51820).unwrap();
+        HostRoute::for_endpoint(
+            &ActiveEndpointBypass::new(&address),
+            gateway.parse().unwrap(),
+        )
+    }
+
+    #[test]
+    fn the_control_pipe_is_the_one_named_for_the_adapter() {
+        let pipe = bringup(v4()).pipe();
+        assert_eq!(pipe, uapi_pipe::pipe_path(ADAPTER));
+        assert!(pipe.contains(ADAPTER), "{pipe}");
+        assert!(!pipe.is_empty());
+        assert_ne!(pipe, "xyzzy");
+    }
+
+    #[tokio::test]
+    async fn starting_on_an_adapter_that_is_not_there_fails_before_any_peer_is_configured() {
+        for address in [v4(), IpAddr::V6("fd00::2".parse().unwrap())] {
+            let error = bringup(address)
+                .start_tunnel()
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("not found"), "{error}");
+            assert!(error.contains(ADAPTER), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn stopping_when_the_control_pipe_is_gone_fails_saying_what_could_not_be_done() {
+        let started = Instant::now();
+        let error = bringup(v4()).stop_tunnel().await.unwrap_err().to_string();
+        assert!(error.contains("removing the peer"), "{error}");
+        assert!(
+            started.elapsed() < UAPI_TIMEOUT + Duration::from_secs(3),
+            "it gave up within its own limit, not after it"
+        );
+    }
+
+    #[tokio::test]
+    async fn rebinding_when_the_control_pipe_is_gone_fails_saying_what_could_not_be_done() {
+        let error = bringup(v4())
+            .rebind_tunnel("192.168.1.1".parse().unwrap())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("rebinding the peer"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn removing_a_route_that_was_never_installed_is_success() {
+        bringup(v4())
+            .remove_host_route(&route("192.168.1.1"))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn rewriting_a_route_to_itself_is_success_and_installs_nothing() {
+        let ops = bringup(v4());
+        let r = route("192.168.1.1");
+        ops.rewrite_host_route(&r, &r.clone()).await.unwrap();
+        assert!(!ops.routes().owns(&r));
+    }
+
+    #[tokio::test]
+    async fn a_fresh_bring_up_owns_no_route() {
+        let ops = bringup(v4());
+        assert!(!ops.routes().owns(&route("192.168.1.1")));
+    }
+
+    #[test]
+    fn the_error_helper_says_what_was_being_done_and_why_it_failed() {
+        let error = op("configuring the peer")("the pipe closed").to_string();
+        assert!(error.contains("configuring the peer"), "{error}");
+        assert!(error.contains("the pipe closed"), "{error}");
+    }
+}
