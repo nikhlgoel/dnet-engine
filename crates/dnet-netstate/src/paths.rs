@@ -110,32 +110,78 @@ pub fn project(interfaces: &[RawInterface], routes: &[RawDefaultRoute]) -> Vec<N
     paths.into_iter().map(|(_, p)| p).collect()
 }
 
+/// `IfOperStatusUp`.
+#[cfg_attr(not(windows), allow(dead_code))] // read on Windows; tested everywhere
+const OPER_STATUS_UP: i32 = 1;
+/// `HardwareInterface`, bit 0 of `InterfaceAndOperStatusFlags`.
+#[cfg_attr(not(windows), allow(dead_code))] // read on Windows; tested everywhere
+const HARDWARE_BIT: u8 = 0b1;
+
+/// The alias of an interface as the system stores it: UTF-16, ended by the first NUL (or full). Anything
+/// that is not valid UTF-16 is replaced, never trusted.
+#[cfg_attr(not(windows), allow(dead_code))] // read on Windows; tested everywhere
+pub(crate) fn alias_text(raw: &[u16]) -> String {
+    let end = raw.iter().position(|c| *c == 0).unwrap_or(raw.len());
+    String::from_utf16_lossy(&raw[..end])
+}
+
+/// One row of the interface table as plain facts: `flags` is the system's bit field (bit 0 set means a
+/// physical adapter) and `oper_status` its operational status (1 means up, and nothing else does).
+#[cfg_attr(not(windows), allow(dead_code))] // read on Windows; tested everywhere
+pub(crate) fn raw_interface(
+    luid: u64,
+    alias: &[u16],
+    if_type: u32,
+    flags: u8,
+    oper_status: i32,
+) -> RawInterface {
+    RawInterface {
+        luid,
+        name: alias_text(alias),
+        if_type,
+        hardware: flags & HARDWARE_BIT != 0,
+        up: oper_status == OPER_STATUS_UP,
+    }
+}
+
+/// One row of the IPv4 route table, kept only if it is a default route (`0.0.0.0/0`): a prefix length
+/// of zero **and** an all-zero destination. `next_hop_network_order` is the address as the system
+/// stores it (network byte order); a next hop of `0.0.0.0` means on-link, with no gateway.
+#[cfg_attr(not(windows), allow(dead_code))] // read on Windows; tested everywhere
+pub(crate) fn raw_default_route(
+    prefix_length: u8,
+    destination_network_order: u32,
+    next_hop_network_order: u32,
+    luid: u64,
+    metric: u32,
+) -> Option<RawDefaultRoute> {
+    if prefix_length != 0 || destination_network_order != 0 {
+        return None;
+    }
+    let hop = u32::from_be(next_hop_network_order);
+    Some(RawDefaultRoute {
+        luid,
+        gateway: (hop != 0).then(|| Ipv4Addr::from(hop)),
+        // Route metric only; the interface metric is added by the system when it picks, and ordering
+        // by the route's own is enough to rank ones that exist.
+        metric,
+    })
+}
+
 #[cfg(windows)]
 pub use windows_reader::{current, read};
 
 #[cfg(windows)]
 mod windows_reader {
-    use std::net::Ipv4Addr;
-
     use windows::Win32::Foundation::NO_ERROR;
     use windows::Win32::NetworkManagement::IpHelper::{
         FreeMibTable, GetIfTable2, GetIpForwardTable2, MIB_IF_TABLE2, MIB_IPFORWARD_TABLE2,
     };
     use windows::Win32::Networking::WinSock::AF_INET;
 
-    use super::{project, RawDefaultRoute, RawInterface};
+    use super::{project, raw_default_route, raw_interface, RawDefaultRoute, RawInterface};
     use crate::error::NetstateError;
     use dnet_core::path::NetworkPath;
-
-    /// `IfOperStatusUp`.
-    const OPER_STATUS_UP: i32 = 1;
-    /// `HardwareInterface`, bit 0 of `InterfaceAndOperStatusFlags`.
-    const HARDWARE_BIT: u8 = 0b1;
-
-    fn alias(raw: &[u16]) -> String {
-        let end = raw.iter().position(|c| *c == 0).unwrap_or(raw.len());
-        String::from_utf16_lossy(&raw[..end])
-    }
 
     /// The interfaces and IPv4 default routes, exactly as the system reports them.
     pub fn read() -> Result<(Vec<RawInterface>, Vec<RawDefaultRoute>), NetstateError> {
@@ -156,13 +202,13 @@ mod windows_reader {
             let rows =
                 std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize);
             for row in rows {
-                interfaces.push(RawInterface {
-                    luid: row.InterfaceLuid.Value,
-                    name: alias(&row.Alias),
-                    if_type: row.Type,
-                    hardware: row.InterfaceAndOperStatusFlags._bitfield & HARDWARE_BIT != 0,
-                    up: row.OperStatus.0 == OPER_STATUS_UP,
-                });
+                interfaces.push(raw_interface(
+                    row.InterfaceLuid.Value,
+                    &row.Alias,
+                    row.Type,
+                    row.InterfaceAndOperStatusFlags._bitfield,
+                    row.OperStatus.0,
+                ));
             }
             FreeMibTable(table as *const _);
         }
@@ -182,17 +228,13 @@ mod windows_reader {
                 std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize);
             for row in rows {
                 let prefix = &row.DestinationPrefix;
-                if prefix.PrefixLength != 0 || prefix.Prefix.Ipv4.sin_addr.S_un.S_addr != 0 {
-                    continue;
-                }
-                let hop = u32::from_be(row.NextHop.Ipv4.sin_addr.S_un.S_addr);
-                routes.push(RawDefaultRoute {
-                    luid: row.InterfaceLuid.Value,
-                    gateway: (hop != 0).then(|| Ipv4Addr::from(hop)),
-                    // Route metric only; the interface metric is added by the system when it
-                    // picks, and ordering by the route's own is enough to rank ones that exist.
-                    metric: row.Metric,
-                });
+                routes.extend(raw_default_route(
+                    prefix.PrefixLength,
+                    prefix.Prefix.Ipv4.sin_addr.S_un.S_addr,
+                    row.NextHop.Ipv4.sin_addr.S_un.S_addr,
+                    row.InterfaceLuid.Value,
+                    row.Metric,
+                ));
             }
             FreeMibTable(table as *const _);
         }
@@ -449,5 +491,215 @@ mod windows_tests {
         if let Some(i) = first_unusable {
             assert!(paths[i..].iter().all(|p| p.role == PathRole::Unusable));
         }
+    }
+}
+
+/// The decoding of raw table rows (what the system's tables hold, bit for bit) into plain facts. These are
+/// the same rules whether the machine is a laptop, a server or a virtual machine, and they decide what the
+/// failover logic believes about the network, so every bit and edge is tried.
+#[cfg(test)]
+mod decode_tests {
+    use super::*;
+
+    fn wide(text: &str) -> Vec<u16> {
+        text.encode_utf16().collect()
+    }
+
+    /// A fixed-size alias buffer as the system keeps it: the text, then NULs.
+    fn padded(text: &str, size: usize) -> Vec<u16> {
+        let mut buffer = wide(text);
+        buffer.resize(size, 0);
+        buffer
+    }
+
+    // ---------------------------------------------------------------- the alias
+
+    #[test]
+    fn an_alias_ends_at_the_first_nul() {
+        assert_eq!(alias_text(&padded("Wi-Fi", 257)), "Wi-Fi");
+    }
+
+    #[test]
+    fn an_alias_that_fills_the_buffer_has_no_nul_to_end_it() {
+        assert_eq!(alias_text(&wide("Ethernet")), "Ethernet");
+    }
+
+    #[test]
+    fn an_empty_buffer_and_an_all_nul_buffer_are_an_empty_alias() {
+        assert_eq!(alias_text(&[]), "");
+        assert_eq!(alias_text(&[0, 0, 0]), "");
+    }
+
+    #[test]
+    fn anything_after_the_first_nul_is_never_part_of_the_alias() {
+        let mut buffer = wide("Wi-Fi");
+        buffer.push(0);
+        buffer.extend(wide("hidden"));
+        assert_eq!(alias_text(&buffer), "Wi-Fi");
+    }
+
+    #[test]
+    fn an_alias_in_another_script_is_read_whole() {
+        for name in [
+            "Ethernet 2",
+            "Беспроводная сеть",
+            "無線LAN",
+            "واي فاي",
+            "Wi‑Fi",
+        ] {
+            assert_eq!(alias_text(&padded(name, 300)), name);
+        }
+    }
+
+    #[test]
+    fn broken_utf16_is_replaced_and_never_trusted() {
+        // A lone surrogate is not text.
+        let shown = alias_text(&[0x0057, 0xD800, 0x0069, 0]);
+        assert_eq!(shown, "W\u{FFFD}i");
+    }
+
+    // ---------------------------------------------------------------- an interface row
+
+    #[test]
+    fn bit_zero_of_the_flags_alone_makes_an_adapter_hardware() {
+        for flags in 0u8..=255 {
+            let row = raw_interface(1, &wide("a"), 6, flags, 1);
+            assert_eq!(row.hardware, flags & 1 == 1, "flags {flags:#010b}");
+        }
+    }
+
+    #[test]
+    fn only_an_operational_status_of_one_is_up() {
+        for status in -3i32..=12 {
+            let row = raw_interface(1, &wide("a"), 6, 1, status);
+            assert_eq!(row.up, status == 1, "status {status}");
+        }
+        assert!(!raw_interface(1, &wide("a"), 6, 1, i32::MAX).up);
+        assert!(!raw_interface(1, &wide("a"), 6, 1, i32::MIN).up);
+    }
+
+    #[test]
+    fn hardware_and_up_do_not_depend_on_each_other() {
+        let a = raw_interface(1, &wide("a"), 6, 1, 2);
+        assert!(a.hardware && !a.up);
+        let b = raw_interface(1, &wide("a"), 6, 0, 1);
+        assert!(!b.hardware && b.up);
+    }
+
+    #[test]
+    fn the_row_keeps_the_identity_the_name_and_the_type_it_was_given() {
+        let row = raw_interface(0xDEAD_BEEF_0000_0001, &padded("Wi-Fi", 8), 71, 1, 1);
+        assert_eq!(row.luid, 0xDEAD_BEEF_0000_0001);
+        assert_eq!(row.name, "Wi-Fi");
+        assert_eq!(row.if_type, 71);
+    }
+
+    #[test]
+    fn an_interface_with_an_unknown_type_is_still_a_row() {
+        let row = raw_interface(7, &wide("x"), 9999, 1, 1);
+        assert_eq!(row.if_type, 9999);
+    }
+
+    // ---------------------------------------------------------------- a route row
+
+    /// The system stores an address in network byte order: 192.168.1.1 is the bytes c0 a8 01 01, which a
+    /// little-endian machine reads as the number 0x0101a8c0.
+    fn network_order(a: u8, b: u8, c: u8, d: u8) -> u32 {
+        u32::from_ne_bytes([a, b, c, d])
+    }
+
+    #[test]
+    fn a_default_route_with_a_gateway_is_kept_with_that_gateway() {
+        let route = raw_default_route(0, 0, network_order(192, 168, 1, 1), 5, 25).unwrap();
+        assert_eq!(route.gateway, Some(Ipv4Addr::new(192, 168, 1, 1)));
+        assert_eq!(route.luid, 5);
+        assert_eq!(route.metric, 25);
+    }
+
+    #[test]
+    fn a_default_route_with_no_next_hop_is_on_link_and_has_no_gateway() {
+        let route = raw_default_route(0, 0, 0, 5, 25).unwrap();
+        assert_eq!(route.gateway, None);
+    }
+
+    #[test]
+    fn any_nonzero_prefix_length_is_not_a_default_route() {
+        for length in 1u8..=255 {
+            assert!(
+                raw_default_route(length, 0, network_order(10, 0, 0, 1), 1, 1).is_none(),
+                "/{length}"
+            );
+        }
+    }
+
+    #[test]
+    fn any_nonzero_destination_is_not_a_default_route_even_with_a_zero_length() {
+        for destination in [1u32, 0x0100_0000, 0x0000_0100, 0xFFFF_FFFF, 0x7F00_0001] {
+            assert!(
+                raw_default_route(0, destination, network_order(10, 0, 0, 1), 1, 1).is_none(),
+                "{destination:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn each_octet_of_the_gateway_comes_out_in_its_own_place() {
+        for (a, b, c, d) in [
+            (1, 2, 3, 4),
+            (10, 0, 0, 1),
+            (172, 16, 254, 1),
+            (255, 255, 255, 254),
+            (0, 0, 0, 1),
+            (1, 0, 0, 0),
+        ] {
+            let route = raw_default_route(0, 0, network_order(a, b, c, d), 1, 1).unwrap();
+            assert_eq!(
+                route.gateway,
+                Some(Ipv4Addr::new(a, b, c, d)),
+                "{a}.{b}.{c}.{d}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_metric_is_the_routes_own_whatever_its_size() {
+        for metric in [0u32, 1, 25, 5000, u32::MAX] {
+            let route = raw_default_route(0, 0, 0, 1, metric).unwrap();
+            assert_eq!(route.metric, metric);
+        }
+    }
+
+    #[test]
+    fn the_route_belongs_to_the_interface_it_names() {
+        let route = raw_default_route(0, 0, 0, u64::MAX, 1).unwrap();
+        assert_eq!(route.luid, u64::MAX);
+    }
+
+    // ---------------------------------------------------------------- what the decoders feed
+
+    /// The whole chain on a laptop's plain situation: Wi-Fi up with a default route, Ethernet down.
+    #[test]
+    fn decoded_rows_become_one_usable_path_and_one_unusable() {
+        let interfaces = [
+            raw_interface(1, &padded("Wi-Fi", 257), 71, 1, 1),
+            raw_interface(2, &padded("Ethernet", 257), 6, 1, 2),
+        ];
+        let routes: Vec<RawDefaultRoute> = [
+            raw_default_route(0, 0, network_order(192, 168, 1, 1), 1, 50),
+            raw_default_route(24, network_order(192, 168, 1, 0), 0, 1, 281),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        assert_eq!(routes.len(), 1, "the /24 is not a default route");
+        let paths = project(&interfaces, &routes);
+        assert_eq!(paths.len(), 2);
+        assert_eq!(
+            paths
+                .iter()
+                .filter(|p| p.role != PathRole::Unusable)
+                .count(),
+            1
+        );
     }
 }

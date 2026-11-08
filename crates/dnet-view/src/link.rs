@@ -98,3 +98,145 @@ mod pipe {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use dnet_ipc::client::{ClientError, Refusal, Reply};
+    use serde_json::json;
+
+    use super::*;
+
+    /// A link that records every request and answers from a fixed reply.
+    struct Recording {
+        seen: Mutex<Vec<Request>>,
+        calls: AtomicUsize,
+        reply: fn() -> Result<Reply, ClientError>,
+    }
+
+    impl Recording {
+        fn new(reply: fn() -> Result<Reply, ClientError>) -> Arc<Self> {
+            Arc::new(Self {
+                seen: Mutex::new(Vec::new()),
+                calls: AtomicUsize::new(0),
+                reply,
+            })
+        }
+    }
+
+    impl Link for Recording {
+        async fn call(&self, request: Request) -> Result<Reply, ClientError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.seen.lock().unwrap().push(request);
+            (self.reply)()
+        }
+    }
+
+    fn done() -> Result<Reply, ClientError> {
+        Ok(Reply::Done(json!({ "ok": true })))
+    }
+
+    fn refused() -> Result<Reply, ClientError> {
+        Ok(Reply::Refused(Refusal {
+            code: "ServiceBusy".to_owned(),
+            detail: "busy".to_owned(),
+            retryable: true,
+        }))
+    }
+
+    fn unreachable() -> Result<Reply, ClientError> {
+        Err(ClientError::Unreachable("no service".to_owned()))
+    }
+
+    #[tokio::test]
+    async fn a_shared_link_passes_the_request_on_unchanged() {
+        let inner = Recording::new(done);
+        let shared: Arc<Recording> = Arc::clone(&inner);
+        let reply = shared.call(Request::GetState).await.unwrap();
+        assert!(matches!(reply, Reply::Done(_)));
+        assert_eq!(*inner.seen.lock().unwrap(), vec![Request::GetState]);
+    }
+
+    #[tokio::test]
+    async fn every_call_through_the_shared_link_reaches_the_one_link() {
+        let inner = Recording::new(done);
+        let shared = Arc::clone(&inner);
+        for _ in 0..25 {
+            shared.call(Request::ListEndpoints).await.unwrap();
+        }
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 25);
+    }
+
+    #[tokio::test]
+    async fn clones_of_the_shared_link_are_one_link() {
+        let inner = Recording::new(done);
+        let (a, b) = (Arc::clone(&inner), Arc::clone(&inner));
+        a.call(Request::GetState).await.unwrap();
+        b.call(Request::GetSession).await.unwrap();
+        assert_eq!(
+            *inner.seen.lock().unwrap(),
+            vec![Request::GetState, Request::GetSession]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refusal_comes_back_as_a_refusal_and_is_not_turned_into_an_error() {
+        let shared = Recording::new(refused);
+        match shared.call(Request::Disconnect).await {
+            Ok(Reply::Refused(r)) => {
+                assert_eq!(r.code, "ServiceBusy");
+                assert!(r.retryable);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failure_to_ask_comes_back_as_an_error_with_its_words() {
+        let shared = Recording::new(unreachable);
+        match shared.call(Request::GetState).await {
+            Err(ClientError::Unreachable(why)) => assert_eq!(why, "no service"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_link_inside_a_link_still_delivers_the_request() {
+        let inner = Recording::new(done);
+        let outer = Arc::new(Arc::clone(&inner));
+        outer.call(Request::GetPaths).await.unwrap();
+        assert_eq!(*inner.seen.lock().unwrap(), vec![Request::GetPaths]);
+    }
+
+    #[tokio::test]
+    async fn requests_from_many_tasks_all_arrive() {
+        let inner = Recording::new(done);
+        let mut tasks = Vec::new();
+        for _ in 0..40 {
+            let link = Arc::clone(&inner);
+            tasks.push(tokio::spawn(async move {
+                link.call(Request::GetStats).await.unwrap();
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 40);
+    }
+
+    #[cfg(windows)]
+    mod windows {
+        use dnet_ipc::client::Trust;
+
+        use super::super::PipeLink;
+
+        /// Making the link opens nothing: the pipe is reached only when a request is made.
+        #[test]
+        fn a_new_link_has_not_touched_the_pipe() {
+            let _ = PipeLink::service();
+            let _ = PipeLink::with_trust(Trust::ServiceOwnedOnly);
+        }
+    }
+}

@@ -253,3 +253,259 @@ mod tests {
         );
     }
 }
+
+/// The order the tunnel is brought up and torn down in is what prevents the routing loop (AW-02, AW-03).
+/// These tests record every step, so a reordered or skipped step is seen.
+#[cfg(test)]
+mod lifecycle_tests {
+    use std::sync::Mutex;
+
+    use super::*;
+
+    /// Which steps fail.
+    #[derive(Clone, Copy, Default)]
+    struct Fails {
+        install: bool,
+        start: bool,
+        stop: bool,
+        remove: bool,
+    }
+
+    struct Steps {
+        log: Mutex<Vec<&'static str>>,
+        fails: Fails,
+    }
+
+    impl Steps {
+        fn new(fails: Fails) -> Self {
+            Self {
+                log: Mutex::new(Vec::new()),
+                fails,
+            }
+        }
+        fn log(&self) -> Vec<&'static str> {
+            self.log.lock().unwrap().clone()
+        }
+        fn step(&self, name: &'static str, fails: bool) -> Result<(), NetstateError> {
+            self.log.lock().unwrap().push(name);
+            if fails {
+                Err(NetstateError::Operation(format!("{name} failed")))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl TunnelBringup for Steps {
+        async fn install_host_route(&self, _: &HostRoute) -> Result<(), NetstateError> {
+            self.step("install", self.fails.install)
+        }
+        async fn remove_host_route(&self, _: &HostRoute) -> Result<(), NetstateError> {
+            self.step("remove", self.fails.remove)
+        }
+        async fn rewrite_host_route(
+            &self,
+            _: &HostRoute,
+            _: &HostRoute,
+        ) -> Result<(), NetstateError> {
+            self.step("rewrite", false)
+        }
+        async fn start_tunnel(&self) -> Result<(), NetstateError> {
+            self.step("start", self.fails.start)
+        }
+        async fn stop_tunnel(&self) -> Result<(), NetstateError> {
+            self.step("stop", self.fails.stop)
+        }
+        async fn rebind_tunnel(&self, _: IpAddr) -> Result<(), NetstateError> {
+            self.step("rebind", false)
+        }
+    }
+
+    fn route() -> HostRoute {
+        let address = dnet_core::endpoint::EndpointAddress::new("203.0.113.10", 51820).unwrap();
+        HostRoute::for_endpoint(
+            &ActiveEndpointBypass::new(&address),
+            "10.0.0.1".parse().unwrap(),
+        )
+    }
+
+    // ---------------------------------------------------------------- the route's own parts
+
+    #[test]
+    fn the_route_names_the_endpoint_and_the_gateway_it_was_made_for() {
+        let r = route();
+        assert_eq!(r.destination(), "203.0.113.10");
+        assert_eq!(r.gateway(), "10.0.0.1".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn the_destination_is_not_empty_and_is_the_address_itself() {
+        let r = route();
+        assert!(!r.destination().is_empty());
+        assert_ne!(r.destination(), "xyzzy");
+        assert_eq!(
+            r.destination().parse::<IpAddr>().unwrap().to_string(),
+            "203.0.113.10"
+        );
+    }
+
+    #[test]
+    fn another_gateway_keeps_the_destination_and_changes_only_the_gateway() {
+        let r = route();
+        let other: IpAddr = "192.168.1.1".parse().unwrap();
+        let moved = r.via(other);
+        assert_eq!(moved.destination(), r.destination());
+        assert_eq!(moved.gateway(), other);
+        assert_eq!(
+            r.gateway(),
+            "10.0.0.1".parse::<IpAddr>().unwrap(),
+            "the original is untouched"
+        );
+    }
+
+    #[test]
+    fn an_ipv6_gateway_is_kept_as_it_is() {
+        let v6: IpAddr = "fe80::1".parse().unwrap();
+        assert_eq!(route().via(v6).gateway(), v6);
+    }
+
+    // ---------------------------------------------------------------- bringing the tunnel up
+
+    #[tokio::test]
+    async fn the_route_is_installed_before_the_tunnel_starts() {
+        let ops = Steps::new(Fails::default());
+        bring_up(&ops, &route()).await.unwrap();
+        assert_eq!(ops.log(), ["install", "start"]);
+    }
+
+    /// If the route cannot be installed the tunnel is never started: a tunnel with no route out for its
+    /// own packets would carry them into itself.
+    #[tokio::test]
+    async fn a_failed_install_means_the_tunnel_is_never_started() {
+        let ops = Steps::new(Fails {
+            install: true,
+            ..Fails::default()
+        });
+        let error = bring_up(&ops, &route()).await.unwrap_err().to_string();
+        assert!(error.contains("install failed"), "{error}");
+        assert_eq!(ops.log(), ["install"]);
+    }
+
+    #[tokio::test]
+    async fn a_failed_start_is_reported_and_the_route_had_been_installed_first() {
+        let ops = Steps::new(Fails {
+            start: true,
+            ..Fails::default()
+        });
+        let error = bring_up(&ops, &route()).await.unwrap_err().to_string();
+        assert!(error.contains("start failed"), "{error}");
+        assert_eq!(ops.log(), ["install", "start"]);
+    }
+
+    // ---------------------------------------------------------------- tearing it down
+
+    #[tokio::test]
+    async fn the_tunnel_is_stopped_before_the_route_is_removed() {
+        let ops = Steps::new(Fails::default());
+        tear_down(&ops, &route()).await.unwrap();
+        assert_eq!(ops.log(), ["stop", "remove"]);
+    }
+
+    /// A stop that reported an error still removes the route, so an abnormal stop leaves nothing behind;
+    /// the stop's error is the one reported.
+    #[tokio::test]
+    async fn a_failed_stop_still_removes_the_route_and_reports_the_stop() {
+        let ops = Steps::new(Fails {
+            stop: true,
+            ..Fails::default()
+        });
+        let error = tear_down(&ops, &route()).await.unwrap_err().to_string();
+        assert!(error.contains("stop failed"), "{error}");
+        assert_eq!(ops.log(), ["stop", "remove"]);
+    }
+
+    #[tokio::test]
+    async fn a_failed_removal_is_reported_even_though_the_stop_worked() {
+        let ops = Steps::new(Fails {
+            remove: true,
+            ..Fails::default()
+        });
+        let error = tear_down(&ops, &route()).await.unwrap_err().to_string();
+        assert!(error.contains("remove failed"), "{error}");
+        assert_eq!(ops.log(), ["stop", "remove"]);
+    }
+
+    /// When both fail, the route that could not be removed is what the caller must know about.
+    #[tokio::test]
+    async fn when_both_fail_the_failed_removal_is_what_is_reported() {
+        let ops = Steps::new(Fails {
+            stop: true,
+            remove: true,
+            ..Fails::default()
+        });
+        let error = tear_down(&ops, &route()).await.unwrap_err().to_string();
+        assert!(error.contains("remove failed"), "{error}");
+        assert_eq!(ops.log(), ["stop", "remove"]);
+    }
+
+    // ---------------------------------------------------------------- the whole life of a tunnel
+
+    #[tokio::test]
+    async fn a_whole_life_is_install_start_rewrite_rebind_stop_remove() {
+        let ops = Steps::new(Fails::default());
+        let r = route();
+        bring_up(&ops, &r).await.unwrap();
+        let moved = on_carrying_path_change(&ops, &r, "192.168.1.1".parse().unwrap())
+            .await
+            .unwrap();
+        tear_down(&ops, &moved).await.unwrap();
+        assert_eq!(
+            ops.log(),
+            ["install", "start", "rewrite", "rebind", "stop", "remove"]
+        );
+    }
+
+    /// Whatever fails, a route that was installed is never left without a removal being attempted once
+    /// the tear-down has begun, and the tunnel is never started without its route.
+    macro_rules! every_failure_keeps_the_order {
+        ($($name:ident: $install:expr, $start:expr, $stop:expr, $remove:expr;)*) => {$(
+            #[tokio::test]
+            async fn $name() {
+                let ops = Steps::new(Fails { install: $install, start: $start, stop: $stop, remove: $remove });
+                let r = route();
+                let up = bring_up(&ops, &r).await;
+                let after_up = ops.log();
+                if $install {
+                    assert!(up.is_err());
+                    assert_eq!(after_up, ["install"], "no start without the route");
+                } else {
+                    assert_eq!(after_up, ["install", "start"]);
+                    assert_eq!(up.is_err(), $start);
+                }
+                let down = tear_down(&ops, &r).await;
+                let log = ops.log();
+                assert_eq!(&log[after_up.len()..], ["stop", "remove"], "stop, then remove, always");
+                assert_eq!(down.is_err(), $stop || $remove);
+            }
+        )*};
+    }
+
+    every_failure_keeps_the_order! {
+        nothing_fails: false, false, false, false;
+        only_install_fails: true, false, false, false;
+        only_start_fails: false, true, false, false;
+        only_stop_fails: false, false, true, false;
+        only_remove_fails: false, false, false, true;
+        install_and_start_fail: true, true, false, false;
+        install_and_stop_fail: true, false, true, false;
+        install_and_remove_fail: true, false, false, true;
+        start_and_stop_fail: false, true, true, false;
+        start_and_remove_fail: false, true, false, true;
+        stop_and_remove_fail: false, false, true, true;
+        install_start_stop_fail: true, true, true, false;
+        install_start_remove_fail: true, true, false, true;
+        install_stop_remove_fail: true, false, true, true;
+        start_stop_remove_fail: false, true, true, true;
+        everything_fails: true, true, true, true;
+    }
+}
