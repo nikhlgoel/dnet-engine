@@ -221,6 +221,11 @@ impl UndoExecutor for WindowsUndoExecutor {
                 }
                 win32(status, "DeleteIpForwardEntry2")
             }
+            // The guard: the one removal that `guard-release`, uninstall and recovery share. Removing what is not
+            // there is not an error, so a replay after the filters are gone succeeds.
+            UndoRecord::GuardFilters { .. } => crate::guard_engine::Engine::open()
+                .and_then(|engine| engine.remove_all())
+                .map_err(|e| NetstateError::Operation(e.to_string())),
         }
     }
 }

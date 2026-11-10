@@ -40,15 +40,6 @@ const CONTROL_PERMIT_WEIGHT: u8 = 15;
 /// The ordinary narrow permits.
 const PERMIT_WEIGHT: u8 = 10;
 
-/// Accounts too broad to name a program's owner: Everyone, Anonymous, Authenticated Users, Users, Guests.
-const BROAD_ACCOUNTS: [&str; 5] = [
-    "S-1-1-0",
-    "S-1-5-7",
-    "S-1-5-11",
-    "S-1-5-32-545",
-    "S-1-5-32-546",
-];
-
 /// Which way the traffic goes, as the firewall sees a connection (new outbound connections, new inbound ones).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Direction {
@@ -81,8 +72,6 @@ pub enum Condition {
     User(String),
     /// Traffic to or from this computer itself.
     Loopback,
-    /// Traffic between virtual machines on a virtual switch (the lab is Docker and WSL).
-    VirtualSwitch,
     Udp,
     Tcp,
     LocalPort(u16),
@@ -172,6 +161,22 @@ fn is_local(range: &IpCidr) -> bool {
         .any(|local| range.prefix_len() >= local.prefix_len() && local.overlaps(range))
 }
 
+/// The two destinations a request for an address goes to, and only on that request's own ports: the broadcast address
+/// (DHCP for v4, client port 68 to server port 67) and the all-DHCP-agents group (v6, 546 to 547). They lie outside the
+/// local ranges, so the lint above would call them a leak; nothing else is excused.
+fn is_address_request_to(filter: &Filter, range: &IpCidr) -> bool {
+    let ports = |client: u16, server: u16| {
+        filter.conditions.contains(&Condition::Udp)
+            && filter.conditions.contains(&Condition::LocalPort(client))
+            && filter.conditions.contains(&Condition::RemotePort(server))
+    };
+    match range.to_string().as_str() {
+        "255.255.255.255/32" => filter.family == Family::V4 && ports(68, 67),
+        "ff02::1:2/128" => filter.family == Family::V6 && ports(546, 547),
+        _ => false,
+    }
+}
+
 /// A full path to a program on a local drive: `X:\dir\file`. Refused: a network share or a device path (the carrier's
 /// permit must not follow a file somebody else controls), a wildcard, a forward slash, a stream (`:`), a control
 /// character, an empty segment (a doubled or trailing backslash), and a segment ending in a dot or a space (`.`, `..`,
@@ -195,17 +200,26 @@ fn full_path(path: &str) -> bool {
             .all(|segment| !segment.is_empty() && !segment.ends_with(['.', ' ']))
 }
 
-/// One specific security identifier (`S-1-5-18`), not a group everybody belongs to and not a name.
+/// One account a program can really run as: the three service accounts (`S-1-5-18`, `-19`, `-20`), a per-service
+/// identity (`S-1-5-80-...`), or an ordinary user of a domain or machine (`S-1-5-21-a-b-c-RID` with RID 1000 or
+/// more). An allow-list on purpose: the firewall compares an account with the groups in a process's token, so any
+/// group (Administrators, Interactive, an integrity level, Domain Users) would match almost everything. It also
+/// refuses a name and anything that is not digits.
 fn specific_account(sid: &str) -> bool {
-    let Some(rest) = sid.strip_prefix("S-1-") else {
+    let Some(rest) = sid.strip_prefix("S-1-5-") else {
         return false;
     };
+    let digits = |p: &&str| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit());
     let parts: Vec<&str> = rest.split('-').collect();
-    parts.len() >= 2
-        && parts
-            .iter()
-            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
-        && !BROAD_ACCOUNTS.contains(&sid)
+    if !parts.iter().all(digits) {
+        return false;
+    }
+    match parts.as_slice() {
+        ["18" | "19" | "20"] => true,
+        ["80", sub @ ..] => !sub.is_empty(),
+        ["21", _, _, _, rid] => rid.parse::<u32>().is_ok_and(|r| r >= 1000),
+        _ => false,
+    }
 }
 
 const BOTH_DIRECTIONS: [Direction; 2] = [Direction::Outbound, Direction::Inbound];
@@ -318,7 +332,10 @@ fn control_port_filters(plan: &GuardPlan, out: &mut Vec<Filter>) {
     }
 }
 
-/// What is let through in every direction and family: the tunnel, this computer, the carrier, virtual machines.
+/// What is let through in every direction and family: the tunnel, this computer, the carrier. (A permit for virtual
+/// machines on a virtual switch was in the first version and is gone: the firewall engine refuses its condition at the
+/// layers the guard works at, measured in the lab, and traffic between guests of a virtual switch is not traffic of this
+/// computer's programs, which is all those layers see. WSL and Docker reach the host over the local ranges, which stay open.)
 fn standing_filters(plan: &GuardPlan, out: &mut Vec<Filter>) {
     for family in BOTH_FAMILIES {
         for direction in BOTH_DIRECTIONS {
@@ -343,12 +360,6 @@ fn standing_filters(plan: &GuardPlan, out: &mut Vec<Filter>) {
                     Condition::Program(plan.core_program.clone()),
                     Condition::User(plan.core_user.clone()),
                 ],
-            ));
-            out.push(permit(
-                format!("virtual machines on a virtual switch ({tag})"),
-                family,
-                direction,
-                vec![Condition::VirtualSwitch],
             ));
         }
     }
@@ -384,6 +395,13 @@ fn link_filters(out: &mut Vec<Filter>) {
     // Addresses from the local network: the client asks on 68 and the server answers from 67 (v4), and on 546 and 547
     // for v6. Without them a network that must be asked for an address cannot be joined.
     for (family, client, server) in [(Family::V4, 68, 67), (Family::V6, 546, 547)] {
+        // Only to where such a request goes (the broadcast address, or the all-DHCP-agents group), so a program
+        // that binds the client port cannot use the permit to reach any other address.
+        let asked = if family == Family::V4 {
+            "255.255.255.255/32"
+        } else {
+            "ff02::1:2/128"
+        };
         out.push(permit(
             format!("asking for an address ({})", fam_name(family)),
             family,
@@ -392,6 +410,7 @@ fn link_filters(out: &mut Vec<Filter>) {
                 Condition::Udp,
                 Condition::LocalPort(client),
                 Condition::RemotePort(server),
+                Condition::Remote(IpCidr::parse(asked).expect("built-in address is valid")),
             ],
         ));
         out.push(permit(
@@ -510,7 +529,7 @@ pub fn leaks(filters: &[Filter]) -> Vec<String> {
         }
         for condition in &f.conditions {
             if let Condition::Remote(range) = condition {
-                if !is_local(range) {
+                if !is_local(range) && !is_address_request_to(f, range) {
                     found.push(format!(
                         "`{}` lets {} through, which is not a local range",
                         f.name, range
@@ -630,7 +649,6 @@ pub fn describe(filter: &Filter) -> String {
             Condition::Program(path) => format!("program {path}"),
             Condition::User(sid) => format!("as {sid}"),
             Condition::Loopback => "this computer itself".to_owned(),
-            Condition::VirtualSwitch => "between virtual machines".to_owned(),
             Condition::Udp => "UDP".to_owned(),
             Condition::Tcp => "TCP".to_owned(),
             Condition::LocalPort(p) => format!("local port {p}"),
@@ -807,8 +825,11 @@ mod tests {
 
     #[test]
     fn the_local_network_stays_reachable_by_the_ranges_it_was_given_and_only_those() {
+        // The request for an address is scoped to its own two destinations (tested below); every other permit that
+        // names an address names a given local range.
         let reachable: BTreeSet<String> = built()
             .into_iter()
+            .filter(|f| !f.name.starts_with("asking for an address"))
             .flat_map(|f| f.conditions)
             .filter_map(|c| match c {
                 Condition::Remote(r) => Some(r.to_string()),
@@ -817,6 +838,66 @@ mod tests {
             .collect();
         let given: BTreeSet<String> = plan().local_ranges.iter().map(|r| r.to_string()).collect();
         assert_eq!(reachable, given);
+    }
+
+    #[test]
+    fn only_an_account_a_program_can_run_as_may_own_a_permit() {
+        // Review 2026-11-10, finding 6: the firewall matches an account against the groups in a process's token,
+        // so a group such as Administrators, Interactive or an integrity level would let almost anything through.
+        for ok in [
+            "S-1-5-18",
+            "S-1-5-19",
+            "S-1-5-20",
+            "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
+            "S-1-5-21-1-2-3-1001",
+            "S-1-5-21-4016204387-3008203602-4053404650-1001",
+        ] {
+            assert!(specific_account(ok), "{ok}");
+        }
+        for bad in [
+            "S-1-1-0",
+            "S-1-5-4",
+            "S-1-5-6",
+            "S-1-5-7",
+            "S-1-5-11",
+            "S-1-5-32-544",
+            "S-1-5-32-545",
+            "S-1-16-12288",
+            "S-1-3-0",
+            "S-1-5-21-1-2-3-513",
+            "S-1-5-21-1-2-3-500",
+            "S-1-5-21-1-2-3-999",
+            "S-1-5-21-1",
+            "S-1-5-80",
+            "S-1-5-18-1",
+            "S-1-5-",
+            "",
+        ] {
+            assert!(!specific_account(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn asking_for_an_address_is_sent_only_where_such_a_request_goes() {
+        // Review 2026-11-10, finding 5: the request to join a network is allowed on its two ports, but only to the
+        // broadcast address (v4) or the all-DHCP-agents group (v6); a program that binds the port cannot use it to
+        // reach an arbitrary address. The answers are inbound and carry nothing out.
+        let list = built();
+        for (name, only) in [
+            ("asking for an address (v4)", "255.255.255.255/32"),
+            ("asking for an address (v6)", "ff02::1:2/128"),
+        ] {
+            let f = list.iter().find(|f| f.name.starts_with(name)).expect(name);
+            let remote: Vec<String> = f
+                .conditions
+                .iter()
+                .filter_map(|c| match c {
+                    Condition::Remote(r) => Some(r.to_string()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(remote, vec![only.to_string()], "{name}");
+        }
     }
 
     #[test]
@@ -1156,10 +1237,12 @@ mod tests {
     #[test]
     fn verify_names_a_rule_that_is_missing_or_changed() {
         let mut list = built();
-        list.retain(|f| f.name != "virtual machines on a virtual switch (out v4)");
+        list.retain(|f| f.name != "this computer itself (out v4)");
         let found = verify(&plan(), &list);
-        assert!(found.iter().any(|l| l.contains("is missing or changed")
-            && l.contains("virtual machines on a virtual switch (out v4)")));
+        assert!(found
+            .iter()
+            .any(|l| l.contains("is missing or changed")
+                && l.contains("this computer itself (out v4)")));
 
         let mut list = built();
         let at = list

@@ -5,6 +5,9 @@
 pub mod adapter;
 pub mod echo;
 pub mod error;
+#[cfg(windows)]
+pub mod guard_engine;
+pub mod guard_wfp;
 pub mod host_route;
 pub mod notify;
 pub mod paths;
