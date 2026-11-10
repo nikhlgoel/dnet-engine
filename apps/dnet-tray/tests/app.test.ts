@@ -245,6 +245,35 @@ describe('preferences', () => {
   });
 });
 
+describe('the kill switch (T161)', () => {
+  it('starts off with no guard in, and the choice and the release are the person’s', async () => {
+    const { mock } = make({ initial: { state: 'off' } });
+    expect(await mock.guard()).toEqual({ supported: true, killSwitch: false, guardIn: false });
+    const on = await mock.setKillSwitch(true);
+    expect(on).toMatchObject({ ok: true, saved: true });
+    expect(on.effect).toMatch(/next connection/);
+    expect((await mock.guard()).killSwitch).toBe(true);
+    const off = await mock.setKillSwitch(false);
+    expect(off).toMatchObject({ ok: true });
+    expect((await mock.guard()).killSwitch).toBe(false);
+  });
+
+  it('releasing takes a guard that is in out, and says so', async () => {
+    const { mock } = make({ guard: { guardIn: true, killSwitch: true } });
+    expect((await mock.guard()).guardIn).toBe(true);
+    const out = await mock.releaseGuard();
+    expect(out).toMatchObject({ ok: true });
+    expect(out.effect).toMatch(/guard is out/);
+    expect((await mock.guard()).guardIn).toBe(false);
+    expect((await mock.guard()).killSwitch).toBe(true);
+  });
+
+  it('a service too old to know is said to be unsupported and claims nothing', async () => {
+    const { mock } = make({ guard: { supported: false } });
+    expect(await mock.guard()).toEqual({ supported: false, killSwitch: false, guardIn: null });
+  });
+});
+
 describe('endpoints and the encrypted-name setting are changed only while disconnected', () => {
   it('the bridge refuses while connected, and the refusal is a reason, not a crash', async () => {
     const { mock } = make({ initial: { state: 'ok' } });

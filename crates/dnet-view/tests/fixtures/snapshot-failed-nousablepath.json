@@ -2,10 +2,10 @@
   "activeEndpoint": null,
   "activeProfile": null,
   "failure": {
-    "action": "Connect to Wi-Fi or mobile data, then try again.",
+    "action": "Connect to Wi-Fi or mobile data that gives IPv4 access, or ask the network's owner whether it does, then try again.",
     "cause": "NoUsablePath",
-    "detail": "None of this computer's network connections can carry traffic right now.",
-    "title": "No network connection is available"
+    "detail": "None of this computer's network connections has a route to the internet that DNet Engine can use. It needs an IPv4 route; a network that gives only IPv6 is not supported yet, and a connection that is down has none.",
+    "title": "No network connection DNet Engine can use"
   },
   "lastBecause": null,
   "paths": {

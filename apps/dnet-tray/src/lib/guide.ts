@@ -327,6 +327,16 @@ export function isPlausibleAddress(text: string): boolean {
 }
 
 /**
+ * Whether `text` is an IPv4 address, the only kind the service will take as a server's address for now. A host name
+ * is refused (it would be looked up on the network the computer is on, before the tunnel exists) and so is an IPv6
+ * address (not supported yet). Plausible only: the service decides.
+ */
+export function isIpv4AddressText(text: string): boolean {
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(text);
+  return v4 !== null && v4.slice(1).every((part) => Number(part) <= 255);
+}
+
+/**
  * The command that connects to the server, built only from parts that are what they should be. A part that
  * is not is shown as a placeholder in angle brackets, so what is copied can never carry shell syntax.
  */

@@ -166,6 +166,33 @@ mod tests {
         }
     }
 
+    /// A stand-in that runs for thirty seconds as ONE process. Not `cmd /c ping`: a `cmd` that is killed between
+    /// creating its child and resuming it leaves that child suspended forever, still holding every handle it
+    /// inherited (including the pipes of whatever launched the test run), which hung whole test runs (T190).
+    fn ping_command(core: CoreBinding) -> CoreCommand {
+        CoreCommand {
+            core,
+            program: PathBuf::from("ping.exe"),
+            args: ["-n", "30", "127.0.0.1"]
+                .iter()
+                .map(OsString::from)
+                .collect(),
+            working_dir: None,
+            ready_marker: None,
+            ready_timeout: Duration::from_secs(5),
+        }
+    }
+
+    fn sleeping_runtime() -> WindowsCoreRuntime {
+        WindowsCoreRuntime::new(
+            ping_command(CoreBinding::PrimaryCore),
+            cmd("exit 0", CoreBinding::AmneziaWgCore),
+            "dnet-test",
+            Duration::from_secs(1),
+            Box::new(|| Ok(())),
+        )
+    }
+
     fn runtime(primary: &str) -> WindowsCoreRuntime {
         WindowsCoreRuntime::new(
             cmd(primary, CoreBinding::PrimaryCore),
@@ -187,7 +214,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_running_core_is_running_and_a_stopped_one_is_not_spoken_for() {
-        let rt = runtime("ping -n 30 127.0.0.1 > nul");
+        let rt = sleeping_runtime();
         rt.spawn_core(CoreBinding::PrimaryCore).await.unwrap();
         assert_eq!(
             rt.core_health(CoreBinding::PrimaryCore).await,
@@ -203,7 +230,7 @@ mod tests {
     #[tokio::test]
     async fn a_core_that_exits_on_its_own_is_reported_with_its_exit_code() {
         // Alive for about two seconds (so spawning sees it survive, even on a slow machine), then exits with 3.
-        let rt = runtime("ping -n 3 127.0.0.1 > nul & exit 3");
+        let rt = runtime("ping -n 3 127.0.0.1 > nul 2>&1 & exit 3");
         rt.spawn_core(CoreBinding::PrimaryCore).await.unwrap();
         assert_eq!(
             rt.core_health(CoreBinding::PrimaryCore).await,
@@ -240,6 +267,35 @@ mod pinned_tests {
         }
     }
 
+    /// One process, not a `cmd` with a `ping` under it (see the note in the first test module).
+    fn ping_command(core: CoreBinding) -> CoreCommand {
+        CoreCommand {
+            core,
+            program: PathBuf::from("ping.exe"),
+            args: ["-n", "30", "127.0.0.1"]
+                .iter()
+                .map(OsString::from)
+                .collect(),
+            working_dir: None,
+            ready_marker: None,
+            ready_timeout: Duration::from_secs(5),
+        }
+    }
+
+    fn sleeping_runtime() -> WindowsCoreRuntime {
+        WindowsCoreRuntime::new(
+            ping_command(CoreBinding::PrimaryCore),
+            cmd(
+                "dnet-never-runs-1.exe",
+                "exit 0",
+                CoreBinding::AmneziaWgCore,
+            ),
+            "dnet-test-adapter",
+            Duration::from_millis(300),
+            Box::new(|| Ok(())),
+        )
+    }
+
     fn runtime(primary: &str) -> WindowsCoreRuntime {
         WindowsCoreRuntime::new(
             cmd("cmd.exe", primary, CoreBinding::PrimaryCore),
@@ -267,7 +323,7 @@ mod pinned_tests {
 
     #[tokio::test]
     async fn the_id_reported_is_the_id_of_the_process_that_was_started() {
-        let rt = runtime("ping -n 30 127.0.0.1 > nul");
+        let rt = sleeping_runtime();
         rt.spawn_core(CoreBinding::PrimaryCore).await.unwrap();
         let pid = rt
             .pid(CoreBinding::PrimaryCore)
@@ -278,7 +334,7 @@ mod pinned_tests {
             "{pid} is not a plausible process id (0 and 4 belong to the system)"
         );
         assert!(
-            image_of(pid).contains("cmd.exe"),
+            image_of(pid).contains("ping.exe"),
             "{pid}: {}",
             image_of(pid)
         );
@@ -287,7 +343,7 @@ mod pinned_tests {
 
     #[tokio::test]
     async fn the_runtime_trait_gives_the_same_id_as_the_runtime() {
-        let rt = runtime("ping -n 30 127.0.0.1 > nul");
+        let rt = sleeping_runtime();
         rt.spawn_core(CoreBinding::PrimaryCore).await.unwrap();
         let direct = rt.pid(CoreBinding::PrimaryCore).await;
         assert!(direct.is_some());
@@ -300,7 +356,7 @@ mod pinned_tests {
 
     #[tokio::test]
     async fn a_core_that_was_never_started_or_was_stopped_has_no_id() {
-        let rt = runtime("ping -n 30 127.0.0.1 > nul");
+        let rt = sleeping_runtime();
         assert_eq!(rt.pid(CoreBinding::PrimaryCore).await, None);
         assert_eq!(
             CoreRuntime::core_pid(&rt, CoreBinding::PrimaryCore).await,
@@ -318,16 +374,8 @@ mod pinned_tests {
     #[tokio::test]
     async fn each_core_has_its_own_id() {
         let rt = WindowsCoreRuntime::new(
-            cmd(
-                "cmd.exe",
-                "ping -n 30 127.0.0.1 > nul",
-                CoreBinding::PrimaryCore,
-            ),
-            cmd(
-                "cmd.exe",
-                "ping -n 30 127.0.0.1 > nul",
-                CoreBinding::AmneziaWgCore,
-            ),
+            ping_command(CoreBinding::PrimaryCore),
+            ping_command(CoreBinding::AmneziaWgCore),
             "dnet-test-adapter",
             Duration::from_millis(300),
             Box::new(|| Ok(())),
@@ -349,7 +397,7 @@ mod pinned_tests {
 
     #[tokio::test]
     async fn a_running_core_has_not_exited_and_an_unknown_one_counts_as_exited() {
-        let rt = runtime("ping -n 30 127.0.0.1 > nul");
+        let rt = sleeping_runtime();
         assert!(
             rt.has_exited(CoreBinding::PrimaryCore).await,
             "never started"
@@ -365,7 +413,7 @@ mod pinned_tests {
 
     #[tokio::test]
     async fn a_core_that_ends_by_itself_is_noticed() {
-        let rt = runtime("ping -n 3 127.0.0.1 > nul & exit 0");
+        let rt = runtime("ping -n 3 127.0.0.1 > nul 2>&1 & exit 0");
         rt.spawn_core(CoreBinding::PrimaryCore).await.unwrap();
         assert!(!rt.has_exited(CoreBinding::PrimaryCore).await);
         tokio::time::sleep(Duration::from_secs(4)).await;
@@ -382,6 +430,7 @@ mod pinned_tests {
             std::process::id()
         ));
         std::fs::copy(std::env::current_exe().unwrap(), &image).unwrap();
+        let _one_at_a_time = crate::process::spawning();
         let child = std::process::Command::new(&image)
             .args([
                 "--ignored",

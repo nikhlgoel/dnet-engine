@@ -8,7 +8,8 @@
 //!   re-registers) `DNetEngine` as an automatic LocalSystem service that waits for the network stack and
 //!   is restarted by the SCM if it fails, and starts it.
 //! - **`uninstall`** stops the service, which takes any tunnel down; restores anything a stop left
-//!   (the same recovery the service runs at start); and only then deletes the service. If the network
+//!   (the same recovery the service runs at start); and only then deletes the service. Before either, it takes the
+//!   kill-switch guard out of the firewall by its provider's key. If the network
 //!   cannot be restored the service stays installed, so its next start can try again: nobody would
 //!   restore it after the service is gone. `--remove-settings` also deletes the saved settings and
 //!   endpoint credentials.
@@ -20,8 +21,13 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Admin {
     Install,
-    Uninstall { remove_settings: bool },
+    Uninstall {
+        remove_settings: bool,
+    },
     Stop,
+    /// Take the kill-switch guard out of the firewall, with the service stopped or running: the way out that needs
+    /// nothing else to work.
+    ReleaseGuard,
 }
 
 /// The administrative command in `args` (without the program name), `None` for an ordinary start (by
@@ -35,6 +41,7 @@ pub fn admin_command(args: &[String]) -> Option<Result<Admin, String>> {
             remove_settings: false,
         },
         "stop" => Admin::Stop,
+        "release-guard" => Admin::ReleaseGuard,
         _ => return None,
     };
     Some(match (command, rest) {
@@ -90,6 +97,7 @@ mod windows_impl {
         match command {
             Admin::Install => install(),
             Admin::Uninstall { remove_settings } => uninstall(remove_settings),
+            Admin::ReleaseGuard => release_guard(),
             Admin::Stop => match open(ServiceAccess::QUERY_STATUS | ServiceAccess::STOP)? {
                 Some(service) => stop_and_wait(&service),
                 None => {
@@ -98,6 +106,16 @@ mod windows_impl {
                 }
             },
         }
+    }
+
+    /// The guard out of the firewall, by the provider's key, whatever else is or is not working. Removing what is not
+    /// there is not an error.
+    fn release_guard() -> anyhow::Result<()> {
+        dnet_netstate::guard_engine::Engine::open()
+            .and_then(|engine| engine.remove_all())
+            .map_err(|error| anyhow!("the firewall guard could not be removed: {error}"))?;
+        println!("firewall guard: removed");
+        Ok(())
     }
 
     fn install() -> anyhow::Result<()> {
@@ -218,6 +236,11 @@ mod windows_impl {
             None => println!("service: not installed"),
             Some(service) => {
                 stop_and_wait(&service)?;
+                // The kill-switch guard belongs to the service and is tied to it: with the service gone nothing
+                // would ever take it out, and the computer would have no network (ADR-0006 §5a condition 3). It
+                // comes out first and by the provider's key, whatever the journal says and whether or not the
+                // recovery below succeeds, so a stuck recovery can never strand it.
+                release_guard()?;
                 // Whatever a stop could not undo (one that ran out of time, an earlier crash) is undone
                 // now, while nothing is running and before the only thing that would undo it is gone.
                 crate::recovery::recover_installation().map_err(|error| {
@@ -356,6 +379,19 @@ mod tests {
                 remove_settings: true
             }))
         );
+    }
+
+    /// The way out that needs no running service and no console session: an administrator at a prompt takes the
+    /// kill-switch guard out by its provider's key (T161, ADR-0006 §5a condition 3).
+    #[test]
+    fn release_guard_is_a_command_and_takes_no_other_words() {
+        assert_eq!(parse(&["release-guard"]), Some(Ok(Admin::ReleaseGuard)));
+        for bad in [&["release-guard", "now"][..], &["release-guard", "--all"]] {
+            match parse(bad) {
+                Some(Err(why)) => assert!(why.contains("release-guard"), "{why}"),
+                other => panic!("{bad:?}: {other:?}"),
+            }
+        }
     }
 
     /// The SCM starts the service with no words; development runs use flags. Neither is a command.

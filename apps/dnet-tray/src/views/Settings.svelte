@@ -4,7 +4,7 @@
   import type { AppState } from '../lib/app.svelte';
   import Consent from '../components/Consent.svelte';
   import { brutalWarning, disclosure, en } from '../lib/messages';
-  import type { ProfileView } from '../lib/model';
+  import type { GuardView, ProfileView } from '../lib/model';
 
   let { app }: { app: AppState } = $props();
 
@@ -17,6 +17,11 @@
   let error = $state<string | null>(null);
   let checking = $state(false);
   let result = $state<string | null>(null);
+
+  let guard = $state<GuardView | null>(null);
+  let guardNote = $state<string | null>(null);
+  let guardError = $state<string | null>(null);
+  let releasing = $state(false);
 
   const brutal = en.consent.brutal;
   let hy2 = $state<ProfileView | null>(null);
@@ -35,6 +40,12 @@
     } catch (e) {
       // Not knowing the setting is not the same as it being on: say so, and do not offer to change it.
       error = app.reason(e);
+    }
+    try {
+      guard = await app.bridge.guard();
+    } catch (e) {
+      // Not knowing is not the same as it being off: nothing about the kill switch is shown or offered.
+      guardError = app.reason(e);
     }
     try {
       hy2 = (await app.bridge.profiles()).find((p) => p.kind === 'Hysteria2') ?? null;
@@ -111,6 +122,36 @@
     }
   }
 
+  /** The switch stays where it was until the service has answered, and then shows what the service says it is. */
+  async function onKillSwitch(event: Event): Promise<void> {
+    const box = event.currentTarget as HTMLInputElement;
+    const wants = box.checked;
+    box.checked = !wants;
+    const outcome = await app.bridge.setKillSwitch(wants);
+    guardError = outcome.ok ? null : outcome.reason;
+    if (!outcome.ok) return;
+    guardNote = outcome.effect ?? null;
+    await refreshGuard();
+  }
+
+  async function releaseGuard(): Promise<void> {
+    releasing = true;
+    const outcome = await app.bridge.releaseGuard();
+    releasing = false;
+    guardError = outcome.ok ? null : outcome.reason;
+    if (!outcome.ok) return;
+    guardNote = outcome.effect ?? null;
+    await refreshGuard();
+  }
+
+  async function refreshGuard(): Promise<void> {
+    try {
+      guard = await app.bridge.guard();
+    } catch (e) {
+      guardError = app.reason(e);
+    }
+  }
+
   async function checkNow(): Promise<void> {
     checking = true;
     result = null;
@@ -170,6 +211,32 @@
       <p class="notice" role="alert">{error}</p>
     {/if}
   </div>
+
+  {#if guard?.supported}
+    <h2 class="cat">{t.catGuard}</h2>
+    <div class="panel">
+      <div class="row">
+        <div class="text">
+          <label class="title" for="kill-switch">{t.killSwitch}</label>
+          <p class="desc" id="kill-help">{guard.killSwitch ? t.killSwitchOnHelp : t.killSwitchOffHelp}</p>
+        </div>
+        <input id="kill-switch" type="checkbox" role="switch" aria-describedby="kill-help" checked={guard.killSwitch} onchange={onKillSwitch} />
+      </div>
+      <!-- The way out is offered whenever a guard is in or cannot be ruled out: not knowing is no reason to hide it. -->
+      {#if guard.guardIn !== false}
+        <div class="row">
+          <div class="text"><p class="desc">{guard.guardIn === true ? t.guardIn : t.guardUnknown}</p></div>
+          <button type="button" class="btn control" disabled={releasing} onclick={releaseGuard}>{t.releaseGuard}</button>
+        </div>
+      {/if}
+      {#if guardNote}
+        <p class="desc result" role="status">{guardNote}</p>
+      {/if}
+      {#if guardError}
+        <p class="notice" role="alert">{guardError}</p>
+      {/if}
+    </div>
+  {/if}
 
   {#if hy2 || brutalError}
     <h2 class="cat">{t.speedMode}</h2>

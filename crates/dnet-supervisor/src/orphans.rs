@@ -284,8 +284,12 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn a_process_that_is_not_one_of_ours_is_left_alone() {
+        let _one_at_a_time = crate::process::spawning();
+        // `set /p` is a built-in that waits for input from a stdin nobody closes: one process, no child under it, so
+        // ending it can never strand a suspended grandchild holding the test run's pipes (T190).
         let mut bystander = std::process::Command::new("cmd")
-            .args(["/C", "ping -n 30 127.0.0.1 > nul"])
+            .args(["/C", "set /p x="])
+            .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
@@ -325,6 +329,7 @@ mod tests {
             .join(format!("dnet-orphan-probe-{}.exe", std::process::id()));
         std::fs::copy(std::env::current_exe().unwrap(), &image).unwrap();
 
+        let _one_at_a_time = crate::process::spawning();
         let mut child = std::process::Command::new(&image)
             .args([
                 "--ignored",
@@ -370,8 +375,11 @@ mod pinned_tests {
     use super::*;
 
     fn sleeper() -> std::process::Child {
+        let _one_at_a_time = crate::process::spawning();
+        // See the note in `a_process_that_is_not_one_of_ours_is_left_alone`: a built-in waiting on an open stdin.
         std::process::Command::new("cmd")
-            .args(["/C", "ping -n 30 127.0.0.1 > nul"])
+            .args(["/C", "set /p x="])
+            .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()

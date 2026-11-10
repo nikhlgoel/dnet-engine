@@ -58,6 +58,10 @@ pub enum Request {
     /// and it carries no endpoint label, address or network name. Same note as `GetPaths`: a service that
     /// predates it answers `InvalidRequest`, which a client reads as "this service cannot say".
     GetComponents,
+    /// Whether the kill switch is on and whether a firewall guard is in now (T161). Read-only; it names no address,
+    /// program or account. A service that predates it answers `InvalidRequest`, which a client reads as "this
+    /// service cannot say".
+    GetGuard,
     ListEndpoints,
     ListProfiles,
     ListRules,
@@ -115,6 +119,17 @@ pub enum Request {
     SetEncryptedDnsHandling {
         block: bool,
     },
+    /// The person's choice about the kill switch (T161, ADR-0006 §5a): `enabled: true` makes the service keep
+    /// a firewall guard in while a connection is up, so a crash or a stopped service leaves no way out around
+    /// the tunnel; `false` (the default) leaves the guard out. The reply says what it did and whether a guard is
+    /// in now. Turning it off takes a guard that is in out at once.
+    SetKillSwitch {
+        enabled: bool,
+    },
+    /// Take the firewall guard out now, whatever else is going on (T161, ADR-0006 §5a condition 3): the way out
+    /// for a person whose connection is down and who needs the network back. It removes only the guard's own
+    /// rules; removing what is not there is not an error.
+    ReleaseGuard,
     /// Hand the service signed profile-feed documents it did not fetch itself (an offline import,
     /// ADR-0002 §7). The service runs exactly the checks a fetched document gets; this grants no
     /// privilege, because an import can only install what the signing keys already authorised.
@@ -246,18 +261,34 @@ pub fn check_label(label: &str) -> Result<&str, IpcError> {
     Ok(label)
 }
 
-/// The rules for a server's address.
+/// The rules for a server's address: an IPv4 address a server can have, and nothing else (for now).
+///
+/// What the connection will refuse is refused here, not at the first connect (`dnetd`'s plan, `dialled`). A host name
+/// would have to be looked up on whatever network the computer is on, before the tunnel exists, and that network can
+/// answer with an address of its own choosing. An IPv6 address is not supported yet. A saved file from before may
+/// still hold either; it loads, and the connect refuses it with its own reason.
 pub fn check_host(host: &str) -> Result<&str, IpcError> {
     let host = host.trim();
     if host.len() > MAX_HOST_CHARS || !dnet_config::persist::host_is_acceptable(host) {
         return Err(invalid(
-            "`host` must be an IP address or a host name, with no scheme, port or path",
+            "`host` must be an IPv4 address, with no scheme, port or path",
         ));
     }
-    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        if ip.is_unspecified() || ip.is_multicast() {
-            return Err(invalid("`host` is not an address a server can have"));
+    let ip = match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => ip,
+        Ok(std::net::IpAddr::V6(_)) => {
+            return Err(invalid(
+                "`host` must be an IPv4 address for now: IPv6 servers are not supported yet",
+            ))
         }
+        Err(_) => {
+            return Err(invalid(
+                "`host` must be an IPv4 address for now, not a host name: a name would be looked up on the network this computer is on, before the tunnel exists, and that network could answer with an address of its own",
+            ))
+        }
+    };
+    if !dnet_config::persist::address_could_be_a_server(std::net::IpAddr::V4(ip)) {
+        return Err(invalid("`host` is not an address a server can have"));
     }
     Ok(host)
 }
@@ -341,7 +372,7 @@ impl Request {
     pub fn class(&self) -> RequestClass {
         use Request::*;
         match self {
-            GetVersion | GetState | GetSession | GetPaths | GetStats | GetComponents
+            GetVersion | GetState | GetSession | GetPaths | GetStats | GetComponents | GetGuard
             | ListEndpoints | ListProfiles | ListRules | GetDiagnostics | ListPending => {
                 RequestClass::ReadOnly
             }
@@ -357,6 +388,8 @@ impl Request {
             | EnableBrutal { .. }
             | DisableBrutal { .. }
             | SetEncryptedDnsHandling { .. }
+            | SetKillSwitch { .. }
+            | ReleaseGuard
             | ImportFeed(_)
             | FetchFeed
             | PrepareServer { .. }
@@ -1076,6 +1109,7 @@ pub fn decode_request(wire: &str) -> Result<Request, IpcError> {
         "GetPaths" => Request::GetPaths,
         "GetStats" => Request::GetStats,
         "GetComponents" => Request::GetComponents,
+        "GetGuard" => Request::GetGuard,
         "ListEndpoints" => Request::ListEndpoints,
         "ListProfiles" => Request::ListProfiles,
         "ListRules" => Request::ListRules,
@@ -1183,6 +1217,16 @@ pub fn decode_request(wire: &str) -> Result<Request, IpcError> {
                 block: field_bool(&value, "block")?,
             }
         }
+        "SetKillSwitch" => {
+            only_fields(&value, &["request", "enabled"])?;
+            Request::SetKillSwitch {
+                enabled: field_bool(&value, "enabled")?,
+            }
+        }
+        "ReleaseGuard" => {
+            only_fields(&value, &["request"])?;
+            Request::ReleaseGuard
+        }
         "ImportFeed" => {
             only_fields(&value, &["request", "keys", "feed"])?;
             Request::ImportFeed(FeedImport::new(
@@ -1283,6 +1327,7 @@ pub fn encode_request(request: &Request) -> String {
         Request::GetPaths => "GetPaths",
         Request::GetStats => "GetStats",
         Request::GetComponents => "GetComponents",
+        Request::GetGuard => "GetGuard",
         Request::ListEndpoints => "ListEndpoints",
         Request::ListProfiles => "ListProfiles",
         Request::ListRules => "ListRules",
@@ -1299,6 +1344,8 @@ pub fn encode_request(request: &Request) -> String {
         Request::EnableBrutal { .. } => "EnableBrutal",
         Request::DisableBrutal { .. } => "DisableBrutal",
         Request::SetEncryptedDnsHandling { .. } => "SetEncryptedDnsHandling",
+        Request::SetKillSwitch { .. } => "SetKillSwitch",
+        Request::ReleaseGuard => "ReleaseGuard",
         Request::ImportFeed(_) => "ImportFeed",
         Request::FetchFeed => "FetchFeed",
         Request::PrepareServer { .. } => "PrepareServer",
@@ -1358,6 +1405,9 @@ pub fn encode_request(request: &Request) -> String {
         }
         Request::SetEncryptedDnsHandling { block } => {
             object.insert("block".into(), Value::Bool(*block));
+        }
+        Request::SetKillSwitch { enabled } => {
+            object.insert("enabled".into(), Value::Bool(*enabled));
         }
         Request::PrepareServer { arch } => {
             object.insert("arch".into(), Value::String(arch.as_str().to_owned()));

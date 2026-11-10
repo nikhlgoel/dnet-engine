@@ -680,6 +680,20 @@ pub fn host_is_acceptable(host: &str) -> bool {
     host.parse::<IpAddr>().is_ok() || is_dns_hostname(host)
 }
 
+/// Whether `ip` is an address a server can have: not nothing, not a group, and not the broadcast address. An IPv6
+/// address that is really an IPv4 one (`::ffff:224.0.0.1`) is judged as the IPv4 address it stands for, so the rule
+/// cannot be got round by writing the same address another way. Loopback and private ranges are allowed: the test
+/// harness and a server in the same house are real cases. The one rule for every way an address is typed in.
+pub fn address_could_be_a_server(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => !(v4.is_unspecified() || v4.is_multicast() || v4.is_broadcast()),
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => address_could_be_a_server(IpAddr::V4(v4)),
+            None => !(v6.is_unspecified() || v6.is_multicast()),
+        },
+    }
+}
+
 fn decode_endpoint(e: EndpointWire, index: usize) -> Result<Endpoint, PersistError> {
     let at = |what: &str| format!("endpoint {index}: {what}");
 
@@ -1544,5 +1558,42 @@ mod tests {
             })
             .collect();
         assert!(encode_with_rules(&endpoints(), &profiles(), None, &many).is_err());
+    }
+}
+
+#[cfg(test)]
+mod server_address_tests {
+    use super::*;
+
+    #[test]
+    fn an_address_nothing_can_have_is_refused_however_it_is_written() {
+        for bad in [
+            "0.0.0.0",
+            "::",
+            "224.0.0.1",
+            "239.255.255.250",
+            "ff02::1",
+            "255.255.255.255",
+            "::ffff:0.0.0.0",
+            "::ffff:224.0.0.1",
+            "::ffff:255.255.255.255",
+        ] {
+            let ip: IpAddr = bad.parse().unwrap();
+            assert!(!address_could_be_a_server(ip), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_real_server_address_is_accepted_in_either_family_and_in_the_mapped_form() {
+        for good in [
+            "203.0.113.9",
+            "10.0.0.5",
+            "127.0.0.1",
+            "2001:db8::7",
+            "::ffff:203.0.113.9",
+        ] {
+            let ip: IpAddr = good.parse().unwrap();
+            assert!(address_could_be_a_server(ip), "{good}");
+        }
     }
 }

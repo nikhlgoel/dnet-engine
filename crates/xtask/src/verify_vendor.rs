@@ -422,3 +422,251 @@ o\sucholderile.exe",
         assert!(failures.is_empty());
     }
 }
+
+/// The gate run against trees built for the purpose. Each failure the gate exists to catch is made once on its own
+/// and must be found, and a clean tree must pass, so a gate that stopped looking would be noticed.
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+
+    fn write(root: &Path, rel: &str, bytes: &[u8]) {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    const LICENCES: [&str; 5] = [
+        "vendor/wintun/LICENSE.txt",
+        "vendor/primary-core/LICENSE",
+        "vendor/amneziawg-go/LICENSE",
+        "THIRD-PARTY-NOTICES.md",
+        "LICENSE",
+    ];
+
+    /// Every licence text the gate requires, and nothing else.
+    fn tree_with_licences() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for rel in LICENCES {
+            write(dir.path(), rel, b"licence");
+        }
+        dir
+    }
+
+    fn pe_image(len: usize) -> Vec<u8> {
+        let mut image = vec![0u8; len];
+        image[0..2].copy_from_slice(b"MZ");
+        image[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        image[0x80..0x84].copy_from_slice(b"PE\0\0");
+        image
+    }
+
+    fn found_in_source(root: &Path) -> Vec<String> {
+        let mut failures = Vec::new();
+        check_no_wintun_source(root, &mut failures).unwrap();
+        failures
+    }
+
+    #[test]
+    fn a_tree_with_no_wintun_source_has_nothing_to_report() {
+        let dir = tree_with_licences();
+        write(dir.path(), "src/main.c", b"int main(){}");
+        write(dir.path(), "vendor/wintun/wintun.dll", b"not source");
+        write(dir.path(), "docs/wintun.md", b"notes");
+        assert!(found_in_source(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn wintun_source_is_found_wherever_in_the_tree_it_was_put() {
+        for rel in [
+            "wintun.c",
+            "third_party/wintun/wintun.h",
+            "external/deep/er/Wintun.CPP",
+            "vendor/WINTUN.vcxproj",
+            "x/wintun.sln",
+            "x/wintun.asm",
+            "x/wintun.rc",
+            "x/wintun.hpp",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            write(dir.path(), rel, b"source");
+            let failures = found_in_source(dir.path());
+            assert_eq!(failures.len(), 1, "{rel}: {failures:?}");
+            assert!(
+                failures[0].contains("Wintun source file present"),
+                "{rel}: {failures:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_directory_named_for_wintun_source_is_found_even_when_empty() {
+        for name in ["wintun-src", "Wintun-Source", "a/b/wintun-source"] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(dir.path().join(name)).unwrap();
+            let failures = found_in_source(dir.path());
+            assert_eq!(failures.len(), 1, "{name}: {failures:?}");
+            assert!(
+                failures[0].contains("Wintun source directory present"),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_source_file_that_is_not_about_wintun_is_none_of_the_gates_business() {
+        let dir = tempfile::tempdir().unwrap();
+        for rel in ["a.c", "b.h", "deep/c.cpp", "d.asm"] {
+            write(dir.path(), rel, b"x");
+        }
+        assert!(found_in_source(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn build_output_version_control_and_package_folders_are_not_searched() {
+        let dir = tempfile::tempdir().unwrap();
+        for rel in [
+            "target/debug/wintun.c",
+            ".git/objects/wintun.h",
+            "node_modules/x/wintun.cpp",
+        ] {
+            write(dir.path(), rel, b"x");
+        }
+        assert!(found_in_source(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn the_spike_results_folder_is_skipped_only_at_its_own_place() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "testing/spike-r4/results/wintun.c", b"x");
+        assert!(
+            found_in_source(dir.path()).is_empty(),
+            "its own output is skipped"
+        );
+        write(
+            dir.path(),
+            "elsewhere/testing/spike-r4/results/wintun.c",
+            b"x",
+        );
+        assert_eq!(
+            found_in_source(dir.path()).len(),
+            1,
+            "the same names elsewhere are not"
+        );
+    }
+
+    #[test]
+    fn a_missing_licence_text_is_named() {
+        let dir = tree_with_licences();
+        let mut failures = Vec::new();
+        check_licence_texts(dir.path(), &mut failures).unwrap();
+        assert!(failures.is_empty(), "{failures:?}");
+
+        for rel in LICENCES {
+            let dir = tree_with_licences();
+            std::fs::remove_file(dir.path().join(rel)).unwrap();
+            let mut failures = Vec::new();
+            check_licence_texts(dir.path(), &mut failures).unwrap();
+            assert_eq!(failures, [format!("missing required licence text: {rel}")]);
+        }
+    }
+
+    #[test]
+    fn a_core_that_embeds_an_executable_image_is_named_and_a_clean_one_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut clean = pe_image(0x200);
+        clean.extend(vec![0xAAu8; 0x400]);
+        write(dir.path(), "vendor/primary-core/primary-core.exe", &clean);
+        let mut failures = Vec::new();
+        assert_eq!(
+            check_no_embedded_images(dir.path(), &mut failures).unwrap(),
+            1
+        );
+        assert!(failures.is_empty(), "{failures:?}");
+
+        // The same host with a second image inside it, as a go:embed of a DLL would leave.
+        let mut dirty = clean.clone();
+        let inside = dirty.len();
+        dirty.extend(pe_image(0x300));
+        write(dir.path(), "vendor/amneziawg-go/amneziawg-go.exe", &dirty);
+        let mut failures = Vec::new();
+        assert_eq!(
+            check_no_embedded_images(dir.path(), &mut failures).unwrap(),
+            2
+        );
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert!(failures[0].contains("amneziawg-go.exe"), "{failures:?}");
+        assert!(failures[0].contains("unidentified"), "{failures:?}");
+        assert!(failures[0].contains(&inside.to_string()), "{failures:?}");
+    }
+
+    #[test]
+    fn with_no_core_present_nothing_is_scanned_and_the_summary_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut failures = Vec::new();
+        assert_eq!(
+            check_no_embedded_images(dir.path(), &mut failures).unwrap(),
+            0
+        );
+        assert!(embedded_summary(0).contains("NOT run"));
+        assert!(embedded_summary(2).contains("2 of 2"));
+        assert!(embedded_summary(1).contains("1 of 2"));
+    }
+
+    #[test]
+    fn a_wintun_dll_that_is_not_the_pinned_one_is_a_failure_and_an_absent_one_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut failures = Vec::new();
+        assert_eq!(
+            check_signed_dll(dir.path(), &mut failures).unwrap(),
+            DllCheck::Absent
+        );
+        assert!(failures.is_empty());
+
+        write(
+            dir.path(),
+            "vendor/wintun/wintun.dll",
+            b"not the vendor file",
+        );
+        let mut failures = Vec::new();
+        let _ = check_signed_dll(dir.path(), &mut failures);
+        assert!(
+            failures
+                .iter()
+                .any(|f| f.contains("SHA-256") && f.contains("expected the pinned")),
+            "{failures:?}"
+        );
+    }
+
+    #[test]
+    fn the_summaries_never_claim_more_than_was_checked() {
+        assert!(DllCheck::Absent.summary().contains("NOT checked"));
+        assert!(DllCheck::DigestOnly.summary().contains("not checkable"));
+        let signed = DllCheck::DigestAndSignature.summary();
+        assert!(signed.contains("validly signed"), "{signed}");
+        assert_ne!(DllCheck::Absent.summary(), DllCheck::DigestOnly.summary());
+    }
+
+    #[test]
+    fn the_whole_gate_passes_a_clean_tree_and_stops_each_kind_of_bad_one() {
+        let clean = tree_with_licences();
+        assert!(run(clean.path()).is_ok());
+
+        let with_source = tree_with_licences();
+        write(with_source.path(), "third_party/wintun/wintun.c", b"x");
+        assert!(run(with_source.path()).is_err());
+
+        let without_licence = tree_with_licences();
+        std::fs::remove_file(without_licence.path().join("LICENSE")).unwrap();
+        assert!(run(without_licence.path()).is_err());
+
+        let embedding = tree_with_licences();
+        let mut host = pe_image(0x200);
+        host.extend(pe_image(0x200));
+        write(
+            embedding.path(),
+            "vendor/primary-core/primary-core.exe",
+            &host,
+        );
+        assert!(run(embedding.path()).is_err());
+    }
+}

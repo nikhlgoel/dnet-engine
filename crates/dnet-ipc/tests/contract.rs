@@ -85,6 +85,7 @@ fn ipc01_request_classes_match_the_contract_table() {
         GetPaths,
         GetStats,
         GetComponents,
+        GetGuard,
         ListEndpoints,
         ListProfiles,
         ListRules,
@@ -125,6 +126,8 @@ fn ipc01_request_classes_match_the_contract_table() {
             profile: dnet_core::ids::ProfileId::new("hy2-default"),
         },
         SetEncryptedDnsHandling { block: true },
+        SetKillSwitch { enabled: true },
+        ReleaseGuard,
         StartProvisioning,
         CancelProvisioning,
     ] {

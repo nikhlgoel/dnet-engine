@@ -667,6 +667,40 @@ fn removing_a_built_in_or_an_unknown_rule_is_refused() {
     assert!(rig.file_bytes().is_none());
 }
 
+/// Every built-in rule is refused with the reason that is about built-in rules (what they keep working), not with
+/// whatever a deeper check says, and none is touched.
+#[test]
+fn every_built_in_rule_is_refused_with_its_own_reason_and_stays_where_it_is() {
+    let mut rig = Rig::new();
+    let before: Vec<_> = rig.state.rules().iter().map(|r| r.id()).collect();
+    let builtin: Vec<_> = rig
+        .state
+        .rules()
+        .iter()
+        .filter(|r| r.is_builtin())
+        .map(|r| r.id())
+        .collect();
+    assert!(
+        builtin.len() >= 4,
+        "the default set has several built-in rules"
+    );
+    for id in builtin {
+        let error = rig
+            .configurator
+            .remove_rule(&mut rig.state, id)
+            .unwrap_err();
+        let reason = refused(&error);
+        assert!(
+            reason.contains("built-in rule cannot be removed"),
+            "{reason}"
+        );
+        assert!(reason.contains("keeps name lookups"), "{reason}");
+    }
+    let after: Vec<_> = rig.state.rules().iter().map(|r| r.id()).collect();
+    assert_eq!(after, before, "no rule was touched");
+    assert!(rig.file_bytes().is_none(), "nothing was saved");
+}
+
 #[test]
 fn a_rule_that_cannot_be_saved_is_not_kept() {
     let mut rig = Rig::new();

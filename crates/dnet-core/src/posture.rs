@@ -169,3 +169,40 @@ mod tests {
         );
     }
 }
+
+/// A tripwire for the kill-switch rule. `RoutingPosture` has no variant that sends traffic around the tunnel, and
+/// none may be added without an ADR (the project's rules, and the constitution's fail-closed principle). This match
+/// has no wildcard on purpose: adding a variant stops the build here, and whoever does must read this and the ADR
+/// requirement before deciding what the new variant means for `is_fail_closed`.
+#[cfg(test)]
+mod tripwire_tests {
+    use super::*;
+
+    fn what_it_does_with_untunnelled_traffic(posture: RoutingPosture) -> &'static str {
+        match posture {
+            RoutingPosture::Tunnelled { .. } => "carried by the tunnel",
+            RoutingPosture::FailClosed => "dropped",
+        }
+    }
+
+    #[test]
+    fn no_posture_lets_traffic_that_should_be_tunnelled_go_direct() {
+        for posture in [
+            RoutingPosture::FailClosed,
+            RoutingPosture::Tunnelled {
+                tier: FailoverTier::Tier1,
+            },
+            RoutingPosture::Tunnelled {
+                tier: FailoverTier::Tier2,
+            },
+        ] {
+            let what = what_it_does_with_untunnelled_traffic(posture);
+            assert!(
+                what == "dropped" || what == "carried by the tunnel",
+                "{posture:?}"
+            );
+            // The two ways to ask agree: fail-closed is exactly the dropped one.
+            assert_eq!(posture.is_fail_closed(), what == "dropped", "{posture:?}");
+        }
+    }
+}

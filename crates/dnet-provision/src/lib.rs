@@ -13,6 +13,7 @@ pub mod cleanup;
 pub mod client_keys;
 pub mod credential;
 pub mod devices;
+pub mod fairness;
 pub mod keepalive;
 pub mod ledger;
 pub mod manual;

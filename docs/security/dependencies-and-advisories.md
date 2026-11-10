@@ -86,3 +86,19 @@ Sources read on 2026-11-05: [RUSTSEC-2026-0386](https://raw.githubusercontent.co
 [sing-box advisory CVE-2023-43644](https://nvd.nist.gov/vuln/detail/CVE-2023-43644),
 [the Go release history](https://go.dev/doc/devel/release),
 [AmneziaVPN audit summary](https://www.opentech.fund/security-safety-audits/amneziavpn-security-audit-summary/).
+
+## Third-party build actions are pinned by commit
+
+The release workflow builds the signed installer with the signing password in its environment, so a moved tag on
+an action it runs would run with that access. Since 2026-11-08 the four actions that are not GitHub's own
+(`Swatinem/rust-cache`, `dtolnay/rust-toolchain`, `pnpm/action-setup`, `taiki-e/install-action`) are referenced by
+the commit a tag pointed at, with the tag in a comment (GitHub's own `actions/*` stay on a major tag). A commit
+does not move, so an update is a decision, not something that arrives on its own. To update one:
+
+```bash
+gh api repos/Swatinem/rust-cache/commits/v2 --jq .sha      # the commit the tag points at now
+gh api "repos/dtolnay/rust-toolchain/contents/action.yml?ref=<sha>" --jq .content | base64 -d | head -20   # check its inputs
+```
+
+`dtolnay/rust-toolchain` takes its toolchain from the branch the commit is on (`stable`, `1.88`), so the commit of the
+`1.88` ref is the 1.88 toolchain with no input. `taiki-e/install-action` is given its tool by `with: tool:`.

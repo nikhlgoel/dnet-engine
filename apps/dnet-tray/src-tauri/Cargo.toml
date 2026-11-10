@@ -26,7 +26,7 @@ tauri = { version = "2", features = ["tray-icon"] }
 tokio = { version = "1", default-features = false, features = ["time", "sync", "macros", "net"] }
 
 [build-dependencies]
-tauri-build = "2"
+tauri-build = { version = "2", features = [] }
 
 [profile.release]
 opt-level = "s"

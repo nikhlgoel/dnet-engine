@@ -123,6 +123,15 @@ mod tests {
         assert!(woke(&mut resumes, Duration::from_secs(1)).await);
     }
 
+    /// The process's own hub, which the service control handler and every network watch use: what one announces,
+    /// the other hears.
+    #[tokio::test(start_paused = true)]
+    async fn the_process_wide_announcement_reaches_the_process_wide_subscriber() {
+        let mut resumes = subscribe();
+        announce();
+        assert!(woke(&mut resumes, Duration::from_secs(1)).await);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn nothing_wakes_a_subscriber_that_was_not_announced_to() {
         let hub = Hub::new();

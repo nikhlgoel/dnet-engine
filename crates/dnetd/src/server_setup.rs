@@ -65,13 +65,20 @@ struct Pending {
 /// not is logged, never its contents.
 #[cfg(windows)]
 pub fn installed_pins() -> Option<ServerPins> {
-    use std::io::Read;
-
     let path = std::env::current_exe()
         .ok()?
         .with_file_name(dnet_provision::server_pins::FILE_NAME);
+    pins_at(&path)
+}
+
+/// The list at `path`, if it is there and sound: read no further than the most a list may be (one byte past it, so a
+/// list that is too long is seen to be), and checked as a whole. Why it is not usable is logged, never its contents.
+#[cfg_attr(not(windows), allow(dead_code))] // the service reads its own folder (Windows); tests read any
+pub fn pins_at(path: &std::path::Path) -> Option<ServerPins> {
+    use std::io::Read;
+
     let mut text = String::new();
-    let read = std::fs::File::open(&path).and_then(|file| {
+    let read = std::fs::File::open(path).and_then(|file| {
         file.take(dnet_provision::server_pins::MAX_PINS_BYTES as u64 + 1)
             .read_to_string(&mut text)
     });
@@ -591,5 +598,69 @@ mod tests {
         );
         assert!(!shown.contains("SENTINEL"), "{shown}");
         assert!(!shown.contains("auth-secret"), "{shown}");
+    }
+
+    // ------------------------------------------------------------------ the list beside the service
+
+    fn pins_text() -> String {
+        json!({
+            "version": 1,
+            "base_url": "https://example.test/releases/download/v0.1.0/",
+            "primary_core": {
+                "name": "primary-core", "version": "v1.14.0", "licence": "GPL-3.0-or-later",
+                "source": "https://example.test/source",
+                "amd64": { "file": "primary-core-linux-amd64", "sha256": "a".repeat(64) },
+                "arm64": { "file": "primary-core-linux-arm64", "sha256": "b".repeat(64) },
+            },
+            "amneziawg": {
+                "name": "amneziawg-go", "version": "v3.1.0", "licence": "MIT",
+                "source": "https://example.test/awg",
+                "amd64": { "file": "amneziawg-go-linux-amd64", "sha256": "c".repeat(64) },
+                "arm64": { "file": "amneziawg-go-linux-arm64", "sha256": "d".repeat(64) },
+            },
+        })
+        .to_string()
+    }
+
+    fn file_with(text: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("server-pins.json");
+        std::fs::write(&path, text).unwrap();
+        (dir, path)
+    }
+
+    #[test]
+    fn a_sound_list_is_read_and_a_missing_or_damaged_one_is_no_list() {
+        let (_dir, path) = file_with(&pins_text());
+        assert!(pins_at(&path).is_some());
+        let (_dir2, missing) = file_with("");
+        std::fs::remove_file(&missing).unwrap();
+        assert!(pins_at(&missing).is_none());
+        for bad in ["", "not json", "{}", "[1,2,3]", "{\"version\":1}"] {
+            let (_d, path) = file_with(bad);
+            assert!(pins_at(&path).is_none(), "{bad:?}");
+        }
+        // A folder where the file should be is not a list either.
+        let dir = tempfile::tempdir().unwrap();
+        assert!(pins_at(dir.path()).is_none());
+    }
+
+    /// The list may be at most `MAX_PINS_BYTES`. One more byte, however harmless, is refused: the read goes one byte
+    /// past the limit so that a list that is too long is seen to be, and is not cut to fit and then believed.
+    #[test]
+    fn a_list_of_exactly_the_most_allowed_is_read_and_one_byte_more_is_refused() {
+        use dnet_provision::server_pins::MAX_PINS_BYTES;
+        let text = pins_text();
+        let at_limit = format!("{text}{}", " ".repeat(MAX_PINS_BYTES - text.len()));
+        assert_eq!(at_limit.len(), MAX_PINS_BYTES);
+        let (_dir, path) = file_with(&at_limit);
+        assert!(pins_at(&path).is_some(), "exactly the limit is allowed");
+        let over = format!("{at_limit} ");
+        let (_dir2, path2) = file_with(&over);
+        assert!(pins_at(&path2).is_none(), "one byte over is refused");
+        // A list of megabytes is refused too, and without being read whole.
+        let huge = format!("{text}{}", " ".repeat(5 * 1024 * 1024));
+        let (_dir3, path3) = file_with(&huge);
+        assert!(pins_at(&path3).is_none());
     }
 }

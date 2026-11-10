@@ -33,7 +33,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: taiki-e/install-action@cargo-audit
+      - uses: taiki-e/install-action@67339d17681acb16df9555b4ce5c56459b4266d4 # cargo-audit
+        with:
+          tool: cargo-audit
       # A vulnerability fails the job. A warning (unmaintained, unsound) does not, but is printed: the ones accepted so
       # far are listed in docs/security/dependencies-and-advisories.md with the reason, and a new one shows here.
       - name: The workspace
@@ -49,7 +51,7 @@ jobs:
         working-directory: apps/dnet-tray
     steps:
       - uses: actions/checkout@v6
-      - uses: pnpm/action-setup@v5
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5
         with:
           version: 12.4.2
       - uses: actions/setup-node@v6

@@ -466,14 +466,54 @@ async fn what_the_build_can_do_is_said_plainly() {
     assert_eq!(caps, json!({ "provisioning": false, "updates": true }));
 }
 
+/// The sign-in page the window opens is the operating system's own probe address, which a portal sends a browser
+/// away from. It is the same every time: nothing the network said is ever opened, so a hostile network cannot
+/// choose what the person's browser is sent to. The built-in rules let that address through while fail-closed.
 #[tokio::test]
-async fn the_login_page_is_not_faked() {
-    let out = Bridge::new(echo_ok(json!({}))).open_login_page();
+async fn the_login_page_is_the_systems_own_probe_address_and_nothing_the_network_chose() {
+    let opened = std::cell::RefCell::new(Vec::new());
+    let out = Bridge::new(echo_ok(json!({}))).open_login_page_with(|url| {
+        opened.borrow_mut().push(url.to_owned());
+        Ok(())
+    });
+    assert_eq!(out, json!({ "ok": true }));
+    assert_eq!(
+        *opened.borrow(),
+        ["http://www.msftconnecttest.com/connecttest.txt"]
+    );
+}
+
+#[tokio::test]
+async fn the_address_opened_is_one_the_built_in_rules_let_through_and_is_plain_http() {
+    let opened = std::cell::RefCell::new(String::new());
+    let _ = Bridge::new(echo_ok(json!({}))).open_login_page_with(|url| {
+        *opened.borrow_mut() = url.to_owned();
+        Ok(())
+    });
+    let url = opened.borrow().clone();
+    assert!(url.starts_with("http://"), "{url}");
+    assert!(dnet_core::portal::login_url(&url).is_some(), "{url}");
+    let host = url.trim_start_matches("http://").split('/').next().unwrap();
+    assert!(
+        dnet_core::builtin_rules::CAPTIVE_PORTAL_PROBE_SUFFIXES
+            .iter()
+            .any(|suffix| host == *suffix || host.ends_with(&format!(".{suffix}"))),
+        "{host} is not bypassed, so fail-closed would stop the page from loading"
+    );
+    assert!(
+        !url.contains('@') && !url.contains('?') && !url.contains('#'),
+        "{url}"
+    );
+}
+
+#[tokio::test]
+async fn when_the_browser_cannot_be_started_the_person_is_told_what_to_do_instead() {
+    let out = Bridge::new(echo_ok(json!({})))
+        .open_login_page_with(|_| Err(std::io::Error::other("no default browser")));
     assert_eq!(out["ok"], json!(false));
-    assert!(out["reason"]
-        .as_str()
-        .unwrap()
-        .contains("Open any web page"));
+    let reason = out["reason"].as_str().unwrap();
+    assert!(reason.contains("Open any web page"), "{reason}");
+    assert!(!reason.contains("no default browser"), "{reason}");
 }
 
 // ---------------------------------------------------------------------- Brutal (T105)
@@ -1047,4 +1087,125 @@ async fn a_reason_arrives_whole_and_clean() {
     assert!(!reason
         .chars()
         .any(|c| c.is_control() || c == '\u{200b}' || c == '\u{202e}'));
+}
+
+// ---------------------------------------------------------------------- the kill switch (T161)
+
+#[tokio::test]
+async fn the_guard_state_is_read_for_the_window() {
+    let link = echo_ok(json!({ "kill_switch": true, "guard_in": false }));
+    let seen = link.seen.clone();
+    let out = Bridge::new(link).guard().await.unwrap();
+    assert_eq!(
+        out,
+        json!({ "supported": true, "killSwitch": true, "guardIn": false })
+    );
+    assert_eq!(*seen.lock().unwrap(), vec![Request::GetGuard]);
+}
+
+#[tokio::test]
+async fn a_firewall_that_could_not_be_asked_is_unknown_not_false() {
+    let link = echo_ok(json!({ "kill_switch": false, "guard_in": null }));
+    let out = Bridge::new(link).guard().await.unwrap();
+    assert_eq!(
+        out,
+        json!({ "supported": true, "killSwitch": false, "guardIn": null })
+    );
+}
+
+#[tokio::test]
+async fn an_older_service_is_not_supported_and_nothing_else_is_claimed() {
+    let link = FakeLink::new(|_| refusal("InvalidRequest", "unknown request"));
+    let out = Bridge::new(link).guard().await.unwrap();
+    assert_eq!(
+        out,
+        json!({ "supported": false, "killSwitch": false, "guardIn": null })
+    );
+}
+
+#[tokio::test]
+async fn a_guard_reply_that_is_not_what_was_promised_is_an_error_that_repeats_nothing() {
+    for reply in [
+        json!({}),
+        json!({ "kill_switch": "yes", "guard_in": false }),
+        json!({ "kill_switch": true, "guard_in": "SENTINEL" }),
+        json!({ "kill_switch": true }),
+    ] {
+        let err = Bridge::new(echo_ok(reply)).guard().await.unwrap_err();
+        assert!(!err.contains("SENTINEL"), "{err}");
+        assert!(!err.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn turning_the_kill_switch_on_sends_the_choice_and_shows_what_the_service_says_it_does() {
+    let link = echo_ok(json!({
+        "kill_switch": true, "saved": true, "guard_in": false,
+        "effect": "The guard goes in at the next connection."
+    }));
+    let seen = link.seen.clone();
+    let out = Bridge::new(link).set_kill_switch(true).await;
+    assert_eq!(
+        out,
+        json!({ "ok": true, "effect": "The guard goes in at the next connection.", "saved": true })
+    );
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![Request::SetKillSwitch { enabled: true }]
+    );
+}
+
+#[tokio::test]
+async fn an_unsaved_choice_is_reported_unsaved() {
+    let link = echo_ok(json!({
+        "kill_switch": true, "saved": false, "guard_in": false,
+        "effect": "The guard goes in at the next connection. The choice could not be saved, so it stands only until the service stops."
+    }));
+    let out = Bridge::new(link).set_kill_switch(true).await;
+    assert_eq!(out["saved"], json!(false));
+    assert!(out["effect"]
+        .as_str()
+        .unwrap()
+        .contains("until the service stops"));
+}
+
+#[tokio::test]
+async fn an_answer_to_a_different_question_is_not_taken_as_a_yes() {
+    // The window asked for on; the service says it is off. The person is not told it worked.
+    let link = echo_ok(json!({
+        "kill_switch": false, "saved": true, "guard_in": false, "effect": "The guard is out."
+    }));
+    let out = Bridge::new(link).set_kill_switch(true).await;
+    assert_eq!(out["ok"], json!(false), "{out}");
+    // And a reply that does not say what happened.
+    let out = Bridge::new(echo_ok(json!({ "kill_switch": true, "saved": true })))
+        .set_kill_switch(true)
+        .await;
+    assert_eq!(out["ok"], json!(false), "{out}");
+}
+
+#[tokio::test]
+async fn releasing_the_guard_says_it_is_out_only_when_the_service_says_so() {
+    let link = echo_ok(json!({
+        "kill_switch": true, "guard_in": false, "effect": "The guard is out."
+    }));
+    let seen = link.seen.clone();
+    let out = Bridge::new(link).release_guard().await;
+    assert_eq!(out, json!({ "ok": true, "effect": "The guard is out." }));
+    assert_eq!(*seen.lock().unwrap(), vec![Request::ReleaseGuard]);
+
+    let still_in = echo_ok(json!({ "kill_switch": true, "guard_in": true, "effect": "x" }));
+    assert_eq!(
+        Bridge::new(still_in).release_guard().await["ok"],
+        json!(false)
+    );
+}
+
+#[tokio::test]
+async fn a_guard_that_will_not_come_out_shows_the_services_words_whole() {
+    let words = "the guard could not be taken out: access denied. Run `dnetctl guard-release` from an elevated prompt, or restart the DNet Engine service";
+    let link = FakeLink::new(move |_| refusal("InternalError", words));
+    let out = Bridge::new(link).release_guard().await;
+    assert_eq!(out["ok"], json!(false));
+    assert_eq!(out["reason"], json!(words));
 }

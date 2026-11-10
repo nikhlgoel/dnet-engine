@@ -425,6 +425,24 @@ export function parseComponents(value: unknown): ComponentsView {
   return { supported, overall, parts };
 }
 
+/** Whether the kill switch is on and whether a guard is in the firewall now (T161). */
+export interface GuardView {
+  /** False for a service too old to know the question; then nothing else here is claimed. */
+  supported: boolean;
+  killSwitch: boolean;
+  /** `null` is "the firewall could not be asked", which is not the same as "no guard is in". */
+  guardIn: boolean | null;
+}
+
+export function parseGuard(value: unknown): GuardView {
+  const o = obj(value, 'the kill switch');
+  if (typeof o.supported !== 'boolean') throw new ModelError('the kill switch did not say whether it is supported');
+  if (typeof o.killSwitch !== 'boolean') throw new ModelError('the kill switch did not say whether it is on');
+  if (o.guardIn !== null && typeof o.guardIn !== 'boolean') throw new ModelError('the kill switch did not say whether a guard is in');
+  if (!o.supported && (o.killSwitch || o.guardIn !== null)) throw new ModelError('a service that cannot say claimed something');
+  return { supported: o.supported, killSwitch: o.killSwitch, guardIn: o.guardIn };
+}
+
 /** One line of the Activity view: something the service did, and why (principle 3). */
 export interface ActivityItem {
   seq: number | null;

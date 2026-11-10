@@ -96,6 +96,12 @@ pub trait Effects: Send + Sync + 'static {
     /// Take the tunnel down and undo what bringing it up did. Idempotent.
     fn stop_tunnel(&self) -> impl Future<Output = ()> + Send;
 
+    /// Take the kill-switch guard out of the firewall (T161). Called when the person asks to disconnect, and only
+    /// then: a failure or a restart of the tunnel must keep the guard blocking. The default has none to take out.
+    fn release_guard(&self) -> impl Future<Output = ()> + Send {
+        async {}
+    }
+
     /// Move the connection that is up to `profile` on `endpoint` **without ending it**, when that can be done:
     /// a session connection on the same endpoint whose carriers include the profile (ADR-0008). `true` means it
     /// is now on that profile and nothing was torn down. `false` means it could not be done and nothing was
@@ -195,6 +201,8 @@ enum WorkKind {
         endpoint: EndpointId,
     },
     StopTunnel,
+    /// The person asked to disconnect: whatever guard is in comes out, after the tunnel is stopped.
+    ReleaseGuard,
     /// A stop that the engine followed at once with a start: tried as a live move first, and carried out as the
     /// stop and the start it stands for if it cannot be done.
     MoveTunnel {
@@ -499,7 +507,16 @@ impl<E: Effects> Actor<E> {
             let was_connect = matches!(message, Msg::Connect { .. });
             match message {
                 Msg::Connect { profile } => self.connect(profile),
-                Msg::Disconnect => self.step(Input::Disconnect, false),
+                Msg::Disconnect => {
+                    self.step(Input::Disconnect, false);
+                    // The person's own disconnect ends the kill switch's protection, after the stop (work runs in
+                    // order). Not the service shutting down, which has its own message and leaves the guard in:
+                    // a stopped service must not hand the traffic back (T161).
+                    let _ = self.work.send(Work {
+                        attempt: self.attempt,
+                        kind: WorkKind::ReleaseGuard,
+                    });
+                }
                 Msg::Shutdown { done } => {
                     self.step(Input::Disconnect, false);
                     // Queued behind whatever that asked for, and behind any start still under way,
@@ -788,6 +805,7 @@ async fn execute<E: Effects>(
                 let _ = reports.send(Msg::Report { attempt, input }).await;
             }
             WorkKind::StopTunnel => effects.stop_tunnel().await,
+            WorkKind::ReleaseGuard => effects.release_guard().await,
             WorkKind::Barrier(done) => {
                 let _ = done.send(());
             }
@@ -1141,6 +1159,9 @@ mod tests {
             let delay = *self.stop_delay.lock().unwrap();
             tokio::time::sleep(delay).await;
             self.record("stop");
+        }
+        async fn release_guard(&self) {
+            self.record("release_guard");
         }
         async fn move_tunnel(&self, profile: &ProfileId, _endpoint: EndpointId) -> bool {
             self.record(format!("move[{profile}]"));
@@ -1559,6 +1580,35 @@ mod tests {
         );
     }
 
+    /// The tunnel is checked every `live_check_every`, and its endpoint is probed on every Nth of those checks, N being
+    /// how many live-check intervals fit in the endpoint-probe interval (here 3 s over 1 s).
+    #[tokio::test(start_paused = true)]
+    async fn the_endpoint_is_probed_on_every_third_check_when_the_intervals_are_one_and_three_seconds(
+    ) {
+        let rig = rig();
+        rig.script
+            .races
+            .lock()
+            .unwrap()
+            .push_back(Some(selected("hy2-default")));
+        rig.handle.connect(None).unwrap();
+        until(&rig.handle, |s| s.status == ConnectionStatus::Connected).await;
+        // Nine seconds of a connected tunnel: nine checks and three probes, not nine of each.
+        tokio::time::sleep(Duration::from_millis(9_500)).await;
+        let calls = rig.script.calls();
+        let checks = calls.iter().filter(|c| *c == "check").count();
+        let probes = calls.iter().filter(|c| *c == "probe-endpoint").count();
+        assert!((8..=10).contains(&checks), "{checks} checks");
+        assert!(
+            (2..=4).contains(&probes),
+            "{probes} probes in {checks} checks"
+        );
+        assert!(
+            probes * 2 < checks,
+            "probes ({probes}) are rarer than checks ({checks})"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn disconnecting_a_live_tunnel_stops_it_and_ends_the_monitoring() {
         let rig = rig();
@@ -1585,6 +1635,75 @@ mod tests {
             rig.script.calls().iter().filter(|c| *c == "check").count(),
             checks_after_stop,
             "a disconnected tunnel must not keep being checked"
+        );
+    }
+
+    // ---------------------------------------------------------------- the guard follows the person's disconnect (T161)
+
+    /// The kill switch keeps blocking through failures and restarts; only the person's own disconnect ends it.
+    #[tokio::test(start_paused = true)]
+    async fn the_persons_disconnect_releases_the_guard_after_the_tunnel_is_stopped() {
+        let rig = rig();
+        rig.script
+            .races
+            .lock()
+            .unwrap()
+            .push_back(Some(selected("hy2-default")));
+        rig.handle.connect(None).unwrap();
+        until(&rig.handle, |s| s.status == ConnectionStatus::Connected).await;
+        assert!(!rig.script.calls().iter().any(|c| c == "release_guard"));
+
+        rig.handle.disconnect().unwrap();
+        until(&rig.handle, |s| s.status == ConnectionStatus::Disconnected).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let calls = rig.script.calls();
+        let stop = calls.iter().position(|c| c == "stop").expect("stopped");
+        let release = calls
+            .iter()
+            .position(|c| c == "release_guard")
+            .expect("the guard is released");
+        assert!(
+            stop < release,
+            "the tunnel first, then the guard: {calls:?}"
+        );
+    }
+
+    /// A stopped service must not hand the traffic back: shutting down stops the tunnel and leaves the guard.
+    #[tokio::test(start_paused = true)]
+    async fn the_service_shutting_down_leaves_the_guard_in() {
+        let rig = rig();
+        rig.script
+            .races
+            .lock()
+            .unwrap()
+            .push_back(Some(selected("hy2-default")));
+        rig.handle.connect(None).unwrap();
+        until(&rig.handle, |s| s.status == ConnectionStatus::Connected).await;
+        rig.handle.shutdown().await;
+        let calls = rig.script.calls();
+        assert!(calls.iter().any(|c| c == "stop"), "{calls:?}");
+        assert!(!calls.iter().any(|c| c == "release_guard"), "{calls:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_connection_keeps_the_guard_in() {
+        let rig = rig();
+        rig.script.races.lock().unwrap().push_back(Some((
+            RaceDecision::NoneUsable,
+            vec![(id("hy2-default"), ProfileProbe::HandshakeFailed)],
+        )));
+        rig.script
+            .tunnels
+            .lock()
+            .unwrap()
+            .push_back(Err(FailureCause::AllProfilesBlocked));
+        rig.handle.connect(None).unwrap();
+        until(&rig.handle, |s| s.status == ConnectionStatus::Failed).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(
+            !rig.script.calls().iter().any(|c| c == "release_guard"),
+            "a failure is not the person asking to end it: {:?}",
+            rig.script.calls()
         );
     }
 
@@ -2082,6 +2201,7 @@ mod tests {
                 WorkKind::CancelRace => "cancel",
                 WorkKind::StartTunnel { .. } => "start",
                 WorkKind::StopTunnel => "stop",
+                WorkKind::ReleaseGuard => "release_guard",
                 WorkKind::MoveTunnel { .. } => "move",
                 WorkKind::Barrier(_) => "barrier",
             })

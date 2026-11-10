@@ -37,6 +37,12 @@ mod domain;
 // `dnetd install`, `uninstall` and `stop` (T114); the words are read on every platform.
 mod install;
 mod intent;
+// The person's kill-switch choice, remembered (T161).
+#[cfg_attr(not(windows), allow(dead_code))]
+mod killswitch;
+// The one door to the firewall guard, and a fake of it for the tests (T161).
+#[cfg_attr(not(windows), allow(dead_code))]
+mod guard_control;
 // Setting up the person's own server from the window (T150).
 #[cfg_attr(not(windows), allow(dead_code))]
 mod server_setup;

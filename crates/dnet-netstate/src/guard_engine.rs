@@ -242,10 +242,8 @@ impl Engine {
             engine.add_sublayer()?;
             for filter in filters {
                 engine.add_filter(filter).map_err(|e| {
-                    EngineError::Invalid(format!(
-                        "{e}, for the rule `{}`: {:?}",
-                        filter.name, filter.matches
-                    ))
+                    // The rule's name only: its conditions hold program paths, an account and a port.
+                    EngineError::Invalid(format!("{e}, for the rule `{}`", filter.name))
                 })?;
             }
             Ok(())
@@ -982,6 +980,14 @@ pub enum InstallError {
     },
 }
 
+/// Whether to take the guard out after an apply that failed, given whether one was in before it (`None`: could not
+/// tell). The apply is one transaction, so a failure that rolled back leaves the earlier guard exactly as it was, and
+/// removing it then would open the network at the moment it matters most (a restart of a connection, with the kill
+/// switch on). Only a guard we are sure was not there is cleaned up, in case an ambiguous commit made one.
+fn cleanup_after_failed_apply(had_guard: Option<bool>) -> bool {
+    had_guard == Some(false)
+}
+
 /// Put the guard in, the way every change that can cut a computer off is made (ADR-0006 §5a):
 ///
 /// 1. the model builds the rules from `plan` and refuses a plan that would leak;
@@ -1007,16 +1013,22 @@ pub fn install_guard(
     let record = UndoRecord::GuardFilters {
         provider: PROVIDER_KEY.to_text(),
     };
+    let had_guard = engine.is_installed().ok();
     registry
         .apply(record, || {
             if let Err(e) = engine.apply(&translated) {
-                // A commit that timed out may still have landed. The record is withdrawn when this fails, so the
-                // filters are taken out here, while there is still a way to say so (review 2026-11-10, finding 4).
-                let cleanup = match engine.remove_all() {
-                    Ok(()) => String::new(),
-                    Err(r) => {
-                        format!("; and they could not be removed again ({r}): release the guard")
+                // A commit that timed out may still have landed. The record is withdrawn when this fails, so what
+                // may have landed is taken out here while there is still a way to say so (review 2026-11-10,
+                // finding 4), but never a guard that was in before this started (review, medium 1).
+                let cleanup = if cleanup_after_failed_apply(had_guard) {
+                    match engine.remove_all() {
+                        Ok(()) => String::new(),
+                        Err(r) => format!(
+                            "; and they could not be removed again ({r}): release the guard"
+                        ),
                     }
+                } else {
+                    "; the guard that was already in was left as it was".to_owned()
                 };
                 return Err(NetstateError::Operation(format!("{e}{cleanup}")));
             }
@@ -1086,6 +1098,15 @@ mod tests {
         }
         assert!(!is_local_volume_app_id(&[0x5c]), "an odd number of bytes");
         assert!(!is_local_volume_app_id(&[]));
+    }
+
+    /// Review 2026-11-10: a replacement that fails must not take away a guard that was already doing its job. Only a
+    /// guard we are sure was not there before is cleaned up; not knowing counts as "it was there".
+    #[test]
+    fn a_failed_replacement_removes_only_what_it_may_have_made() {
+        assert!(cleanup_after_failed_apply(Some(false)));
+        assert!(!cleanup_after_failed_apply(Some(true)));
+        assert!(!cleanup_after_failed_apply(None));
     }
 
     #[test]

@@ -776,3 +776,149 @@ fn a_report_that_names_another_servers_key_or_port_is_refused() {
         Err(DeviceError::Mismatch)
     );
 }
+
+// ------------------------------------------------------------------ edges the mutation run showed were not pinned
+
+/// `text` followed by a second line of padding, so the whole paste is exactly `total` bytes.
+fn padded_to(text: &str, total: usize) -> String {
+    assert!(text.len() < total, "the text alone is longer than {total}");
+    format!("{text}\n{}", "x".repeat(total - text.len() - 1))
+}
+
+#[test]
+fn the_longest_paste_that_is_looked_at_is_sixteen_kibibytes() {
+    assert_eq!(MAX_PASTE_LEN, 16_384);
+}
+
+#[test]
+fn a_request_pasted_with_text_up_to_the_limit_is_read_and_one_byte_more_is_not() {
+    let line = request().encode();
+    let exactly = padded_to(&line, MAX_PASTE_LEN);
+    assert_eq!(exactly.len(), MAX_PASTE_LEN);
+    assert_eq!(DeviceRequest::decode(&exactly).unwrap(), request());
+
+    let one_more = padded_to(&line, MAX_PASTE_LEN + 1);
+    assert_eq!(DeviceRequest::decode(&one_more), Err(DeviceError::TooLarge));
+}
+
+#[test]
+fn a_report_pasted_with_text_up_to_the_limit_is_read_and_one_byte_more_is_not() {
+    let report = add_report(|_| {});
+    let line = report
+        .lines()
+        .find(|l| l.starts_with(REPORT_PREFIX))
+        .expect("the report line")
+        .to_owned();
+    let exactly = padded_to(&line, MAX_PASTE_LEN);
+    assert!(DeviceAdded::parse(&exactly, &request()).is_ok());
+    assert_eq!(report_of(&exactly).map(|_| ()), Ok(()));
+
+    let one_more = padded_to(&line, MAX_PASTE_LEN + 1);
+    assert_eq!(
+        DeviceAdded::parse(&one_more, &request()),
+        Err(DeviceError::TooLarge)
+    );
+    assert_eq!(report_of(&one_more).map(|_| ()), Err(DeviceError::TooLarge));
+}
+
+#[test]
+fn a_paste_of_a_few_kilobytes_is_not_too_large() {
+    // Well past a thousand bytes and well under the limit: ordinary terminal output around a report.
+    let line = request().encode();
+    let text = padded_to(&line, 4_000);
+    assert_eq!(DeviceRequest::decode(&text).unwrap(), request());
+}
+
+#[test]
+fn a_request_gives_back_the_name_and_the_key_it_was_made_with() {
+    let r = DeviceRequest::new("Ravi's laptop".replace('\'', "").as_str(), &key(7)).unwrap();
+    assert_eq!(r.name(), "Ravis laptop");
+    assert_eq!(r.public_key(), key(7));
+    assert!(!r.name().is_empty());
+    assert!(!r.public_key().is_empty());
+    assert_ne!(r.name(), "xyzzy");
+    assert_ne!(r.public_key(), "xyzzy");
+}
+
+#[test]
+fn an_add_report_may_say_the_server_holds_as_many_devices_as_it_can_and_no_more() {
+    let at_most = add_report(|v| v["devices"] = serde_json::Value::from(MAX_DEVICES));
+    let added = DeviceAdded::parse(&at_most, &request()).unwrap();
+    assert_eq!(added.devices as usize, MAX_DEVICES);
+    let one_over = add_report(|v| v["devices"] = serde_json::Value::from(MAX_DEVICES + 1));
+    assert_eq!(
+        DeviceAdded::parse(&one_over, &request()),
+        Err(DeviceError::NotAReport)
+    );
+}
+
+fn listed(count: usize) -> String {
+    let devices: Vec<_> = (0..count)
+        .map(|i| {
+            serde_json::json!({
+                "address": session_device_address(i.min(MAX_DEVICES - 1)).to_string(),
+                "public_key": key(u8::try_from(i + 1).unwrap()),
+                "name": format!("device {i}"),
+            })
+        })
+        .collect();
+    format!(
+        "{REPORT_PREFIX}{}",
+        serde_json::json!({"version": 1, "action": "list", "list": devices})
+    )
+}
+
+#[test]
+fn a_list_may_hold_as_many_devices_as_the_server_can_and_no_more() {
+    assert_eq!(parse_list(&listed(MAX_DEVICES)).unwrap().len(), MAX_DEVICES);
+    assert_eq!(
+        parse_list(&listed(MAX_DEVICES + 1)),
+        Err(DeviceError::NotAReport)
+    );
+    assert_eq!(parse_list(&listed(0)).unwrap().len(), 0);
+}
+
+#[test]
+fn text_goes_into_a_script_only_if_it_has_no_character_the_shell_treats_specially() {
+    for ok in [
+        "",
+        "Ravi",
+        "my laptop 2",
+        "a.b-c_d+e/f=g",
+        "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789",
+        &key(7),
+    ] {
+        assert!(safe_for_script(ok), "{ok:?}");
+    }
+    for bad in [
+        "a'b",
+        "a\"b",
+        "a`b",
+        "a$b",
+        "a;b",
+        "a&b",
+        "a|b",
+        "a\\b",
+        "a\nb",
+        "a\rb",
+        "a\0b",
+        "a\tb",
+        "a(b",
+        "a)b",
+        "a<b",
+        "a>b",
+        "a*b",
+        "a?b",
+        "a!b",
+        "a#b",
+        "a~b",
+        "a{b",
+        "a}b",
+        "a[b",
+        "é",
+        "日本",
+        "a\u{202e}b",
+    ] {
+        assert!(!safe_for_script(bad), "{bad:?}");
+    }
+}

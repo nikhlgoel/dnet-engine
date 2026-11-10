@@ -350,6 +350,22 @@ mod windows_impl {
             assert_eq!(vault.get("one").unwrap(), None);
         }
 
+        /// "Not there" and "there but unusable" are different answers: only the first is `None` / `false`.
+        #[test]
+        fn a_store_that_cannot_be_read_is_an_error_not_an_empty_answer() {
+            let (_dir, vault) = vault();
+            vault.put("one", &Secret::new("x")).unwrap();
+            let file = vault.path("one").unwrap();
+            std::fs::remove_file(&file).unwrap();
+            // A folder where the credential's file should be: it exists, and it is not a file.
+            std::fs::create_dir(&file).unwrap();
+            assert!(matches!(vault.get("one"), Err(VaultError::Unavailable(_))));
+            assert!(matches!(
+                vault.delete("one"),
+                Err(VaultError::Unavailable(_))
+            ));
+        }
+
         #[test]
         fn putting_again_replaces_the_value() {
             let (_dir, vault) = vault();

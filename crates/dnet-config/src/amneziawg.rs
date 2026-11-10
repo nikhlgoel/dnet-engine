@@ -241,3 +241,63 @@ mod tests {
         assert_eq!(key.expose_wire(), "TOPSECRETKEY");
     }
 }
+
+#[cfg(test)]
+mod pinned_tests {
+    use super::*;
+
+    const SECRET: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+
+    #[test]
+    fn a_private_key_never_shows_in_debug_or_display() {
+        let key = PrivateKey::new(SECRET);
+        let debug = format!("{key:?}");
+        let display = format!("{key}");
+        assert_eq!(debug, "PrivateKey(<redacted>)");
+        assert_eq!(display, "<redacted>");
+        for shown in [&debug, &display] {
+            assert!(!shown.contains(SECRET));
+            assert!(!shown.contains("0011"));
+        }
+    }
+
+    #[test]
+    fn a_key_inside_another_value_is_redacted_there_too() {
+        let wrapped = vec![Some(PrivateKey::new(SECRET)), None];
+        let shown = format!("{wrapped:?}");
+        assert!(shown.contains("PrivateKey(<redacted>)"), "{shown}");
+        assert!(!shown.contains(SECRET));
+        let pretty = format!("{wrapped:#?}");
+        assert!(!pretty.contains(SECRET));
+    }
+
+    #[test]
+    fn the_key_is_available_to_the_pipe_and_nowhere_else() {
+        assert_eq!(PrivateKey::new(SECRET).expose_wire(), SECRET);
+    }
+
+    #[test]
+    fn a_clone_is_the_same_key_and_just_as_quiet() {
+        let key = PrivateKey::new(SECRET);
+        let copy = key.clone();
+        assert_eq!(key, copy);
+        assert_eq!(format!("{copy:?}"), "PrivateKey(<redacted>)");
+    }
+
+    /// Stopping the tunnel removes every peer and nothing else.
+    #[test]
+    fn removing_every_peer_is_exactly_one_line() {
+        let request = build_remove_peers();
+        assert_eq!(request.to_wire(), "replace_peers=true\n\n");
+        assert_eq!(request.to_set_operation(), "set=1\nreplace_peers=true\n\n");
+        assert!(request.has_key("replace_peers"));
+        assert!(!request.has_key("private_key"));
+        assert!(!request.has_key("public_key"));
+    }
+
+    #[test]
+    fn removing_peers_carries_no_secret_and_redacts_nothing() {
+        let request = build_remove_peers();
+        assert_eq!(request.redacted(), "replace_peers=true\n");
+    }
+}

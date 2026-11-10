@@ -61,6 +61,13 @@ pub fn interface_luid(alias: &str) -> Result<NET_LUID_LH, NetstateError> {
     Ok(luid)
 }
 
+/// The 64-bit identity of the interface with this alias (its LUID), for code that names an adapter by number.
+pub fn interface_luid_value(alias: &str) -> Result<u64, NetstateError> {
+    let luid = interface_luid(alias)?;
+    // SAFETY: reading the `Value` view of the LUID union, which every view shares.
+    Ok(unsafe { luid.Value })
+}
+
 /// Assign `address/prefix_len` to the adapter. Already-assigned is success.
 pub fn assign_address(alias: &str, address: IpAddr, prefix_len: u8) -> Result<(), NetstateError> {
     let luid = interface_luid(alias)?;

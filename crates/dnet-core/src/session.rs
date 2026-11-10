@@ -327,3 +327,49 @@ mod tests {
         assert_eq!(s.outcome(), Some(&SessionOutcome::UserDisconnected));
     }
 }
+
+/// A tripwire for the "no `Unknown`" rule. `FailureCause` has seven variants, each of which the person can act on,
+/// and a catch-all is refused on purpose: a failure the product cannot name is a failure it has not understood. The
+/// match has no wildcard: adding a variant (especially an `Unknown` or `Other`) stops the build here, so it cannot be
+/// added by accident, and the change needs the reasoning the project's rules ask for.
+#[cfg(test)]
+mod tripwire_tests {
+    use super::*;
+
+    fn the_person_can_act_on(cause: &FailureCause) -> bool {
+        match cause {
+            FailureCause::NoEndpointReachable
+            | FailureCause::AllProfilesBlocked
+            | FailureCause::CaptivePortalUnsatisfied
+            | FailureCause::InsufficientPrivilege
+            | FailureCause::CoreFailedPersistently { .. }
+            | FailureCause::NoUsablePath
+            | FailureCause::ConfigurationInvalid { .. } => true,
+        }
+    }
+
+    #[test]
+    fn every_failure_cause_is_one_the_person_can_act_on_and_there_are_seven() {
+        let all = [
+            FailureCause::NoEndpointReachable,
+            FailureCause::AllProfilesBlocked,
+            FailureCause::CaptivePortalUnsatisfied,
+            FailureCause::InsufficientPrivilege,
+            FailureCause::CoreFailedPersistently {
+                core: CoreBinding::PrimaryCore,
+            },
+            FailureCause::NoUsablePath,
+            FailureCause::ConfigurationInvalid {
+                detail: "x".to_owned(),
+            },
+        ];
+        assert_eq!(all.len(), 7);
+        assert!(all.iter().all(the_person_can_act_on));
+        // Each is a different thing: none is the same cause under another name.
+        for (i, a) in all.iter().enumerate() {
+            for b in &all[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+    }
+}

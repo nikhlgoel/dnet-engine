@@ -112,6 +112,7 @@ mod tests {
 
     /// A process that would run for a minute if nothing ended it.
     fn long_lived() -> Child {
+        let _one_at_a_time = crate::process::spawning();
         Command::new("ping")
             .args(["-n", "60", "127.0.0.1"])
             .stdout(Stdio::null())

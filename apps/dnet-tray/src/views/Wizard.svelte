@@ -8,6 +8,7 @@
     GUIDES,
     OPTIONS,
     checkedOn,
+    isIpv4AddressText,
     isPlausibleAddress,
     keyPermissionFix,
     portRows,
@@ -56,7 +57,7 @@
   const block = $derived(prepared ? wrapForPaste(prepared.script) : '');
   const connectCommand = $derived(sshCommand(address.trim(), user.trim(), keyFile.trim()));
   const permissionFix = $derived(keyPermissionFix(keyFile.trim()));
-  const addressOk = $derived(isPlausibleAddress(address.trim()));
+  const addressOk = $derived(isIpv4AddressText(address.trim()));
 
   /** The two kinds of processor, worded for the provider the person chose. */
   const kindChoices = $derived<{ value: ServerKind; name: string }[]>(

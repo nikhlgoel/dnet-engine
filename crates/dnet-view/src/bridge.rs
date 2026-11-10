@@ -436,6 +436,89 @@ impl<L: Link> Bridge<L> {
         )
     }
 
+    // ------------------------------------------------------------------ the kill switch (T161)
+
+    /// Whether the kill switch is on and whether a guard is in the firewall now. An older service that does not
+    /// know the question is `supported: false` with nothing claimed; a firewall the service could not ask is
+    /// `guardIn: null`, which is not the same as `false`. A reply that is not exactly that is an error that
+    /// repeats nothing of it.
+    pub async fn guard(&self) -> Result<Value, String> {
+        match self.link.call(Request::GetGuard).await {
+            Err(error) => Err(error.to_string()),
+            Ok(Reply::Refused(refusal))
+                if refusal.code == "InvalidRequest"
+                    && refusal.detail.contains("unknown request") =>
+            {
+                Ok(json!({ "supported": false, "killSwitch": false, "guardIn": null }))
+            }
+            Ok(Reply::Refused(refusal)) => Err(refusal_text(&refusal.detail)),
+            Ok(Reply::Done(value)) => {
+                let kill_switch = value.get("kill_switch").and_then(Value::as_bool);
+                let guard_in = match value.get("guard_in") {
+                    Some(Value::Bool(b)) => Some(Value::Bool(*b)),
+                    Some(Value::Null) => Some(Value::Null),
+                    _ => None,
+                };
+                match (kill_switch, guard_in) {
+                    (Some(kill_switch), Some(guard_in)) => Ok(json!({
+                        "supported": true,
+                        "killSwitch": kill_switch,
+                        "guardIn": guard_in,
+                    })),
+                    _ => Err(
+                        "The service's answer about the kill switch was not what was expected."
+                            .to_owned(),
+                    ),
+                }
+            }
+        }
+    }
+
+    /// Turn the kill switch on or off. The service's own sentence about what that does is shown; an answer that
+    /// names the other choice, or says nothing about what happened, is not reported as done.
+    pub async fn set_kill_switch(&self, enabled: bool) -> Value {
+        from_reply(
+            self.link.call(Request::SetKillSwitch { enabled }).await,
+            |reply| {
+                if reply.get("kill_switch").and_then(Value::as_bool) != Some(enabled) {
+                    return Err(
+                        "The service did not report the kill switch as you asked. Open Settings to see where it stands."
+                            .to_owned(),
+                    );
+                }
+                let effect = reply
+                    .get("effect")
+                    .and_then(Value::as_str)
+                    .filter(|e| !e.is_empty());
+                let saved = reply.get("saved").and_then(Value::as_bool);
+                match (effect, saved) {
+                    (Some(effect), Some(saved)) => Ok(json!({
+                        "effect": crate::text::plain(effect, 400),
+                        "saved": saved,
+                    })),
+                    _ => Err("The service changed the setting but did not say what it did. Open Settings to see where it stands."
+                        .to_owned()),
+                }
+            },
+        )
+    }
+
+    /// Take the firewall guard out now. Said to be out only when the service says nothing is in.
+    pub async fn release_guard(&self) -> Value {
+        from_reply(self.link.call(Request::ReleaseGuard).await, |reply| {
+            let effect = reply
+                .get("effect")
+                .and_then(Value::as_str)
+                .filter(|e| !e.is_empty());
+            match (reply.get("guard_in").and_then(Value::as_bool), effect) {
+                (Some(false), Some(effect)) => {
+                    Ok(json!({ "effect": crate::text::plain(effect, 400) }))
+                }
+                _ => Err("The service did not say that the guard is out.".to_owned()),
+            }
+        })
+    }
+
     // ------------------------------------------------------------------ updates
 
     /// Check for updated connection-method definitions now, because the person asked. The reply says which
@@ -453,16 +536,23 @@ impl<L: Link> Bridge<L> {
         })
     }
 
-    /// Open the sign-in page of a captive portal. The service does not hand a client the address (the
-    /// network chooses it, and it is offered only to the person's own browser by the service), so there is
-    /// nothing to open yet; the person is told what to do instead. The honest answer, not a guess at an
-    /// address.
-    #[must_use]
-    pub fn open_login_page(&self) -> Value {
-        refused(
-            "This version cannot open the sign-in page for you. Open any web page in your browser; the network will show its sign-in page.",
-            "Refused",
-        )
+    /// Open the sign-in page of a captive portal in the person's own browser, by `open` (the shell's way of
+    /// starting the default browser; a test gives its own, so no test starts one).
+    ///
+    /// The address is always the operating system's own probe address (`portal::fallback_login_url`), which a
+    /// portal sends a browser away from, and which the built-in rules let through while fail-closed. It is never
+    /// an address the network chose: the service does not hand one to a client, and a hostile network must not be
+    /// able to pick where the person's browser goes. With no portal in the way the page just says the connection
+    /// test passed, which is also true. If the browser cannot be started, the person is told what to do instead.
+    pub fn open_login_page_with(&self, open: impl FnOnce(&str) -> std::io::Result<()>) -> Value {
+        let url = dnet_core::portal::fallback_login_url(dnet_core::portal::Probe::ConnectTest);
+        match open(&url) {
+            Ok(()) => crate::outcome::done(json!({})),
+            Err(_) => refused(
+                "The sign-in page could not be opened. Open any web page in your browser; the network will show its sign-in page.",
+                "Refused",
+            ),
+        }
     }
 }
 

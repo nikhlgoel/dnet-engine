@@ -33,7 +33,9 @@ use crate::configure::{added_reply, dns_reply, rule_added_reply, Configurator, A
 use crate::domain::DomainState;
 use crate::feed_fetch::{Busy, Fetcher, Pace, Transport};
 use crate::feed_service::{FeedNote, FeedRefusal, FeedService, SharedDefinitions};
+use crate::guard_control::GuardControl;
 use crate::intent::{Intent, Remembered};
+use crate::killswitch::KillSwitch;
 use crate::orchestrator::Handle;
 use crate::recovery::{Recovered, RecoveryError};
 
@@ -81,6 +83,9 @@ pub struct DnetService {
     check_requester: Option<CheckRequester>,
     /// What the person last asked for, kept across restarts (T147). Without it nothing is remembered.
     intent: Option<Intent>,
+    /// The person's kill-switch choice and the one door to the firewall guard (T161). Without them the three
+    /// requests about it answer that they are not available.
+    kill_switch: Option<(Arc<KillSwitch>, Arc<dyn GuardControl>)>,
     /// Setting up the person's own server from a script and a pasted result (T150). Without it the
     /// requests answer that they are not available.
     server_setup: Option<crate::server_setup::ServerSetup>,
@@ -106,6 +111,17 @@ type CheckRequester = Box<dyn Fn() -> Result<FetchRoute, Busy> + Send + Sync>;
 /// nothing, why. Also logged, since nobody may be subscribed.
 /// A setup that cannot proceed, as the client is told. A build with no server downloads is the
 /// service's limit, not the client's mistake.
+/// A guard that would not come out. It says what to do next, because this is the one failure a person cannot
+/// reason their way past: the way out is `dnetctl guard-release` from an elevated prompt, or restarting the service.
+fn release_failed(error: String) -> IpcError {
+    IpcError::InternalError {
+        detail: format!(
+            "the guard could not be taken out: {error}. Run `dnetctl guard-release`, or `dnetd release-guard` from an \
+             elevated prompt (it needs no running service), or restart the DNet Engine service"
+        ),
+    }
+}
+
 fn setup_refusal(error: crate::server_setup::SetupError) -> IpcError {
     use crate::server_setup::SetupError;
     match error {
@@ -263,6 +279,7 @@ impl DnetService {
             feed: None,
             check_requester: None,
             intent: None,
+            kill_switch: None,
             server_setup: None,
             joining: crate::devices::Joining::new(),
             inviting: crate::devices::Inviting::new(),
@@ -300,6 +317,17 @@ impl DnetService {
     #[cfg_attr(not(windows), allow(dead_code))] // Windows builds it; the tests supply their own.
     pub fn with_server_setup(mut self, setup: crate::server_setup::ServerSetup) -> Self {
         self.server_setup = Some(setup);
+        self
+    }
+
+    /// Keep the person's kill-switch choice in `kill_switch` and reach the firewall guard through `guard` (T161).
+    #[cfg_attr(not(windows), allow(dead_code))] // Windows builds it; the tests supply their own.
+    pub fn with_kill_switch(
+        mut self,
+        kill_switch: impl Into<Arc<KillSwitch>>,
+        guard: Arc<dyn GuardControl>,
+    ) -> Self {
+        self.kill_switch = Some((kill_switch.into(), guard));
         self
     }
 
@@ -552,6 +580,13 @@ impl DnetService {
         };
         let bus = self.events.clone();
         let definitions = Arc::clone(&self.definitions);
+        let guard =
+            self.kill_switch
+                .as_ref()
+                .map(|(switch, control)| crate::guard_control::GuardWiring {
+                    switch: Arc::clone(switch),
+                    control: Arc::clone(control),
+                });
         // Used now, and again whenever a saved change replaces the orchestrator.
         let build = move |state: &DomainState| -> Handle {
             let (effects, profiles, usable) = RealEffects::new(
@@ -563,6 +598,7 @@ impl DnetService {
                     undo: Arc::clone(&undo),
                     layout: layout.clone(),
                     definitions: Arc::clone(&definitions),
+                    guard: guard.clone(),
                 },
             );
             // Only endpoints that can be used, and profiles they can serve, are known to the engine,
@@ -620,6 +656,8 @@ impl DnetService {
             ConfigStore::new(Box::new(TrustedStateFile::new(default_config_path()))),
             Arc::new(machine_secret_store(default_secrets_dir())),
         );
+        // The firewall guard's undo record lives in the same journal as every other network change.
+        let undo = recovery.as_ref().ok().map(|r| Arc::clone(r.undo()));
         let service = Self::new(
             state,
             Box::new(crate::console::active_console_session),
@@ -631,6 +669,18 @@ impl DnetService {
         .with_intent(Intent::new(Box::new(TrustedStateFile::new(
             default_config_path().with_file_name("connection-intent.json"),
         ))));
+
+        // The kill switch (T161): the person's choice sits beside the configuration, and the guard goes into the
+        // firewall through the same journal as every other change. Without a journal there is no guard.
+        let service = match undo {
+            Some(undo) => service.with_kill_switch(
+                crate::killswitch::KillSwitch::new(Box::new(TrustedStateFile::new(
+                    default_config_path().with_file_name("kill-switch.json"),
+                ))),
+                Arc::new(crate::guard_control::WindowsGuard::new(undo)),
+            ),
+            None => service,
+        };
 
         // The server downloads this release carries, beside the service in the folder only administrators
         // can change (T150). Absent or unreadable, setting up a server answers that it is not available.
@@ -671,6 +721,82 @@ impl DnetService {
                 service
             }
         }
+    }
+
+    /// `{ kill_switch, guard_in }`: the person's choice, and whether the firewall holds the guard now (`null` when
+    /// the firewall could not be asked).
+    fn guard_state(&self) -> Result<String, IpcError> {
+        let Some((switch, guard)) = &self.kill_switch else {
+            return Self::not_available("the kill switch");
+        };
+        Ok(serde_json::json!({
+            "kill_switch": switch.enabled(),
+            "guard_in": guard.is_in().ok(),
+        })
+        .to_string())
+    }
+
+    /// Remember the choice. Off takes a guard that is in out at once; on waits for the next connection, because a
+    /// guard is built for a tunnel and there is none to build it for.
+    fn set_kill_switch(&self, enabled: bool) -> Result<String, IpcError> {
+        let Some((switch, guard)) = &self.kill_switch else {
+            return Self::not_available("the kill switch");
+        };
+        let saved = match switch.set(enabled) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(%error, "the kill-switch choice could not be saved");
+                false
+            }
+        };
+        let mut effect = if enabled {
+            let up = self.orchestrator().is_some_and(|o| !o.is_idle());
+            if up {
+                "The guard goes in at the next connection; the one that is up now is not covered."
+            } else {
+                "The guard goes in at the next connection."
+            }
+            .to_owned()
+        } else if guard.is_in().unwrap_or(true) {
+            // Only a guard that is in, or that cannot be told about, is touched.
+            guard.release().map_err(release_failed)?;
+            "The guard is out.".to_owned()
+        } else {
+            "No guard was in.".to_owned()
+        };
+        if !saved {
+            effect.push_str(
+                " The choice could not be saved, so it stands only until the service stops.",
+            );
+        }
+        Ok(serde_json::json!({
+            "kill_switch": enabled,
+            "saved": saved,
+            "guard_in": guard.is_in().ok(),
+            "effect": effect,
+        })
+        .to_string())
+    }
+
+    /// The way out: take the guard out now. It asks the firewall itself rather than trusting what the service
+    /// believes is in, and it leaves the person's choice as it was.
+    fn release_guard(&self) -> Result<String, IpcError> {
+        let Some((switch, guard)) = &self.kill_switch else {
+            return Self::not_available("the kill switch");
+        };
+        guard.release().map_err(release_failed)?;
+        let on = switch.enabled();
+        Ok(serde_json::json!({
+            "kill_switch": on,
+            "guard_in": false,
+            "effect": if on {
+                "The guard is out. The kill switch is still on, so the next connection puts it back; \
+                 turn it off to keep it out."
+            } else {
+                "The guard is out."
+            },
+        })
+        .to_string())
     }
 
     fn not_available(what: &str) -> Result<String, IpcError> {
@@ -748,6 +874,16 @@ impl Service for DnetService {
             }
             Request::RejectChange { id } => return self.reject_change(id),
             Request::ApproveChange { id } => return self.approve_change(id),
+            // The kill switch never touches the domain store, so it never waits for it either: the way out in
+            // particular must answer when the store is busy with a slow request or poisoned by a panic elsewhere
+            // (T161 review). Turning it on or off is a change like any other and meets the same gate; releasing
+            // the guard and reading its state do not.
+            Request::GetGuard => return self.guard_state(),
+            Request::SetKillSwitch { enabled } => {
+                self.refuse_while_unsafe()?;
+                return self.set_kill_switch(*enabled);
+            }
+            Request::ReleaseGuard => return self.release_guard(),
             _ => {}
         }
         if self.hold_changes {
@@ -1311,6 +1447,13 @@ impl DnetService {
                 Ok(dns_reply(*block, consequence))
             }
 
+            // Answered in `dispatch`, before this function takes the store; here only to keep the match complete.
+            Request::GetGuard | Request::SetKillSwitch { .. } | Request::ReleaseGuard => {
+                Err(IpcError::InternalError {
+                    detail: "this request is answered before the store, not through it".to_owned(),
+                })
+            }
+
             Request::ImportFeed(import) => self.import_feed(import),
             Request::FetchFeed => match &self.check_requester {
                 None => Self::not_available("checking for updated definitions"),
@@ -1858,6 +2001,168 @@ mod tests {
         let reply = json_of(svc.dispatch(&Request::SetEncryptedDnsHandling { block: true }));
         assert_eq!(reply["block"], true);
         assert!(reply.get("consequence").is_none());
+    }
+
+    // ---------------------------------------------------------------- the kill switch (T161)
+
+    fn service_with_kill_switch(
+        stored: Option<&str>,
+    ) -> (
+        DnetService,
+        Arc<crate::guard_control::fake::FakeGuard>,
+        Arc<dnet_config::persist::MemoryStateFile>,
+    ) {
+        let file = Arc::new(dnet_config::persist::MemoryStateFile::with_bytes(
+            stored.map(|s| s.as_bytes().to_vec()),
+        ));
+        let guard = Arc::new(crate::guard_control::fake::FakeGuard::default());
+        let svc = service().with_kill_switch(
+            crate::killswitch::KillSwitch::new(Box::new(Arc::clone(&file))),
+            Arc::clone(&guard) as Arc<dyn crate::guard_control::GuardControl>,
+        );
+        (svc, guard, file)
+    }
+
+    #[test]
+    fn without_a_guard_attached_the_kill_switch_requests_say_it_is_not_available() {
+        let svc = service();
+        for request in [
+            Request::GetGuard,
+            Request::SetKillSwitch { enabled: true },
+            Request::ReleaseGuard,
+        ] {
+            assert!(
+                matches!(svc.dispatch(&request), Err(IpcError::InternalError { .. })),
+                "{request:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_guard_state_reads_off_and_out_until_the_person_turns_it_on() {
+        let (svc, guard, _) = service_with_kill_switch(None);
+        let reply = json_of(svc.dispatch(&Request::GetGuard));
+        assert_eq!(reply["kill_switch"], false);
+        assert_eq!(reply["guard_in"], false);
+        assert!(
+            guard.calls().is_empty(),
+            "reading puts nothing in the firewall"
+        );
+    }
+
+    #[test]
+    fn turning_it_on_is_remembered_and_waits_for_the_next_connection() {
+        let (svc, guard, file) = service_with_kill_switch(None);
+        let reply = json_of(svc.dispatch(&Request::SetKillSwitch { enabled: true }));
+        assert_eq!(reply["kill_switch"], true);
+        assert_eq!(reply["saved"], true);
+        assert_eq!(reply["guard_in"], false);
+        assert!(
+            reply["effect"]
+                .as_str()
+                .unwrap()
+                .contains("next connection"),
+            "{reply}"
+        );
+        assert!(
+            guard.calls().is_empty(),
+            "nothing is put in without a tunnel"
+        );
+        assert!(file.bytes().is_some());
+        assert_eq!(
+            json_of(svc.dispatch(&Request::GetGuard))["kill_switch"],
+            true
+        );
+    }
+
+    #[test]
+    fn turning_it_off_takes_a_guard_that_is_in_out_at_once() {
+        let (svc, guard, file) = service_with_kill_switch(Some(r#"{"version":1,"enabled":true}"#));
+        *guard.is_in.lock().unwrap() = true;
+        let reply = json_of(svc.dispatch(&Request::SetKillSwitch { enabled: false }));
+        assert_eq!(reply["kill_switch"], false);
+        assert_eq!(reply["guard_in"], false);
+        assert_eq!(guard.calls(), ["release"]);
+        assert_eq!(file.bytes(), None);
+    }
+
+    #[test]
+    fn turning_it_off_with_no_guard_in_does_not_touch_the_firewall() {
+        let (svc, guard, _) = service_with_kill_switch(Some(r#"{"version":1,"enabled":true}"#));
+        let reply = json_of(svc.dispatch(&Request::SetKillSwitch { enabled: false }));
+        assert_eq!(reply["kill_switch"], false);
+        assert!(guard.calls().is_empty());
+    }
+
+    #[test]
+    fn a_guard_that_will_not_come_out_is_an_error_but_the_choice_stands() {
+        let (svc, guard, _) = service_with_kill_switch(Some(r#"{"version":1,"enabled":true}"#));
+        *guard.is_in.lock().unwrap() = true;
+        *guard.fail_release.lock().unwrap() = Some("the firewall engine refused".into());
+        match svc.dispatch(&Request::SetKillSwitch { enabled: false }) {
+            Err(IpcError::InternalError { detail }) => {
+                assert!(detail.contains("the firewall engine refused"), "{detail}");
+                assert!(
+                    detail.contains("guard-release"),
+                    "tells what to do: {detail}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            json_of(svc.dispatch(&Request::GetGuard))["kill_switch"],
+            false
+        );
+    }
+
+    #[test]
+    fn releasing_the_guard_works_whatever_the_setting_and_keeps_the_setting() {
+        let (svc, guard, _) = service_with_kill_switch(Some(r#"{"version":1,"enabled":true}"#));
+        *guard.is_in.lock().unwrap() = true;
+        let reply = json_of(svc.dispatch(&Request::ReleaseGuard));
+        assert_eq!(reply["guard_in"], false);
+        assert_eq!(
+            reply["kill_switch"], true,
+            "the choice is the person's, not changed by a release"
+        );
+        assert_eq!(guard.calls(), ["release"]);
+    }
+
+    #[test]
+    fn releasing_when_nothing_is_in_is_not_an_error_and_still_asks_the_firewall() {
+        let (svc, guard, _) = service_with_kill_switch(None);
+        let reply = json_of(svc.dispatch(&Request::ReleaseGuard));
+        assert_eq!(reply["guard_in"], false);
+        // The way out never trusts the service's own belief about what is in.
+        assert_eq!(guard.calls(), ["release"]);
+    }
+
+    #[test]
+    fn a_setting_that_could_not_be_saved_is_said_to_be_unsaved() {
+        struct Broken;
+        impl dnet_config::persist::StateFile for Broken {
+            fn read(&self) -> Result<Option<Vec<u8>>, String> {
+                Ok(None)
+            }
+            fn write(&self, _: &[u8]) -> Result<(), String> {
+                Err("disk full".into())
+            }
+            fn remove(&self) -> Result<(), String> {
+                Err("disk full".into())
+            }
+        }
+        let guard = Arc::new(crate::guard_control::fake::FakeGuard::default());
+        let svc = service().with_kill_switch(
+            crate::killswitch::KillSwitch::new(Box::new(Broken)),
+            guard as Arc<dyn crate::guard_control::GuardControl>,
+        );
+        let reply = json_of(svc.dispatch(&Request::SetKillSwitch { enabled: true }));
+        assert_eq!(reply["kill_switch"], true);
+        assert_eq!(reply["saved"], false);
+        assert!(reply["effect"]
+            .as_str()
+            .unwrap()
+            .contains("until the service stops"));
     }
 
     fn enable_brutal() -> Request {
@@ -2536,6 +2841,77 @@ mod tests {
             "the saved configuration has an invalid entry (endpoint 0: the host is neither an IP address nor a host name)"
                 .into(),
         ))
+    }
+
+    /// Review 2026-11-10: the way out answers without the domain store. A store whose lock was poisoned by a panic
+    /// elsewhere, or is held by a slow request, must not stop it.
+    #[test]
+    fn releasing_the_guard_needs_neither_a_healthy_nor_a_free_domain_store() {
+        let (svc, guard, _file) = service_with_kill_switch(None);
+        let svc = Arc::new(svc);
+        *guard.is_in.lock().unwrap() = true;
+
+        // Held by someone else: the answer still comes.
+        let (held, release) = std::sync::mpsc::channel::<()>();
+        let (taken, locked) = std::sync::mpsc::channel::<()>();
+        let holder = {
+            let svc = Arc::clone(&svc);
+            std::thread::spawn(move || {
+                let _store = svc.state.lock().unwrap();
+                taken.send(()).unwrap();
+                let _ = release.recv_timeout(Duration::from_secs(10));
+            })
+        };
+        locked.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (answered, reply) = std::sync::mpsc::channel();
+        {
+            let svc = Arc::clone(&svc);
+            std::thread::spawn(move || {
+                let _ = answered.send(svc.dispatch(&Request::ReleaseGuard));
+            });
+        }
+        let reply = reply
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the release waited for the store");
+        assert_eq!(json_of(reply)["guard_in"], false);
+        held.send(()).unwrap();
+        holder.join().unwrap();
+
+        // Poisoned: the answer still comes.
+        let poisoner = Arc::clone(&svc);
+        let _ = std::thread::spawn(move || {
+            let _store = poisoner.state.lock().unwrap();
+            panic!("a handler failed while holding the store");
+        })
+        .join();
+        *guard.is_in.lock().unwrap() = true;
+        assert_eq!(
+            json_of(svc.dispatch(&Request::ReleaseGuard))["guard_in"],
+            false
+        );
+        assert_eq!(json_of(svc.dispatch(&Request::GetGuard))["guard_in"], false);
+    }
+
+    /// The way out is never behind the gate that stops everything else: a service that cannot restore, or whose
+    /// saved configuration is refused, is the very situation in which a person needs the guard taken out.
+    #[test]
+    fn releasing_the_guard_works_while_everything_else_is_refused() {
+        let guard = Arc::new(crate::guard_control::fake::FakeGuard::default());
+        *guard.is_in.lock().unwrap() = true;
+        let svc = service_with_refused_config().with_kill_switch(
+            crate::killswitch::KillSwitch::new(Box::new(MemoryStateFile::with_bytes(None))),
+            Arc::clone(&guard) as Arc<dyn crate::guard_control::GuardControl>,
+        );
+        let reply = json_of(svc.dispatch(&Request::ReleaseGuard));
+        assert_eq!(reply["guard_in"], false);
+        assert_eq!(guard.calls(), ["release"]);
+        // Turning it on is a change like any other, and is refused with the reason.
+        assert!(matches!(
+            svc.dispatch(&Request::SetKillSwitch { enabled: true }),
+            Err(IpcError::InternalError { .. })
+        ));
+        // Reading is always allowed.
+        assert_eq!(json_of(svc.dispatch(&Request::GetGuard))["guard_in"], false);
     }
 
     #[test]
@@ -3362,6 +3738,58 @@ mod tests {
             "an endpoint that does not exist is not removed"
         );
         assert!(!refused["reason"].as_str().unwrap().is_empty());
+    }
+
+    /// The window's side of the kill switch (`dnet-view`) against the real producer, as for the other settings: a
+    /// shape the window reads is tested here with what the service really says (T161).
+    #[tokio::test]
+    async fn the_window_can_read_what_the_service_really_says_about_the_kill_switch() {
+        use std::future::Future;
+
+        use dnet_ipc::client::{classify_reply, ClientError, Reply};
+        use dnet_ipc::protocol::encode_ipc_error;
+
+        struct Direct(Arc<DnetService>);
+        impl dnet_view::Link for Direct {
+            fn call(
+                &self,
+                request: Request,
+            ) -> impl Future<Output = Result<Reply, ClientError>> + Send {
+                let reply = match self.0.dispatch(&request) {
+                    Ok(text) => classify_reply(&text),
+                    Err(error) => classify_reply(&encode_ipc_error(&error)),
+                };
+                async move { reply }
+            }
+        }
+
+        let (svc, guard, _file) = service_with_kill_switch(None);
+        let bridge = dnet_view::Bridge::new(Direct(Arc::new(svc)));
+
+        let state = bridge.guard().await.expect("the guard state is readable");
+        assert_eq!(
+            state,
+            serde_json::json!({ "supported": true, "killSwitch": false, "guardIn": false })
+        );
+
+        let on = bridge.set_kill_switch(true).await;
+        assert_eq!(on["ok"], true, "{on}");
+        assert_eq!(on["saved"], true);
+        assert!(on["effect"].as_str().unwrap().contains("next connection"));
+        assert_eq!(bridge.guard().await.unwrap()["killSwitch"], true);
+
+        // A guard that is in comes out when the person releases it, and the window is told it is out.
+        *guard.is_in.lock().unwrap() = true;
+        assert_eq!(bridge.guard().await.unwrap()["guardIn"], true);
+        let out = bridge.release_guard().await;
+        assert_eq!(out["ok"], true, "{out}");
+        assert_eq!(bridge.guard().await.unwrap()["guardIn"], false);
+
+        // One that will not come out arrives as the service's own words, never as success.
+        *guard.fail_release.lock().unwrap() = Some("access denied".into());
+        let stuck = bridge.release_guard().await;
+        assert_eq!(stuck["ok"], false);
+        assert!(stuck["reason"].as_str().unwrap().contains("guard-release"));
     }
 
     // ------------------------------------------------------------------ T160: held changes

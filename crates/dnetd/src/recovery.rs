@@ -225,6 +225,71 @@ pub mod windows_ops {
         }
 
         #[test]
+        fn with_no_core_running_the_real_ops_report_that_none_was_stopped() {
+            let root = tempfile::tempdir().unwrap();
+            assert_eq!(ops_in(root.path()).reap_orphan_cores(), Ok(0));
+        }
+
+        #[test]
+        fn the_real_ops_refuse_to_guess_where_the_cores_are() {
+            let ops = WindowsRecoveryOps {
+                journal: std::path::PathBuf::from("undo.json"),
+                core_images: Vec::new(),
+            };
+            let error = ops.reap_orphan_cores().unwrap_err();
+            assert!(error.contains("could not be determined"), "{error}");
+        }
+
+        /// Helper for the test below: a copy of this test binary runs only this test, which sleeps. Without the
+        /// variable it returns at once, so ordinary and `--ignored` runs are unaffected.
+        #[test]
+        #[ignore = "helper spawned by the real ops stop an orphan that is running at a core's own path"]
+        fn orphan_probe_sleeper() {
+            if std::env::var_os("DNET_RECOVERY_ORPHAN_PROBE").is_some() {
+                std::thread::sleep(std::time::Duration::from_secs(60));
+            }
+        }
+
+        /// A simulated orphan: a copy of this test binary is started at the path recovery was told a core lives at,
+        /// and the real ops stop it, by that full path, and say they stopped one.
+        #[test]
+        fn the_real_ops_stop_an_orphan_running_at_a_cores_own_path_and_count_it() {
+            let dir = tempfile::tempdir().unwrap();
+            let image = dir
+                .path()
+                .join(format!("primary-core-probe-{}.exe", std::process::id()));
+            std::fs::copy(std::env::current_exe().unwrap(), &image).unwrap();
+            let mut child = std::process::Command::new(&image)
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "recovery::windows_ops::tests::orphan_probe_sleeper",
+                ])
+                .env("DNET_RECOVERY_ORPHAN_PROBE", "1")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            // The process list may lag the spawn slightly.
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let ops = WindowsRecoveryOps {
+                journal: dir.path().join("undo.json"),
+                core_images: vec![image.clone()],
+            };
+            let mut stopped = 0;
+            for _ in 0..40 {
+                stopped = ops.reap_orphan_cores().unwrap();
+                if stopped > 0 {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            let status = child.wait().unwrap();
+            assert_eq!(stopped, 1, "one orphan, stopped by its full path");
+            assert!(!status.success(), "it was ended, not left to finish");
+        }
+
+        #[test]
         fn the_installed_layout_reaps_cores_beside_the_service() {
             let ops = WindowsRecoveryOps::installed();
             let exe_dir = std::env::current_exe()
@@ -311,6 +376,8 @@ mod tests {
         log: RefCell<Vec<String>>,
         store: MemoryStore,
         reap_fails: bool,
+        /// How many cores the fake says it stopped; one unless a test says otherwise.
+        reaps: Option<usize>,
         journal_unusable: bool,
         irreversible: Vec<UndoRecord>,
     }
@@ -344,7 +411,7 @@ mod tests {
             if self.reap_fails {
                 return Err("could not terminate pid 4242".into());
             }
-            Ok(1)
+            Ok(self.reaps.unwrap_or(1))
         }
         fn open_journal(&self) -> Result<UndoRegistry, NetstateError> {
             self.log.borrow_mut().push("open-journal".into());
@@ -357,6 +424,19 @@ mod tests {
         }
         fn executor(&self) -> &dyn UndoExecutor {
             self
+        }
+    }
+
+    #[test]
+    fn recovery_reports_how_many_cores_were_stopped_as_the_ops_counted_them() {
+        for stopped in [0usize, 1, 2, 7] {
+            let ops = FakeOps {
+                reaps: Some(stopped),
+                ..FakeOps::with_journal(crashed_journal(&[route(1)]))
+            };
+            let recovered = recover_at_start(&ops).unwrap();
+            assert_eq!(recovered.reaped(), stopped);
+            assert_eq!(recovered.restored(), 1);
         }
     }
 

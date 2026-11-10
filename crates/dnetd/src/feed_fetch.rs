@@ -145,26 +145,14 @@ impl Transport for HttpTransport {
             .send()
             .await
             .map_err(|_| TransportError::Network)?;
-        let status = response.status();
-        if status.is_redirection() {
-            return Ok(
-                match response
-                    .headers()
-                    .get(reqwest::header::LOCATION)
-                    .and_then(|value| value.to_str().ok())
-                {
-                    Some(location) => Reply::Redirect(location.to_owned()),
-                    None => Reply::Status(status.as_u16()),
-                },
-            );
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok());
+        if let Some(settled) = settled_by_status(response.status().as_u16(), location) {
+            return Ok(settled);
         }
-        if !status.is_success() {
-            return Ok(Reply::Status(status.as_u16()));
-        }
-        if response
-            .content_length()
-            .is_some_and(|length| length > ENVELOPE_MAX_BYTES as u64)
-        {
+        if declared_too_large(response.content_length()) {
             return Err(TransportError::TooLarge);
         }
         let mut body = Vec::new();
@@ -173,13 +161,38 @@ impl Transport for HttpTransport {
             .await
             .map_err(|_| TransportError::Network)?
         {
-            if body.len() + piece.len() > ENVELOPE_MAX_BYTES {
+            if grows_past_the_cap(body.len(), piece.len()) {
                 return Err(TransportError::TooLarge);
             }
             body.extend_from_slice(&piece);
         }
         Ok(Reply::Body(body))
     }
+}
+
+/// What the status line alone settles: a redirect (with its target, if it gave one, exactly as it gave it), or any
+/// other answer that is not a success. `None` for a success, whose body is then read.
+fn settled_by_status(status: u16, location: Option<&str>) -> Option<Reply> {
+    if (300..400).contains(&status) {
+        return Some(match location {
+            Some(target) => Reply::Redirect(target.to_owned()),
+            None => Reply::Status(status),
+        });
+    }
+    if !(200..300).contains(&status) {
+        return Some(Reply::Status(status));
+    }
+    None
+}
+
+/// Whether a length the server declared is already past the most a signed document may be.
+fn declared_too_large(declared: Option<u64>) -> bool {
+    declared.is_some_and(|length| length > ENVELOPE_MAX_BYTES as u64)
+}
+
+/// Whether taking `next` more bytes after `have` goes past the most a signed document may be.
+fn grows_past_the_cap(have: usize, next: usize) -> bool {
+    have + next > ENVELOPE_MAX_BYTES
 }
 
 // ------------------------------------------------------------------ one check
@@ -403,3 +416,95 @@ impl<T: Transport> Fetcher<T> {
 
 #[cfg(test)]
 mod tests;
+
+/// The decisions the real transport makes, at their edges (the network itself is not needed for them).
+#[cfg(test)]
+mod transport_edge_tests {
+    use super::*;
+
+    #[test]
+    fn a_status_alone_settles_redirects_and_failures_and_leaves_success_to_the_body() {
+        for status in [200u16, 201, 204, 299] {
+            assert_eq!(settled_by_status(status, None), None, "{status}");
+            assert_eq!(
+                settled_by_status(status, Some("https://x.test/")),
+                None,
+                "{status}"
+            );
+        }
+        for status in [301u16, 302, 303, 307, 308, 399] {
+            assert_eq!(
+                settled_by_status(status, Some("https://x.test/next")),
+                Some(Reply::Redirect("https://x.test/next".to_owned())),
+                "{status}"
+            );
+            assert_eq!(
+                settled_by_status(status, None),
+                Some(Reply::Status(status)),
+                "{status}"
+            );
+        }
+        for status in [100u16, 199, 400, 404, 429, 500, 503, 599] {
+            assert_eq!(
+                settled_by_status(status, Some("https://x.test/")),
+                Some(Reply::Status(status)),
+                "{status}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_declared_length_is_too_large_only_past_the_cap() {
+        assert!(!declared_too_large(None));
+        assert!(!declared_too_large(Some(0)));
+        assert!(!declared_too_large(Some(ENVELOPE_MAX_BYTES as u64 - 1)));
+        assert!(!declared_too_large(Some(ENVELOPE_MAX_BYTES as u64)));
+        assert!(declared_too_large(Some(ENVELOPE_MAX_BYTES as u64 + 1)));
+        assert!(declared_too_large(Some(u64::MAX)));
+    }
+
+    #[test]
+    fn a_body_may_grow_to_the_cap_and_not_one_byte_past_it() {
+        assert!(!grows_past_the_cap(0, ENVELOPE_MAX_BYTES));
+        assert!(!grows_past_the_cap(ENVELOPE_MAX_BYTES - 10, 10));
+        assert!(grows_past_the_cap(ENVELOPE_MAX_BYTES - 10, 11));
+        assert!(grows_past_the_cap(ENVELOPE_MAX_BYTES, 1));
+        assert!(!grows_past_the_cap(0, 0));
+    }
+
+    #[test]
+    fn each_way_a_fetch_fails_is_said_in_its_own_words() {
+        let all = [
+            FetchFailure::NotAllowed,
+            FetchFailure::TooManyRedirects,
+            FetchFailure::Status(404),
+            FetchFailure::Network,
+            FetchFailure::TooLarge,
+        ];
+        let texts: Vec<String> = all.iter().map(ToString::to_string).collect();
+        assert_eq!(texts[2], "the server answered 404");
+        assert!(texts.iter().all(|t| !t.is_empty()));
+        let mut unique = texts.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), texts.len(), "{texts:?}");
+    }
+
+    #[test]
+    fn the_jitter_is_zero_for_no_room_and_always_inside_the_room_given_and_not_always_the_same() {
+        assert_eq!(jitter(Duration::ZERO), Duration::ZERO);
+        assert_eq!(jitter(Duration::from_millis(1)), Duration::ZERO);
+        let max = Duration::from_secs(600);
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..64 {
+            let spread = jitter(max);
+            assert!(spread < max, "{spread:?}");
+            seen.insert(spread);
+        }
+        assert!(
+            seen.len() > 8,
+            "the spread is not spread: {} values",
+            seen.len()
+        );
+    }
+}

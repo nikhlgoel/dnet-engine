@@ -11,6 +11,7 @@ import type {
   EncryptedDnsSetting,
   EndpointView,
   FailureCause,
+  GuardView,
   PathView,
   PendingView,
   ProfileView,
@@ -18,7 +19,7 @@ import type {
   RulesView,
   Snapshot,
 } from './model';
-import { parseComponents, parseSnapshot } from './model';
+import { parseComponents, parseGuard, parseSnapshot } from './model';
 
 /** The service's rule for a device's name (`dnet_config::invite::valid_name`). */
 const DEVICE_NAME = /^(?! )[A-Za-z0-9 ._-]{1,32}(?<! )$/;
@@ -167,6 +168,8 @@ export interface MockOptions {
   brutalOn?: boolean;
   /** Pretend the service is too old to list its parts (it does not know `GetComponents`). */
   noComponents?: boolean;
+  /** The kill switch's starting point (T161). `supported: false` pretends the service is too old to know it. */
+  guard?: Partial<GuardView>;
   /** Pretend this build has no list of server downloads, so setting a server up is unavailable. */
   noServerDownloads?: boolean;
   /** Hold a new server until it is approved, as the installed service does (T160). Off by default here, so the
@@ -202,6 +205,10 @@ export function createMockBridge(options: MockOptions = {}): MockController {
     { id: 'e1', label: 'endpoint-1', address: '203.0.113.9:44443', enabled: true, health: 'Healthy' },
   ];
   let dns: EncryptedDnsSetting = { block: true, needsDisclosure: options.disclosed !== true };
+  let guardState: GuardView =
+    options.guard?.supported === false
+      ? { supported: false, killSwitch: false, guardIn: null }
+      : { supported: true, killSwitch: options.guard?.killSwitch ?? false, guardIn: options.guard?.guardIn === undefined ? false : options.guard.guardIn };
   let ownRules: RuleView[] = [];
   let held: PendingView[] = [];
   let heldCount = 0;
@@ -540,6 +547,25 @@ export function createMockBridge(options: MockOptions = {}): MockController {
             consequence:
               'Rules for sites and domains will not apply to traffic from programs that use their own encrypted lookups. Those programs will be routed by address only.',
           };
+    },
+
+    async guard() {
+      return parseGuard({ ...guardState });
+    },
+    async setKillSwitch(enabled) {
+      if (!guardState.supported) return refuse('the kill switch is not available in this build yet');
+      guardState = { ...guardState, killSwitch: enabled };
+      if (enabled) return { ok: true, saved: true, effect: 'The guard goes in at the next connection.' };
+      if (guardState.guardIn !== false) {
+        guardState = { ...guardState, guardIn: false };
+        return { ok: true, saved: true, effect: 'The guard is out.' };
+      }
+      return { ok: true, saved: true, effect: 'No guard was in.' };
+    },
+    async releaseGuard() {
+      if (!guardState.supported) return refuse('the kill switch is not available in this build yet');
+      guardState = { ...guardState, guardIn: false };
+      return { ok: true, effect: 'The guard is out.' };
     },
 
     async checkUpdates() {

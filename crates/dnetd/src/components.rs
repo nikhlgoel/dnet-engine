@@ -1062,3 +1062,136 @@ mod tests {
         assert_eq!(part.state, ComponentState::Failed);
     }
 }
+
+/// How a transport process's exit is worded: a crash status is shown the way Windows writes it (hexadecimal), and an
+/// ordinary exit code is shown as the number it is. The edge between them is zero and minus one.
+#[cfg(test)]
+mod exit_wording_tests {
+    use super::*;
+
+    fn reason(code: Option<i32>) -> String {
+        core_reading(CoreBinding::PrimaryCore, CoreHealth::Exited { code })
+            .expect("an exited process is reported")
+            .reason
+    }
+
+    #[test]
+    fn an_exit_code_of_zero_is_the_number_zero_and_not_a_crash_status() {
+        let text = reason(Some(0));
+        assert!(text.ends_with("(exit code 0)"), "{text}");
+        assert!(!text.contains("0x"), "{text}");
+    }
+
+    #[test]
+    fn a_positive_exit_code_is_shown_as_the_number() {
+        for code in [1, 2, 255, 1_000_000] {
+            let text = reason(Some(code));
+            assert!(text.ends_with(&format!("(exit code {code})")), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_negative_status_is_shown_the_way_windows_writes_a_crash() {
+        assert!(reason(Some(-1)).ends_with("(exit code 0xFFFFFFFF)"));
+        assert!(reason(Some(-1_073_741_819)).ends_with("(exit code 0xC0000005)"));
+        assert!(reason(Some(i32::MIN)).ends_with("(exit code 0x80000000)"));
+    }
+
+    #[test]
+    fn an_exit_with_no_code_says_so_and_both_cores_are_named_by_role() {
+        assert!(reason(None).ends_with("(no exit code)"));
+        let awg = core_reading(
+            CoreBinding::AmneziaWgCore,
+            CoreHealth::Exited { code: Some(3) },
+        )
+        .unwrap();
+        assert!(awg.reason.contains("AmneziaWG"), "{}", awg.reason);
+        assert_eq!(awg.id, "amneziawg");
+        let primary = core_reading(CoreBinding::PrimaryCore, CoreHealth::Running).unwrap();
+        assert_eq!(primary.id, "primary");
+        assert!(core_reading(CoreBinding::PrimaryCore, CoreHealth::Unknown).is_none());
+    }
+}
+
+/// What the map forgets: a part is removed only when no reading names *that kind and that id*, never because some
+/// other part of the same kind, or another kind with the same id, is still reported.
+#[cfg(test)]
+mod removal_tests {
+    use super::*;
+
+    const AT: Duration = Duration::from_secs(10);
+
+    fn one(kind: ComponentKind, id: &str) -> Reading {
+        reading(kind, id, ComponentState::Ok, "fine".to_owned())
+    }
+
+    fn present(registry: &Registry) -> Vec<(ComponentKind, String)> {
+        let mut parts: Vec<_> = registry
+            .snapshot()
+            .into_iter()
+            .map(|c| (c.kind, c.id))
+            .collect();
+        parts.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+        parts
+    }
+
+    #[test]
+    fn a_part_is_removed_when_another_of_its_kind_is_still_reported() {
+        let mut registry = Registry::new();
+        apply(
+            &mut registry,
+            &[
+                one(ComponentKind::NetworkPath, "wifi"),
+                one(ComponentKind::NetworkPath, "ethernet"),
+            ],
+            AT,
+        );
+        let changes = apply(
+            &mut registry,
+            &[one(ComponentKind::NetworkPath, "wifi")],
+            AT + Duration::from_secs(1),
+        );
+        assert_eq!(
+            present(&registry),
+            [(ComponentKind::NetworkPath, "wifi".to_owned())]
+        );
+        let removed: Vec<_> = changes.iter().filter(|c| c.removed).collect();
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].id, "ethernet");
+    }
+
+    #[test]
+    fn a_part_is_removed_when_a_part_of_another_kind_has_the_same_id() {
+        let mut registry = Registry::new();
+        apply(
+            &mut registry,
+            &[
+                one(ComponentKind::NetworkPath, "same"),
+                one(ComponentKind::CoreProcess, "same"),
+            ],
+            AT,
+        );
+        apply(
+            &mut registry,
+            &[one(ComponentKind::CoreProcess, "same")],
+            AT + Duration::from_secs(1),
+        );
+        assert_eq!(
+            present(&registry),
+            [(ComponentKind::CoreProcess, "same".to_owned())]
+        );
+    }
+
+    #[test]
+    fn a_part_that_is_still_reported_is_kept_and_nothing_is_said_about_it() {
+        let mut registry = Registry::new();
+        let readings = [
+            one(ComponentKind::NetworkPath, "wifi"),
+            one(ComponentKind::CoreProcess, "primary"),
+        ];
+        apply(&mut registry, &readings, AT);
+        let again = apply(&mut registry, &readings, AT + Duration::from_secs(1));
+        assert!(again.is_empty(), "{again:?}");
+        assert_eq!(present(&registry).len(), 2);
+    }
+}

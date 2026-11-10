@@ -140,6 +140,30 @@ describe('commands', () => {
     expect(await b.setEncryptedDns(false)).toEqual({ ok: true, consequence: 'Rules for sites will not apply.' });
   });
 
+  it('the kill switch is read strictly, and a state that is not one is refused rather than guessed at', async () => {
+    const { b } = await bridge((c) => (c === 'get_guard' ? { supported: true, killSwitch: true, guardIn: null } : answers[c]));
+    expect(await b.guard()).toEqual({ supported: true, killSwitch: true, guardIn: null });
+    for (const odd of [null, {}, { supported: true }, { supported: true, killSwitch: 'yes', guardIn: false }, { supported: true, killSwitch: true, guardIn: 'no' }, { supported: false, killSwitch: true, guardIn: false }]) {
+      const { b: bad } = await bridge((c) => (c === 'get_guard' ? odd : answers[c]));
+      await expect(bad.guard(), JSON.stringify(odd)).rejects.toThrow();
+    }
+  });
+
+  it('turning the kill switch on or off, and releasing the guard, carry the service’s own sentence', async () => {
+    const { b, calls } = await bridge((c) => {
+      if (c === 'set_kill_switch') return { ok: true, effect: 'The guard goes in at the next connection.', saved: true };
+      if (c === 'release_guard') return { ok: true, effect: 'The guard is out.' };
+      return answers[c];
+    });
+    expect(await b.setKillSwitch(true)).toEqual({ ok: true, effect: 'The guard goes in at the next connection.', saved: true });
+    expect(calls.list.find(([c]) => c === 'set_kill_switch')?.[1]).toEqual({ enabled: true });
+    expect(await b.releaseGuard()).toEqual({ ok: true, effect: 'The guard is out.' });
+    // An answer that says ok but not what happened is not reported as done.
+    const { b: vague } = await bridge((c) => (c === 'set_kill_switch' || c === 'release_guard' ? { ok: true } : answers[c]));
+    expect((await vague.setKillSwitch(true)).ok).toBe(false);
+    expect((await vague.releaseGuard()).ok).toBe(false);
+  });
+
   it('a check for updates says which network it uses, and defaults to the safer reading', async () => {
     const { b } = await bridge((c) => (c === 'check_updates' ? { ok: true, route: 'physical' } : answers[c]));
     expect(await b.checkUpdates()).toEqual({ ok: true, route: 'physical' });

@@ -11,13 +11,14 @@ import type {
   ComponentsView,
   EncryptedDnsSetting,
   EndpointView,
+  GuardView,
   PendingView,
   ProfileView,
   RulesView,
   Snapshot,
 } from './model';
 
-export type { ComponentsView, EncryptedDnsSetting, PendingView, ProfileView, RulesView };
+export type { ComponentsView, EncryptedDnsSetting, GuardView, PendingView, ProfileView, RulesView };
 
 export type Unsubscribe = () => void;
 
@@ -141,6 +142,13 @@ export interface Bridge {
   removeRule(id: string): Promise<Outcome>;
   /** `block: false` is the one-action opt-out; the reply carries the consequence to show. */
   setEncryptedDns(block: boolean): Promise<Outcome & { consequence?: string }>;
+
+  /** The kill switch: whether it is on, and whether a guard is in the firewall now (T161). */
+  guard(): Promise<GuardView>;
+  /** Turn it on or off. The reply carries the service's own sentence about what that does, and whether the choice was saved. */
+  setKillSwitch(enabled: boolean): Promise<Outcome & { effect?: string; saved?: boolean }>;
+  /** Take the firewall guard out now. The way out when the connection is down and the network is needed. */
+  releaseGuard(): Promise<Outcome & { effect?: string }>;
 
   /** The changes that redirect traffic and wait for approval (T160). Empty when none do, or the service predates them. */
   pending(): Promise<PendingView[]>;

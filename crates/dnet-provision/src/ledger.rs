@@ -652,3 +652,70 @@ mod tests {
         }
     }
 }
+
+/// What the mutation run showed the file ledger's own tests did not pin: the removal that must reach the disk,
+/// and the difference between a file that is not there and one that cannot be used.
+#[cfg(test)]
+mod storage_tests {
+    use super::*;
+
+    fn temp() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jobs").join("ledger.jsonl");
+        (dir, path)
+    }
+
+    #[test]
+    fn a_removal_is_on_the_disk_and_is_still_there_after_a_restart() {
+        let (_dir, path) = temp();
+        {
+            let mut ledger = FileLedger::open(&path).unwrap();
+            ledger
+                .record_intent(ResourceKind::Instance, "dnet-1-instance", "r1")
+                .unwrap();
+            ledger.record_created("dnet-1-instance", "ocid-1").unwrap();
+            ledger.record_removed("dnet-1-instance").unwrap();
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.lines().count(), 3, "{text}");
+        assert!(text.lines().last().unwrap().contains("dnet-1-instance"));
+        let reopened = FileLedger::open(&path).unwrap();
+        assert_eq!(reopened.entries()[0].state, EntryState::Removed);
+    }
+
+    #[test]
+    fn a_ledger_that_is_not_there_is_empty_and_a_path_that_is_not_a_file_is_an_error() {
+        let (_dir, path) = temp();
+        assert!(read_state(&path).unwrap().entries.is_empty());
+        assert!(repair_tail(&path).is_ok());
+
+        let directory = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            read_state(directory.path()),
+            Err(LedgerError::Write(_))
+        ));
+        assert!(matches!(
+            repair_tail(directory.path()),
+            Err(LedgerError::Write(_))
+        ));
+    }
+
+    /// A file that is complete is left alone: repairing it must not even try to write, so a ledger on
+    /// read-only storage still opens for reading.
+    #[test]
+    fn a_complete_file_is_not_written_to_when_it_is_checked() {
+        let (_dir, path) = temp();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        for content in [&b""[..], &b"{\"e\":\"intent\"}\n"[..]] {
+            std::fs::write(&path, content).unwrap();
+            let original = std::fs::metadata(&path).unwrap().permissions();
+            let mut read_only = original.clone();
+            read_only.set_readonly(true);
+            std::fs::set_permissions(&path, read_only).unwrap();
+            let result = repair_tail(&path);
+            std::fs::set_permissions(&path, original).unwrap();
+            assert!(result.is_ok(), "{content:?}: {result:?}");
+            assert_eq!(std::fs::read(&path).unwrap(), content, "nothing changed");
+        }
+    }
+}

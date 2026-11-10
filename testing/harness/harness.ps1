@@ -49,6 +49,7 @@ $CONDITIONS = @{
     'H7-up'   = @('path.sh', 'H7-up')
     'H8'      = @('path.sh', 'H8')
     'H9'      = @('degrade.sh', 'H9')
+    'H10'     = @('path.sh', 'H10')
     'H1+H9'   = @('degrade.sh', 'H1+H9')
     'login'   = @('portal.sh', 'login')
 }

@@ -320,6 +320,9 @@ mod tests {
                 CoreHealth::Unknown
             }
         }
+        async fn core_pid(&self, core: CoreBinding) -> Option<u32> {
+            (core == CoreBinding::PrimaryCore).then_some(4242)
+        }
         async fn replay_undo(&self) -> Result<(), SupervisorError> {
             note(&self.log, "undo");
             Ok(())
@@ -1088,5 +1091,30 @@ mod tests {
                 .await
                 .expect("the reading waited for the tunnel");
         assert!(read.is_empty());
+    }
+
+    /// The service sends the core's control secret only to a port the core alone listens on, and asks the system who
+    /// that is by process id. The id comes from the tunnel that is up, and from nothing else.
+    #[tokio::test]
+    async fn the_primary_cores_process_id_is_the_one_of_the_tunnel_that_is_up_and_there_is_none_otherwise(
+    ) {
+        let log = Log::default();
+        let tunnels = Tunnels::new(FakeHost::new(&log));
+        assert_eq!(
+            tunnels.primary_core_pid().await,
+            None,
+            "no tunnel, no process"
+        );
+        tunnels
+            .start(&plan(CoreBinding::PrimaryCore))
+            .await
+            .unwrap();
+        assert_eq!(tunnels.primary_core_pid().await, Some(4242));
+        tunnels.stop().await;
+        assert_eq!(
+            tunnels.primary_core_pid().await,
+            None,
+            "stopped: nothing to ask about"
+        );
     }
 }

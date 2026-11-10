@@ -20,6 +20,8 @@
     H4-C            REALITY port dropped         -> hy2-default
     blocked         both ports dropped           -> none
     H9              150 kbit ceiling, both slow  -> none (connected but unusable; HV-12)
+    H10-1280        path MTU 1280, no ICMP       -> reality-default (Hysteria 2's QUIC handshake does not fit; E7/S7)
+    H10-1400        path MTU 1400, no ICMP       -> some profile (both work, either may be faster; shows 1280 is the cause)
 
   Not covered here, because it needs the daemon: a block applied *while connected* (HV-04), and
   anything involving AmneziaWG, which cannot be probed through a proxy.
@@ -52,7 +54,11 @@ $Scenarios = @(
     @{ Name = 'blocked'; Expect = 'none'
        Conditions = @(@{ Id = 'H4'; Arg = 'B' }, @{ Id = 'H4'; Arg = 'C' }) },
     @{ Name = 'H9'; Expect = 'none'
-       Conditions = @(@{ Id = 'H9'; Arg = '150kbit' }) }
+       Conditions = @(@{ Id = 'H9'; Arg = '150kbit' }) },
+    @{ Name = 'H10-1280'; Expect = 'selected reality-default'
+       Conditions = @(@{ Id = 'H10'; Arg = '1280' }) },
+    @{ Name = 'H10-1400'; Expect = 'selected'
+       Conditions = @(@{ Id = 'H10'; Arg = '1400' }) }
 )
 if ($Only) { $Scenarios = $Scenarios | Where-Object { $Only -contains $_.Name } }
 

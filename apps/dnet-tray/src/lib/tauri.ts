@@ -24,6 +24,7 @@ import {
   parseActivity,
   parseComponents,
   parseEndpoints,
+  parseGuard,
   parsePending,
   parseProfiles,
   parseRulesReply,
@@ -278,6 +279,22 @@ export async function createTauriBridge(): Promise<Bridge> {
     async setEncryptedDns(block) {
       const reply = await call('set_encrypted_dns', { block });
       return reply.ok && typeof reply.consequence === 'string' ? { ok: true as const, consequence: reply.consequence } : reply;
+    },
+
+    async guard() {
+      return parseGuard(await invoke('get_guard'));
+    },
+    async setKillSwitch(enabled) {
+      const reply = await call('set_kill_switch', { enabled });
+      if (!reply.ok) return reply;
+      return typeof reply.effect === 'string' && typeof reply.saved === 'boolean'
+        ? { ok: true as const, effect: reply.effect, saved: reply.saved }
+        : { ok: false as const, reason: UNEXPECTED };
+    },
+    async releaseGuard() {
+      const reply = await call('release_guard');
+      if (!reply.ok) return reply;
+      return typeof reply.effect === 'string' ? { ok: true as const, effect: reply.effect } : { ok: false as const, reason: UNEXPECTED };
     },
 
     async checkUpdates() {

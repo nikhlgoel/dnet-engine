@@ -571,13 +571,39 @@ async fn set_encrypted_dns(shell: Shared<'_>, block: bool) -> Result<Value, Stri
 }
 
 #[tauri::command]
+async fn get_guard(shell: Shared<'_>) -> Result<Value, String> {
+    shell.bridge.guard().await
+}
+
+#[tauri::command]
+async fn set_kill_switch(shell: Shared<'_>, enabled: bool) -> Result<Value, String> {
+    Ok(shell.bridge.set_kill_switch(enabled).await)
+}
+
+#[tauri::command]
+async fn release_guard(shell: Shared<'_>) -> Result<Value, String> {
+    Ok(shell.bridge.release_guard().await)
+}
+
+#[tauri::command]
 async fn check_updates(shell: Shared<'_>) -> Result<Value, String> {
     Ok(shell.bridge.check_updates().await)
 }
 
 #[tauri::command]
 fn open_login_page(shell: Shared<'_>) -> Value {
-    shell.bridge.open_login_page()
+    shell.bridge.open_login_page_with(open_in_default_browser)
+}
+
+/// Start the person's default browser on `url`. Windows' own way, `url.dll,FileProtocolHandler`: the address is one
+/// argument, not text a shell reads. The bridge only ever passes the operating system's own probe address, never one
+/// the network chose.
+fn open_in_default_browser(url: &str) -> std::io::Result<()> {
+    std::process::Command::new("rundll32.exe")
+        .arg("url.dll,FileProtocolHandler")
+        .arg(url)
+        .spawn()
+        .map(|_| ())
 }
 
 // ---------------------------------------------------------------------------------------- start
@@ -637,6 +663,9 @@ pub fn run() {
             reject_change,
             approve_change,
             set_encrypted_dns,
+            get_guard,
+            set_kill_switch,
+            release_guard,
             check_updates,
             open_login_page,
             window_minimize,

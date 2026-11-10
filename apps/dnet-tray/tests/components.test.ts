@@ -298,6 +298,90 @@ describe('Rules: a person adds and removes their own (T108)', () => {
   });
 });
 
+describe('Settings: the kill switch (T161)', () => {
+  const killSwitch = async (): Promise<HTMLInputElement> => {
+    const s = (await screen.findByRole('switch', { name: /block traffic outside the connection/i })) as HTMLInputElement;
+    await waitFor(() => expect(s.disabled).toBe(false));
+    return s;
+  };
+
+  it('it is off, says what it does in the words of what happens, and turning it on sends the choice', async () => {
+    const mock = mount();
+    const set = vi.spyOn(mock, 'setKillSwitch');
+    await screen.findByRole('switch');
+    await go('Settings');
+    const toggle = await killSwitch();
+    expect(toggle.checked).toBe(false);
+    await fireEvent.click(toggle);
+    await waitFor(() => expect(set).toHaveBeenCalledWith(true));
+    await waitFor(() => expect(toggle.checked).toBe(true));
+    // The service's own sentence about what happens next is shown.
+    // Once in the switch's own help, and once as the service's sentence about what the change does.
+    await waitFor(() => expect(screen.getAllByText(/next connection/i)).toHaveLength(2));
+    expect(await violations()).toEqual([]);
+  });
+
+  it('it can be turned off again, and says the guard is out', async () => {
+    const mock = mount({ guard: { killSwitch: true } });
+    const set = vi.spyOn(mock, 'setKillSwitch');
+    await screen.findByRole('switch');
+    await go('Settings');
+    const toggle = await killSwitch();
+    await waitFor(() => expect(toggle.checked).toBe(true));
+    await fireEvent.click(toggle);
+    await waitFor(() => expect(set).toHaveBeenCalledWith(false));
+    await waitFor(() => expect(toggle.checked).toBe(false));
+  });
+
+  it('a guard that is in can be taken out from here, and only then is the button there', async () => {
+    mount({ guard: { killSwitch: true, guardIn: false } });
+    await screen.findByRole('switch');
+    await go('Settings');
+    await killSwitch();
+    expect(screen.queryByRole('button', { name: /take the guard out/i })).toBeNull();
+    cleanup();
+
+    const mock = mount({ guard: { killSwitch: true, guardIn: true } });
+    const release = vi.spyOn(mock, 'releaseGuard');
+    await screen.findByRole('switch');
+    await go('Settings');
+    await killSwitch();
+    await fireEvent.click(await screen.findByRole('button', { name: /take the guard out/i }));
+    await waitFor(() => expect(release).toHaveBeenCalled());
+    await waitFor(() => expect(screen.queryByRole('button', { name: /take the guard out/i })).toBeNull());
+    expect(await screen.findByText(/guard is out/i)).toBeTruthy();
+  });
+
+  it('a firewall that could not be asked is said so, and the person is not told the guard is out', async () => {
+    mount({ guard: { killSwitch: true, guardIn: null } });
+    await screen.findByRole('switch');
+    await go('Settings');
+    await killSwitch();
+    expect(await screen.findByText(/could not be asked/i)).toBeTruthy();
+    // The way out is still offered: not knowing is not a reason to hide it.
+    expect(screen.getByRole('button', { name: /take the guard out/i })).toBeTruthy();
+  });
+
+  it('a service too old to know the kill switch shows nothing about it', async () => {
+    mount({ guard: { supported: false } });
+    await screen.findByRole('switch');
+    await go('Settings');
+    await screen.findByRole('heading', { name: /settings/i });
+    expect(screen.queryByRole('switch', { name: /block traffic outside the connection/i })).toBeNull();
+  });
+
+  it('a refusal is shown in the service’s words and leaves the switch where it was', async () => {
+    const mock = mount({ guard: { killSwitch: false } });
+    vi.spyOn(mock, 'setKillSwitch').mockResolvedValue({ ok: false, reason: 'the service is busy', code: 'ServiceBusy' });
+    await screen.findByRole('switch');
+    await go('Settings');
+    const toggle = await killSwitch();
+    await fireEvent.click(toggle);
+    expect(await screen.findByText('the service is busy')).toBeTruthy();
+    expect(toggle.checked).toBe(false);
+  });
+});
+
 describe('Settings: aggressive speed mode (Brutal, T105)', () => {
   const figures = async (up: string, down: string): Promise<void> => {
     await fireEvent.input(await screen.findByLabelText(/upload speed/i), { target: { value: up } });

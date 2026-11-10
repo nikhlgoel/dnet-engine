@@ -166,9 +166,13 @@ pub fn explain(cause: &FailureCause) -> Explanation {
             )
         }
         FailureCause::NoUsablePath => (
-            "No network connection is available",
-            "None of this computer's network connections can carry traffic right now.".to_string(),
-            "Connect to Wi-Fi or mobile data, then try again.",
+            "No network connection DNet Engine can use",
+            "None of this computer's network connections has a route to the internet that DNet Engine can use. It \
+             needs an IPv4 route; a network that gives only IPv6 is not supported yet, and a connection that is \
+             down has none."
+                .to_string(),
+            "Connect to Wi-Fi or mobile data that gives IPv4 access, or ask the network's owner whether it \
+             does, then try again.",
         ),
         FailureCause::ConfigurationInvalid { detail } => (
             "The configuration cannot be used",
@@ -391,6 +395,24 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// T166: an IPv6-only network works for everything else and is not "no network". The words must not say it is
+    /// down, and must say what this program needs, so a person on one is told the truth instead of looking for a cable.
+    #[test]
+    fn no_usable_path_does_not_claim_the_network_is_down_and_names_what_is_needed() {
+        let e = explain(&FailureCause::NoUsablePath);
+        let text = format!("{} {} {}", e.title, e.detail, e.action).to_lowercase();
+        assert!(
+            !text.contains("no network connection is available"),
+            "{text}"
+        );
+        assert!(!text.contains("carry traffic"), "{text}");
+        assert!(text.contains("ipv4"), "names the requirement: {text}");
+        assert!(
+            text.contains("ipv6"),
+            "says an IPv6-only network is the case it cannot use yet: {text}"
+        );
     }
 
     #[test]

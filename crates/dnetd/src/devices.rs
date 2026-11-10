@@ -794,4 +794,164 @@ mod tests {
             .take_ready(endpoint, &text, NOW + READY_FOR_S + 1)
             .is_none());
     }
+
+    // ------------------------------------------------------------------ the edges the mutation run showed were not pinned
+
+    #[test]
+    fn the_waits_are_six_hours_for_a_request_ten_minutes_for_an_approved_invite_and_eight_prepared_at_most(
+    ) {
+        assert_eq!(WAIT_S, 21_600);
+        assert_eq!(READY_FOR_S, 600);
+        assert_eq!(MAX_PREPARED, 8);
+    }
+
+    #[test]
+    fn a_join_that_waited_exactly_the_limit_is_still_good_and_one_second_more_is_not() {
+        let friend = Joining::new();
+        let asked = friend.request("Ravi laptop", NOW).unwrap();
+        let request = DeviceRequest::decode(&asked.text).unwrap();
+        let (owner, endpoint) = (Inviting::new(), EndpointId::new());
+        owner.prepare(endpoint, &asked.text, true, NOW).unwrap();
+        let invite = owner
+            .finish(
+                endpoint,
+                &asked.text,
+                &good_report(&request),
+                || Ok(facts()),
+                NOW,
+            )
+            .unwrap()
+            .invite;
+        // Exactly at the limit it is accepted (and the join keeps waiting, so the next call can show the expiry).
+        assert!(friend.accept(&invite, NOW + WAIT_S).is_ok());
+        assert!(matches!(
+            friend.accept(&invite, NOW + WAIT_S + 1),
+            Err(DevicesError::Expired)
+        ));
+    }
+
+    #[test]
+    fn a_preparation_that_waited_exactly_the_limit_is_still_good_and_one_second_more_is_expired() {
+        let endpoint = EndpointId::new();
+        let (_, owner, text) = asked_and_prepared("Ravi laptop", endpoint);
+        let request = DeviceRequest::decode(&text).unwrap();
+        let report = good_report(&request);
+        assert!(owner
+            .check(endpoint, &text, &report, || Ok(facts()), NOW + WAIT_S)
+            .is_ok());
+        assert_eq!(
+            owner.check(endpoint, &text, &report, || Ok(facts()), NOW + WAIT_S + 1),
+            Err(DevicesError::Expired)
+        );
+        // And once expired it is gone, not merely refused.
+        assert_eq!(
+            owner.check(endpoint, &text, &report, || Ok(facts()), NOW),
+            Err(DevicesError::NotPrepared)
+        );
+    }
+
+    #[test]
+    fn the_same_friend_prepared_for_two_servers_is_two_preparations_and_for_one_server_twice_is_one(
+    ) {
+        let (first, second) = (EndpointId::new(), EndpointId::new());
+        let friend = Joining::new();
+        let asked = friend.request("Ravi laptop", NOW).unwrap();
+        let request = DeviceRequest::decode(&asked.text).unwrap();
+        let owner = Inviting::new();
+        owner.prepare(first, &asked.text, true, NOW).unwrap();
+        owner.prepare(second, &asked.text, true, NOW).unwrap();
+        // Asking again for the first server does not disturb the second.
+        owner.prepare(first, &asked.text, true, NOW + 5).unwrap();
+        let report = good_report(&request);
+        assert!(owner
+            .check(first, &asked.text, &report, || Ok(facts()), NOW + 5)
+            .is_ok());
+        assert!(owner
+            .check(second, &asked.text, &report, || Ok(facts()), NOW + 5)
+            .is_ok());
+        assert_eq!(lock(&owner.prepared).len(), 2);
+    }
+
+    #[test]
+    fn an_approved_invite_waits_exactly_ten_minutes_and_is_handed_over_once() {
+        let endpoint = EndpointId::new();
+        let (_, owner, text) = asked_and_prepared("Ravi laptop", endpoint);
+        let request = DeviceRequest::decode(&text).unwrap();
+        owner
+            .finish(endpoint, &text, &good_report(&request), || Ok(facts()), NOW)
+            .unwrap();
+        assert!(owner.is_ready(endpoint, &text, NOW + READY_FOR_S));
+        assert!(!owner.is_ready(endpoint, &text, NOW + READY_FOR_S + 1));
+        assert!(owner
+            .take_ready(endpoint, &text, NOW + READY_FOR_S)
+            .is_some());
+        assert!(
+            owner
+                .take_ready(endpoint, &text, NOW + READY_FOR_S)
+                .is_none(),
+            "once"
+        );
+    }
+
+    #[test]
+    fn an_invite_that_nobody_asked_for_is_dropped_and_not_kept_for_the_next_request() {
+        let endpoint = EndpointId::new();
+        let (_, owner, text) = asked_and_prepared("Ravi laptop", endpoint);
+        let request = DeviceRequest::decode(&text).unwrap();
+        owner
+            .finish(endpoint, &text, &good_report(&request), || Ok(facts()), NOW)
+            .unwrap();
+        // Later, another request is finished: the old one has expired and is no longer there.
+        let (_, _, other_text) = {
+            let friend = Joining::new();
+            let asked = friend.request("Asha phone", NOW + 2 * READY_FOR_S).unwrap();
+            owner
+                .prepare(endpoint, &asked.text, true, NOW + 2 * READY_FOR_S)
+                .unwrap();
+            (friend, (), asked.text)
+        };
+        let other = DeviceRequest::decode(&other_text).unwrap();
+        owner
+            .finish(
+                endpoint,
+                &other_text,
+                &good_report(&other),
+                || Ok(facts()),
+                NOW + 2 * READY_FOR_S,
+            )
+            .unwrap();
+        assert_eq!(lock(&owner.ready).len(), 1, "the expired one was dropped");
+        assert!(!owner.is_ready(endpoint, &text, NOW + 2 * READY_FOR_S));
+    }
+
+    #[test]
+    fn finishing_the_same_request_again_replaces_the_waiting_invite_and_another_server_keeps_its_own(
+    ) {
+        let (first, second) = (EndpointId::new(), EndpointId::new());
+        let friend = Joining::new();
+        let asked = friend.request("Ravi laptop", NOW).unwrap();
+        let request = DeviceRequest::decode(&asked.text).unwrap();
+        let owner = Inviting::new();
+        owner.prepare(first, &asked.text, true, NOW).unwrap();
+        owner.prepare(second, &asked.text, true, NOW).unwrap();
+        let report = good_report(&request);
+        owner
+            .finish(first, &asked.text, &report, || Ok(facts()), NOW)
+            .unwrap();
+        owner
+            .finish(second, &asked.text, &report, || Ok(facts()), NOW)
+            .unwrap();
+        // The first server's request was used up; asking again prepares it afresh, and finishing keeps one invite.
+        owner.prepare(first, &asked.text, true, NOW + 1).unwrap();
+        owner
+            .finish(first, &asked.text, &report, || Ok(facts()), NOW + 1)
+            .unwrap();
+        assert_eq!(
+            lock(&owner.ready).len(),
+            2,
+            "one per server, never two for the same"
+        );
+        assert!(owner.is_ready(first, &asked.text, NOW + 1));
+        assert!(owner.is_ready(second, &asked.text, NOW + 1));
+    }
 }

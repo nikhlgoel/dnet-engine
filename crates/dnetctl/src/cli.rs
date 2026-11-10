@@ -66,6 +66,12 @@ pub enum Command {
     EncryptedDns {
         block: bool,
     },
+    /// Turn the kill switch on or off (`Some`), or show whether it is on and whether a guard is in (`None`).
+    KillSwitch {
+        on: Option<bool>,
+    },
+    /// Take the firewall guard out now. The way out when the connection is down and the network is needed.
+    GuardRelease,
     /// List the routing rules, the built-in ones and the person's.
     Rules,
     /// Add a rule: what it matches (`kind`, `value`) and what it does (`action`).
@@ -121,6 +127,7 @@ impl Command {
                 | Command::RemoveEndpoint { .. }
                 | Command::SetEndpointEnabled { .. }
                 | Command::EncryptedDns { .. }
+                | Command::KillSwitch { .. }
                 | Command::BrutalOn { .. }
                 | Command::BrutalOff { .. }
                 | Command::RemoveRule { .. }
@@ -164,6 +171,12 @@ commands:
   disable-endpoint <id>  keep an endpoint but do not use it
   encrypted-dns <block|allow>
                          block (the default) or allow programs' own encrypted name lookups
+  kill-switch <on|off|status>
+                         keep a firewall guard in while connected, so a crash or a stopped service
+                         cannot send traffic around the tunnel (off by default; 'status' shows it)
+  guard-release          take the firewall guard out now: the way out if the connection is down and
+                         you need the network. If the service is not answering, run 'dnetd
+                         release-guard' from an elevated prompt: it needs no running service.
   rules                  list the routing rules, built-in and your own, in the order they apply
   add-rule               add a rule: one of --domain <name>, --suffix <name> (the name and every
                          name under it) or --cidr <range>, and --tunnel or --bypass
@@ -193,7 +206,7 @@ options:
   --accept-tier2         connect: consent to a profile whose connections may break when the
                          network interface changes
   --no-wait              connect/disconnect: return as soon as the service accepts the request
-  --host <address>       add-endpoint: the server's IP address or host name
+  --host <address>       add-endpoint: the server's IPv4 address (not a name, not IPv6 yet)
   --credentials-file <path>
                          add-endpoint: a file holding the connection details. Delete it afterwards:
                          it holds the keys. They are never accepted on the command line.
@@ -246,6 +259,8 @@ fn command_named(name: &str) -> Option<Command> {
             enabled: false,
         },
         "encrypted-dns" => Command::EncryptedDns { block: true },
+        "kill-switch" => Command::KillSwitch { on: None },
+        "guard-release" => Command::GuardRelease,
         "rules" => Command::Rules,
         "add-rule" => Command::AddRule {
             kind: String::new(),
@@ -306,14 +321,90 @@ fn move_global_options_after_the_command(args: &[String]) -> Vec<String> {
     ordered
 }
 
+/// Every command the program knows, spelled as it is typed. A test keeps this and `command_named` in step, so a
+/// suggestion can only ever name a command that works.
+const COMMAND_NAMES: [&str; 27] = [
+    "status",
+    "connect",
+    "disconnect",
+    "events",
+    "profiles",
+    "endpoints",
+    "paths",
+    "components",
+    "stats",
+    "version",
+    "add-endpoint",
+    "remove-endpoint",
+    "enable-endpoint",
+    "disable-endpoint",
+    "encrypted-dns",
+    "kill-switch",
+    "guard-release",
+    "rules",
+    "add-rule",
+    "remove-rule",
+    "brutal-on",
+    "brutal-off",
+    "check-updates",
+    "import-feed",
+    "pending",
+    "approve",
+    "reject",
+];
+
+/// The number of single-character edits (insert, delete, change) between two words.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut previous: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.iter().enumerate() {
+        let mut current = vec![i + 1];
+        for (j, cb) in b.iter().enumerate() {
+            let change = previous[j] + usize::from(ca != cb);
+            current.push(change.min(previous[j + 1] + 1).min(current[j] + 1));
+        }
+        previous = current;
+    }
+    previous[b.len()]
+}
+
+/// The one command a mistyped word most likely meant: within two edits (one for a short word), and clearly closer
+/// than any other. Nothing when it is not clear, because a wrong guess is worse than none.
+fn did_you_mean(typed: &str) -> Option<&'static str> {
+    let typed = typed.to_ascii_lowercase();
+    let limit = if typed.chars().count() <= 4 { 1 } else { 2 };
+    let mut best: Option<(usize, &'static str)> = None;
+    let mut tied = false;
+    for name in COMMAND_NAMES {
+        let distance = edit_distance(&typed, name);
+        if distance > limit {
+            continue;
+        }
+        match best {
+            Some((d, _)) if distance > d => {}
+            Some((d, _)) if distance == d => tied = true,
+            _ => {
+                best = Some((distance, name));
+                tied = false;
+            }
+        }
+    }
+    best.filter(|_| !tied).map(|(_, name)| name)
+}
+
 /// Parse the arguments after the program name. `Err` is a message for the user.
 pub fn parse(args: &[String]) -> Result<Invocation, String> {
     let args = &move_global_options_after_the_command(args);
     let Some(first) = args.first() else {
         return Err(format!("no command given\n\n{USAGE}"));
     };
-    let mut command = command_named(first)
-        .ok_or_else(|| format!("unknown command '{}'\n\n{USAGE}", shown(first)))?;
+    let mut command = command_named(first).ok_or_else(|| {
+        let hint = did_you_mean(first)
+            .map(|name| format!(" Did you mean '{name}'?"))
+            .unwrap_or_default();
+        format!("unknown command '{}'.{hint}\n\n{USAGE}", shown(first))
+    })?;
     let mut json = false;
     let mut trust_any_service = false;
     let mut timeout = DEFAULT_TIMEOUT;
@@ -538,6 +629,14 @@ pub fn parse(args: &[String]) -> Result<Invocation, String> {
                 _ => return Err("encrypted-dns needs 'block' or 'allow'".to_string()),
             };
         }
+        Command::KillSwitch { on } => {
+            *on = match word.as_deref() {
+                Some("on") => Some(true),
+                Some("off") => Some(false),
+                Some("status") | None => None,
+                _ => return Err("kill-switch needs 'on', 'off' or 'status'".to_string()),
+            };
+        }
         _ => {}
     }
     Ok(Invocation {
@@ -552,6 +651,101 @@ pub fn parse(args: &[String]) -> Result<Invocation, String> {
 /// sequence among them) would otherwise be interpreted by the terminal.
 fn shown(text: &str) -> String {
     crate::render::plain(text)
+}
+
+#[cfg(test)]
+mod suggestion_tests {
+    use super::*;
+
+    #[test]
+    fn every_listed_command_is_a_command_and_every_command_in_the_usage_is_listed() {
+        for name in COMMAND_NAMES {
+            assert!(command_named(name).is_some(), "{name}");
+        }
+        let mut seen = std::collections::HashSet::new();
+        assert!(
+            COMMAND_NAMES.iter().all(|n| seen.insert(*n)),
+            "no name twice"
+        );
+        for line in USAGE.lines() {
+            let Some(rest) = line.strip_prefix("  ") else {
+                continue;
+            };
+            let word = rest.split_whitespace().next().unwrap_or("");
+            if word.is_empty() || word.starts_with('-') || line.starts_with("   ") {
+                continue;
+            }
+            if command_named(word).is_some() {
+                assert!(
+                    COMMAND_NAMES.contains(&word) || word == "help",
+                    "{word} is in the usage but not listed"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_distance_counts_single_character_edits() {
+        assert_eq!(edit_distance("connect", "connect"), 0);
+        assert_eq!(edit_distance("conect", "connect"), 1);
+        assert_eq!(edit_distance("conenct", "connect"), 2);
+        assert_eq!(edit_distance("", "abc"), 3);
+        assert_eq!(edit_distance("abc", ""), 3);
+        assert_eq!(edit_distance("status", "stauts"), 2);
+    }
+
+    #[test]
+    fn a_clear_typo_names_the_command_it_meant() {
+        for (typed, meant) in [
+            ("conect", "connect"),
+            ("conneect", "connect"),
+            ("sttus", "status"),
+            ("stat", "stats"),
+            ("aprove", "approve"),
+            ("endpoint", "endpoints"),
+            ("profile", "profiles"),
+            ("disconect", "disconnect"),
+            ("STATUS", "status"),
+            ("pendng", "pending"),
+        ] {
+            assert_eq!(did_you_mean(typed), Some(meant), "{typed}");
+        }
+    }
+
+    #[test]
+    fn nothing_is_suggested_when_it_is_far_off_or_not_clear() {
+        for typed in [
+            "frobnicate",
+            "x",
+            "",
+            "launch",
+            "remove",
+            "add",
+            "xyzzy-xyzzy",
+            "staus",
+        ] {
+            assert_eq!(did_you_mean(typed), None, "{typed}");
+        }
+    }
+
+    #[test]
+    fn the_message_names_the_suggestion_and_keeps_the_usage() {
+        let args = vec!["conect".to_string()];
+        let message = parse(&args).unwrap_err();
+        assert!(
+            message.contains("unknown command 'conect'. Did you mean 'connect'?"),
+            "{message}"
+        );
+        assert!(message.contains("usage: dnetctl"), "{message}");
+        let none = parse(&["frobnicate".to_string()]).unwrap_err();
+        assert!(!none.contains("Did you mean"), "{none}");
+    }
+
+    #[test]
+    fn what_was_typed_is_still_shown_safely() {
+        let message = parse(&["con\u{1b}[2Jnect".to_string()]).unwrap_err();
+        assert!(!message.contains('\u{1b}'), "{message:?}");
+    }
 }
 
 #[cfg(test)]
@@ -916,6 +1110,32 @@ mod tests {
             let error = parsed(&args).unwrap_err();
             assert!(error.contains(says), "{args:?}: {error}");
         }
+    }
+
+    #[test]
+    fn the_kill_switch_takes_on_off_or_status_and_the_release_takes_nothing() {
+        assert_eq!(
+            command(&["kill-switch", "on"]),
+            Command::KillSwitch { on: Some(true) }
+        );
+        assert_eq!(
+            command(&["kill-switch", "off"]),
+            Command::KillSwitch { on: Some(false) }
+        );
+        assert_eq!(
+            command(&["kill-switch", "status"]),
+            Command::KillSwitch { on: None }
+        );
+        assert_eq!(command(&["kill-switch"]), Command::KillSwitch { on: None });
+        for bad in [
+            &["kill-switch", "yes"][..],
+            &["kill-switch", "On"],
+            &["kill-switch", "on", "off"],
+            &["guard-release", "now"],
+        ] {
+            assert!(parsed(bad).is_err(), "{bad:?}");
+        }
+        assert_eq!(command(&["guard-release"]), Command::GuardRelease);
     }
 
     #[test]

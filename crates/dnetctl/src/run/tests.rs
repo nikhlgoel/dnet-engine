@@ -220,6 +220,20 @@ impl Service for Stub {
             Request::GetPaths => self.paths.lock().unwrap().clone(),
             Request::GetStats => self.stats.lock().unwrap().clone(),
             Request::GetComponents => self.components.lock().unwrap().clone(),
+            Request::GetGuard => Ok(r#"{"kill_switch":true,"guard_in":false}"#.to_string()),
+            Request::SetKillSwitch { enabled } => self.change.lock().unwrap().clone().map(|()| {
+                if *enabled {
+                    r#"{"kill_switch":true,"saved":true,"guard_in":false,"effect":"The guard goes in at the next connection."}"#
+                        .to_string()
+                } else {
+                    r#"{"kill_switch":false,"saved":true,"guard_in":false,"effect":"The guard is out."}"#
+                        .to_string()
+                }
+            }),
+            Request::ReleaseGuard => self.change.lock().unwrap().clone().map(|()| {
+                r#"{"kill_switch":true,"guard_in":false,"effect":"The guard is out. The kill switch is still on, so the next connection puts it back; turn it off to keep it out."}"#
+                    .to_string()
+            }),
             _ => Ok("{}".to_string()),
         }
     }
@@ -1450,6 +1464,77 @@ async fn blocking_and_allowing_encrypted_dns_say_what_each_means() {
         "allowing must show what it costs: {}",
         shown.out()
     );
+}
+
+// ------------------------------------------------------------------ the kill switch (T161)
+
+#[tokio::test(start_paused = true)]
+async fn the_kill_switch_commands_say_what_the_service_did() {
+    let stub = Stub::new(vec![]);
+
+    let (code, shown) = go(&["kill-switch", "status"], &stub).await;
+    assert_eq!(code, exit::OK, "{}", shown.err());
+    assert!(shown.out().contains("on"), "{}", shown.out());
+    assert!(shown.out().contains("No guard is in"), "{}", shown.out());
+
+    let (code, shown) = go(&["kill-switch", "on"], &stub).await;
+    assert_eq!(code, exit::OK, "{}", shown.err());
+    assert!(shown.out().contains("next connection"), "{}", shown.out());
+
+    let (code, shown) = go(&["kill-switch", "off"], &stub).await;
+    assert_eq!(code, exit::OK, "{}", shown.err());
+    assert!(shown.out().contains("guard is out"), "{}", shown.out());
+
+    let (code, shown) = go(&["guard-release"], &stub).await;
+    assert_eq!(code, exit::OK, "{}", shown.err());
+    assert!(shown.out().contains("still on"), "{}", shown.out());
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_kill_switch_reports_a_guard_the_firewall_could_not_be_asked_about() {
+    let (code, shown) = go_with(
+        &["kill-switch", "status"],
+        &Scripted(frame::encode(r#"{"kill_switch":true,"guard_in":null}"#).unwrap()),
+        pending(),
+    )
+    .await;
+    assert_eq!(code, exit::OK, "{}", shown.err());
+    assert!(
+        shown.out().contains("could not be asked"),
+        "{}",
+        shown.out()
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_kill_switch_reply_that_is_not_what_was_promised_is_not_reported_as_success() {
+    for (args, reply) in [
+        (vec!["kill-switch", "status"], "{}"),
+        (vec!["kill-switch", "on"], r#"{"kill_switch":true}"#),
+        (vec!["guard-release"], r#"{"guard_in":false}"#),
+    ] {
+        let (code, shown) =
+            go_with(&args, &Scripted(frame::encode(reply).unwrap()), pending()).await;
+        assert_eq!(code, exit::UNEXPECTED, "{args:?}: {}", shown.out());
+        assert!(shown.out().is_empty(), "{}", shown.out());
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_guard_that_will_not_come_out_is_shown_whole_with_what_to_do() {
+    let stub = Stub::new(vec![]);
+    *stub.change.lock().unwrap() = Err(IpcError::InternalError {
+        detail: "the guard could not be taken out: access denied. Run `dnetctl guard-release` from an elevated prompt, or restart the DNet Engine service".into(),
+    });
+    let (code, shown) = go(&["guard-release"], &stub).await;
+    assert_ne!(code, exit::OK);
+    assert!(shown.err().contains("access denied"), "{}", shown.err());
+    assert!(
+        shown.err().contains("restart the DNet Engine service"),
+        "{}",
+        shown.err()
+    );
+    assert!(shown.out().is_empty(), "{}", shown.out());
 }
 
 #[tokio::test(start_paused = true)]

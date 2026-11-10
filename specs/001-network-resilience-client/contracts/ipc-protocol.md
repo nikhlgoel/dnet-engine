@@ -32,8 +32,8 @@ The privilege boundary lives here. `dnet-tray` is unprivileged; `dnetd` is Local
 
 | Class | Requests | Authorization |
 |---|---|---|
-| **Read-only** | `GetVersion`, `GetState`, `GetSession`, `GetPaths`, `GetStats`, `GetComponents`, `ListEndpoints`, `ListProfiles`, `ListRules`, `GetDiagnostics`, `ListPending` | Authenticated caller |
-| **Mutating** | `Connect`, `Disconnect`, `AddEndpoint`, `RemoveEndpoint`, `SetEndpointEnabled`, `AddRule`, `RemoveRule`, `SetProfileParams`, `EnableBrutal`, `DisableBrutal`, `SetEncryptedDnsHandling`, `StartProvisioning`, `CancelProvisioning`, `RejectChange` | Interactive console user |
+| **Read-only** | `GetVersion`, `GetState`, `GetSession`, `GetPaths`, `GetStats`, `GetComponents`, `GetGuard`, `ListEndpoints`, `ListProfiles`, `ListRules`, `GetDiagnostics`, `ListPending` | Authenticated caller |
+| **Mutating** | `Connect`, `Disconnect`, `AddEndpoint`, `RemoveEndpoint`, `SetEndpointEnabled`, `AddRule`, `RemoveRule`, `SetProfileParams`, `EnableBrutal`, `DisableBrutal`, `SetEncryptedDnsHandling`, `SetKillSwitch`, `ReleaseGuard`, `StartProvisioning`, `CancelProvisioning`, `RejectChange` | Interactive console user |
 | **Approval** | `ApproveChange` | An **elevated** client in the console session (any account: a standard user who types an administrator's credentials into the Windows prompt runs the approver as that administrator) |
 | **Stream** | `Subscribe` | Authenticated caller |
 
@@ -221,6 +221,40 @@ that predates it answers `InvalidRequest` "unknown request", which a client show
   as it runs (and again when asked), so `changed_ago_ms` is the real age to within a second, whether or not anyone asked.
   A state that flips and flips back inside one second is not seen.
 
+### The kill switch: `GetGuard`, `SetKillSwitch`, `ReleaseGuard` (T161, IPC-30; ADR-0006 §5a)
+
+The person's choice to keep a firewall guard in while a connection is up, and the way to take it out. All three are
+**additive** (no version bump); a service that predates them answers `InvalidRequest` "unknown request", which a client
+shows as "this service cannot say" and offers nothing for.
+
+```jsonc
+// GetGuard (Read-only)                 -> { "kill_switch": true|false, "guard_in": true|false|null }
+//   guard_in is null when the firewall could not be asked; that is not the same as false.
+// SetKillSwitch { "enabled": bool }    -> { "kill_switch": bool, "saved": bool, "guard_in": bool|null, "effect": "words" }
+//   on: nothing is put in until the next connection (the reply says so, and says when one is up now that it is not covered).
+//   off: a guard that is in comes out at once.  saved:false means the choice stands only until the service stops.
+// ReleaseGuard                         -> { "kill_switch": bool, "guard_in": false, "effect": "words" }
+//   Asks the firewall itself rather than trusting what the service believes is in; leaves the person's choice as it was.
+```
+
+- **When the guard is in.** After the tunnel is up, if the choice is on and the connection can be covered (a session
+  connection with a control port; an AmneziaWG connection cannot yet, and is refused with the reason before anything is
+  started). A guard that cannot be put in stops the tunnel and fails the connection with the reason: a connection without
+  the protection that was asked for is not what the person chose.
+- **When it comes out.** On the person's own `Disconnect`, on `SetKillSwitch { false }`, on `ReleaseGuard`, on
+  uninstall and on recovery. **Not** on a failure, a restart of the tunnel, or the service stopping: those must keep
+  blocking, which is the point of a kill switch.
+- **The way out is never behind anything else.** The three requests are answered before the service takes its domain
+  store, so `ReleaseGuard` neither waits for a slow request nor fails on a store poisoned by a panic elsewhere. It is
+  also exempt from the strict gate that refuses Mutating requests while recovery has failed or the saved configuration is
+  refused (T038): those are the situations in which it is needed. (`SetKillSwitch` meets that gate like any change.) It
+  removes only the guard's own rules, by the provider's key, and removing what is not there is not an error. When the
+  service does not answer at all, `dnetd release-guard` does the same removal from an elevated prompt with no service
+  and no console session. Failure is `InternalError` with words that name both.
+- **Default and damage.** Off until turned on. The choice sits in its own small file beside the configuration; a file
+  that is there but cannot be read, or is not what this build wrote, reads as **on**: protection once asked for is not
+  quietly taken away by a damaged record.
+
 ### Setting up the person's own server (T150, IPC-26)
 
 ```jsonc
@@ -254,8 +288,11 @@ that is waiting, or it is refused. `FinishServer` is idle-only. A build without 
   connection method in `credentials` carries its own server port, and a second answer would only
   disagree with the first.
 - **Checked by the rules the saved configuration applies.** `label` is 1 to 64 printable ASCII
-  characters. `host` is an IP address or a host name (no scheme, port, path or userinfo; not an
-  unspecified or multicast address). `credentials` is the stored form of a credential set, with at
+  characters. `host` is an IPv4 address, never a host name and not yet an IPv6 address: what the connection refuses (`plan`) is
+  refused when the server is added, not at the first connect. A name would be looked up on the network the computer
+  is on, before the tunnel exists, and that network could answer with an address of its own. A saved file from
+  before may still hold either; it loads, and the connect refuses it with its own reason. Not an unspecified,
+  multicast or broadcast address. `credentials` is the stored form of a credential set, with at
   least one connection method. A request that passes can always be saved.
 - **Errors never repeat what the client sent**: not a label, a host, a credential, nor the name of an
   unknown field. They name the field at fault, or list the fields the request takes.
@@ -371,11 +408,49 @@ are compiled in, and a request that names a place is refused.
   no more than 256 KiB; then the same verification and trial generation as an import.
 - A build with no trust anchor answers `InternalError` "not available in this build yet".
 
+### Sharing a server: a friend's device joins (T188, IPC-29; ADR-0008 "Share a server")
+
+Four requests, in the order a friend and an owner use them. The private key of a device is made on that device
+and never leaves it: the invite carries the server's access details and the public half of the friend's key.
+
+```jsonc
+// On the friend's computer:
+{ "request": "RequestJoin", "name": "Ravi laptop" }
+   // -> { "name": "...", "text": "DNET-DEVICE-REQUEST {...}", "valid_for_s": 21600 }      (public material only)
+// On the owner's computer, with the text the friend sent:
+{ "request": "PrepareDevice", "endpoint": "<uuid>", "text": "<the friend's text>" }
+   // -> { "name": "...", "script": "<text for the server>", "valid_for_s": 21600 }
+{ "request": "FinishDevice", "endpoint": "<uuid>", "text": "<the friend's text>", "report": "<what the script printed>" }
+   // -> { "name": "...", "address": "10.9.0.3", "invite": "DNET-INVITE ..." }
+// Back on the friend's computer:
+{ "request": "AcceptInvite", "invite": "<the invite>", "label": "optional name for the server" }
+   // -> { "endpoint": "<uuid>" }
+```
+
+- All four are Mutating, strict (an unknown field is refused) and bounded. `name` is 1 to 32 letters, digits, spaces,
+  dots, dashes or underscores. `text` and `invite` are pasted text of up to 16 KiB, with no control character except
+  line breaks and tabs; `report` follows the rule of `FinishServer`'s. `label` follows the rules of `AddEndpoint`. A
+  `endpoint` that is not a real id is refused.
+- **Nothing a person pasted is repeated in an error**, and every reply is read by the window as untrusted input: a
+  reply that is not what was promised (a missing or empty field, a text of the wrong kind, one past its limit) is
+  refused, not shown.
+- **A waiting request is bound to what it was made for.** `RequestJoin` keeps the private key in memory only, for 6
+  hours, and `AcceptInvite` is refused unless the invite names *this* device's public key. `PrepareDevice` refuses a
+  server that has no private session of its own, and keeps at most 8 prepared requests. `FinishDevice` makes an invite
+  only for a request the service prepared, for the server it was prepared for, and only if the server key and port in
+  the result are the ones the service already holds. A paste that fails keeps waiting, so it can be pasted again; a
+  success consumes it.
+- **Held for approval** (see the next section): `FinishDevice` and `AcceptInvite`. What waits is shown to the person
+  who approves it ("Making an invite for the device ... on the server ..."; "Adding the server ... at ... from a
+  friend's invite"). An approved invite waits 10 minutes to be asked for, once, and is then dropped.
+- `AcceptInvite` is idle-only, like `AddEndpoint`. A build without the configurator answers `InternalError` ("not
+  available in this build").
+
 ### Changes held for approval (T160, IPC-27; ADR-0008 F13)
 
 A request that changes where traffic goes is **held**, not applied, until an elevated client approves it:
-`AddEndpoint`, `FinishServer`, `SetEndpointEnabled` with `enabled: true`, `AddRule` with `action: "bypass"` and
-`ImportFeed`. Everything that can only tighten the connection (removing or turning off a server, a rule that
+`AddEndpoint`, `FinishServer`, `FinishDevice`, `AcceptInvite`, `SetEndpointEnabled` with `enabled: true`,
+`AddRule` with `action: "bypass"` and `ImportFeed`. Everything that can only tighten the connection (removing or turning off a server, a rule that
 tunnels, captures or rejects, the encrypted-DNS choice, Brutal) is applied as before. The refusal is the error
 `ApprovalRequired`; **nothing was applied**:
 
@@ -532,3 +607,5 @@ defect.
 | IPC-15 | `GetVersion` is answered by the dispatch itself for any authenticated caller, never reaches the service, and tells an unauthenticated caller nothing; the reply has exactly the contracted keys; a client refuses a reply that is malformed, out of range, or from a service that predates the request. |
 | IPC-27 | The three new requests have the classes the design gives them; the console user **without** elevation cannot approve and the service is never asked; an elevated client in the console session can, whatever its account; an elevated client in another session cannot; withdrawing and listing need no elevation; ids that are not short plain names, and any extra field, are refused; the held reply names what waits, the change id and the command that approves it. (daemon) a held change is not applied or saved, approving applies exactly it once, a withdrawn one never applies, the same change twice is one change, tightening changes are not held, at most eight wait, the list shows no credential, and a change applying would refuse now (a name in use, a result that does not match, a program rule, a build without the configurator or the setup) is refused with that reason and not held. |
 | IPC-28 | `GetComponents` is Read-only and round-trips (every request does); the reply round-trips and an age never goes negative; hostile characters are removed on both ends and a reason is never cut; an unknown kind or state, an empty or over-long id, an over-long reason, a negative age, a loss above 100%, a restart count out of range, a duplicate part and more than 128 parts are each refused; the largest possible reply is far below a frame. (daemon) the reply is one a client can read; nothing connected reads as Off; asking again changes nothing; a state that holds keeps its age and a state that changes restarts it; no endpoint label and no network name reaches a reading; no reason the service can write is longer than a client accepts. (`dnetctl`) the parts are shown with state, age and reason, `--json` is the service's own answer, an old service is told apart from an empty answer, and an unreadable answer is not shown. |
+| IPC-29 | The four sharing requests (`RequestJoin`, `PrepareDevice`, `FinishDevice`, `AcceptInvite`) are Mutating, round-trip, take exactly their fields and no other, and refuse a name that is not plain, a server that is not a real id, and pasted text that is empty, too long or has control characters, never repeating what was sent; their replies round-trip and a reply that is not what was promised is refused. (daemon) a request is bound to the key made for it; an invite for another device is refused; a result for a request that was not prepared, another server, or another server key or port is refused; a failed paste keeps waiting and a success consumes it; at most 8 are prepared; `FinishDevice` and `AcceptInvite` are held for approval and show what they do. (The tests of the wire form are named `ipc_27_*` in `crates/dnet-ipc/tests/devices.rs`, from before IPC-27 was taken by approvals.) |
+| IPC-30 | `GetGuard` is Read-only; `SetKillSwitch` and `ReleaseGuard` are Mutating; all three round-trip, take exactly their fields (`enabled` is a boolean and nothing else), and an unknown field or a missing or non-boolean `enabled` is refused with the field named. The service: with nothing attached all three answer "not available"; off and out until turned on; on waits for the next connection and says so; off takes a guard that is in out and touches the firewall for nothing else; a guard that will not come out is an error naming `dnetctl guard-release` and the choice still stands; `ReleaseGuard` works while recovery has failed or the configuration is refused and leaves the choice as it was; an unsaved choice is said to be unsaved. The orchestrator releases after the stop on the person's disconnect and never on a failure or on shutdown. `dnet-view` reads each reply strictly (an answer to the other question is not a yes; the service's own words are shown whole), against the service's real replies |
