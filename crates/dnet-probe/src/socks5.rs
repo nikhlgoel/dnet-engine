@@ -354,11 +354,16 @@ mod tests {
 
     #[tokio::test]
     async fn a_proxy_that_is_not_listening_is_reported_without_hanging() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        drop(listener);
+        // Bound but never listening: connections are refused, and no parallel test can be handed the port the way it
+        // could after closing a listener (the same race made a test in `dnetd` flaky on Linux).
+        let reserved = tokio::net::TcpSocket::new_v4().unwrap();
+        reserved
+            .bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+            .unwrap();
+        let addr = reserved.local_addr().unwrap();
         let err = connect(addr, "example.com", 80, T, None).await.unwrap_err();
         assert!(matches!(err, SocksError::Proxy(_)), "{err:?}");
+        drop(reserved);
     }
 
     fn creds() -> Credentials {

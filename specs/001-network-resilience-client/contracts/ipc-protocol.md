@@ -242,8 +242,11 @@ shows as "this service cannot say" and offers nothing for.
   started). A guard that cannot be put in stops the tunnel and fails the connection with the reason: a connection without
   the protection that was asked for is not what the person chose.
 - **When it comes out.** On the person's own `Disconnect`, on `SetKillSwitch { false }`, on `ReleaseGuard`, on
-  uninstall and on recovery. **Not** on a failure, a restart of the tunnel, or the service stopping: those must keep
-  blocking, which is the point of a kill switch.
+  `dnetd release-guard`, on uninstall, and on a start-up recovery **while the switch is off**. **Not** on a failure, a
+  restart of the tunnel, the service stopping, **or a start-up recovery while the switch is on**: a crash or a reboot
+  must not hand the traffic back, which is the point of a kill switch. Recovery then reverses every other leftover change
+  as ever (and still fails if one cannot be reversed), keeps the guard in the firewall and on the journal, and the
+  service's own connection logic replaces it when the connection is back.
 - **The way out is never behind anything else.** The three requests are answered before the service takes its domain
   store, so `ReleaseGuard` neither waits for a slow request nor fails on a store poisoned by a panic elsewhere. It is
   also exempt from the strict gate that refuses Mutating requests while recovery has failed or the saved configuration is

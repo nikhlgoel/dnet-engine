@@ -35,10 +35,11 @@ that does less.
 - **It does not make you anonymous.** Your traffic is encrypted between your computer and your own
   endpoint, and then it leaves that endpoint. The operator of the endpoint (you) and the operator of
   the network the endpoint sits on can see what any ordinary server operator sees.
-- **The kill switch is a decision, not yet a guarantee.** The service decides that traffic must not
-  leave unprotected (it has no "send it direct" fallback), but nothing at the operating-system level
-  enforces that yet. Until it does, a crash or a stopped service is not a promise that nothing leaves
-  the machine unprotected.
+- **The kill switch is optional and not yet a guarantee.** The service has no "send it direct"
+  fallback, and a firewall guard that keeps traffic inside the tunnel can be turned on (it is off by
+  default). It has been checked in a lab virtual machine and not on a real network, it survives a
+  restart of the service until the connection is back or you take it out, and one connection method is
+  not covered yet, so it is not yet a promise that nothing leaves the machine unprotected.
 - **Per-application rules are best-effort.** Rules by destination name or address are reliable.
   Rules by application depend on identifying the program at the moment it connects, which can miss
   short-lived connections. They are labelled best-effort wherever they appear.
@@ -76,7 +77,7 @@ network and, where it says so, a clean Windows machine; it never means a live ne
 | Rules by program | Designed and partly built; not connected to the service |
 | Windows installer | Builds (about 15 MB), and was installed, checked and uninstalled on a clean Windows machine in the release build: the service runs as the system account, starts by itself and is restarted after a crash, ordinary users cannot change its folders, and the network is exactly as before after the uninstall. It has also been installed and run on a real Windows 11 computer. |
 | Release signing | Releases are signed with the project's own key and attested; Windows does not trust that key, so it will say "unknown publisher". See [`docs/release-signing.md`](docs/release-signing.md) for what that does and does not give |
-| Keeping traffic in the tunnel at the operating-system level (the kill switch) | Decided, not built; today it is the service's own decision and nothing in Windows enforces it |
+| Keeping traffic in the tunnel at the operating-system level (the kill switch) | Built, off by default, and checked in a lab virtual machine; not tried on a real network, and one connection method is not covered yet |
 
 [`specs/001-network-resilience-client/tasks.md`](specs/001-network-resilience-client/tasks.md) is the
 authoritative, dated delivery status.

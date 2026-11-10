@@ -24,6 +24,26 @@ pub trait GuardControl: Send + Sync + 'static {
     fn is_in(&self) -> Result<bool, String>;
 }
 
+/// The undo registry the guard's door works through: the recovered one when start-up recovery succeeded, and a fresh
+/// in-memory one when it failed. A failed recovery stops the service connecting, but a guard may be in the firewall (it
+/// is kept across a restart on purpose), and taking it out needs only the removal by the provider's key, which uses no
+/// journal. Without this the one way out that a failed recovery leaves open would answer "not available" exactly when
+/// it is needed (T161 review, high 1).
+#[cfg_attr(not(windows), allow(dead_code))] // Called by the Windows service; tested everywhere.
+pub fn registry_for(
+    recovery: &Result<crate::recovery::Recovered, crate::recovery::RecoveryError>,
+) -> std::sync::Arc<dnet_netstate::undo::UndoRegistry> {
+    match recovery {
+        Ok(recovered) => std::sync::Arc::clone(recovered.undo()),
+        Err(_) => std::sync::Arc::new(
+            dnet_netstate::undo::UndoRegistry::open(Box::new(
+                dnet_netstate::undo::MemoryStore::new(),
+            ))
+            .expect("an empty in-memory journal opens"),
+        ),
+    }
+}
+
 /// What the connection engine needs to honour the person's kill-switch choice: the choice itself, shared with the
 /// service that changes it, and the door to the firewall.
 #[derive(Clone)]
@@ -276,6 +296,25 @@ mod tests {
     }
 
     #[test]
+    fn the_door_has_a_registry_even_when_recovery_failed() {
+        use crate::recovery::{Recovered, RecoveryError};
+
+        let good = Ok(Recovered::clean_for_tests());
+        let shared = registry_for(&good);
+        assert!(std::sync::Arc::ptr_eq(
+            &shared,
+            good.as_ref().unwrap().undo()
+        ));
+
+        let failed = Err(RecoveryError::Unrestored {
+            remaining: 1,
+            first: "access denied".into(),
+        });
+        let fresh = registry_for(&failed);
+        assert!(fresh.outstanding().is_empty());
+    }
+
+    #[test]
     fn nothing_is_put_in_unless_the_person_asked() {
         for (awg, port) in [(false, Some(1)), (true, Some(1)), (false, None)] {
             assert_eq!(coverage(false, awg, port), Coverage::NotWanted);
@@ -303,5 +342,53 @@ mod tests {
                 other => panic!("{awg} {port:?}: {other:?}"),
             }
         }
+    }
+}
+
+/// The real guard against the real firewall. **It changes the firewall**, so it never runs by default and never on a
+/// person's own computer: only in the lab VM (`testing/vm`), as an elevated run of the ignored tests (ADR-0006 §5a
+/// condition 5). It exists because the unit tests above use a fake, and the mutation run showed that nothing else would
+/// notice if the real methods did nothing (`engage`, `release` and `is_in` replaced by a constant all survived).
+#[cfg(all(test, windows))]
+mod real_firewall {
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use dnet_netstate::undo::{MemoryStore, UndoRegistry};
+
+    use super::*;
+
+    /// Takes the guard out however the test ends, so a failed assertion cannot leave a computer blocked.
+    struct Cleanup(WindowsGuard);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = self.0.release();
+        }
+    }
+
+    #[test]
+    #[ignore = "changes the firewall: elevated, in the lab VM only, never on a real computer"]
+    fn the_real_guard_goes_in_reads_as_in_and_comes_out() {
+        let undo = Arc::new(UndoRegistry::open(Box::new(MemoryStore::new())).unwrap());
+        let guard = Cleanup(WindowsGuard::new(undo));
+        guard.0.release().unwrap();
+        assert!(!guard.0.is_in().unwrap(), "the lab starts without a guard");
+
+        // Two programs that exist, at full local paths, and a tunnel adapter number that is only a number here.
+        let service = std::env::current_exe().unwrap();
+        let core = Path::new(r"C:\Windows\System32\cmd.exe");
+        let plan = plan_for(core, &service, 34_567, 0x0006_0000_0000_0001);
+
+        let rules = guard.0.engage(&plan).unwrap();
+        assert!(rules > 0, "the firewall holds the rules the plan makes");
+        assert!(guard.0.is_in().unwrap(), "a guard that went in reads as in");
+
+        guard.0.release().unwrap();
+        assert!(
+            !guard.0.is_in().unwrap(),
+            "after the release nothing of it is left"
+        );
+        // Taking out what is not there is not an error.
+        guard.0.release().unwrap();
     }
 }

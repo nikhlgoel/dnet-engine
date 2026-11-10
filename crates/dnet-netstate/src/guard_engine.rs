@@ -26,18 +26,18 @@ use windows::Win32::Foundation::{LocalFree, HANDLE, HLOCAL};
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FwpmEngineClose0, FwpmEngineOpen0, FwpmFilterAdd0, FwpmFilterCreateEnumHandle0,
     FwpmFilterDeleteById0, FwpmFilterDestroyEnumHandle0, FwpmFilterEnum0, FwpmFreeMemory0,
-    FwpmGetAppIdFromFileName0, FwpmProviderAdd0, FwpmProviderDeleteByKey0, FwpmProviderGetByKey0,
-    FwpmSubLayerAdd0, FwpmSubLayerDeleteByKey0, FwpmTransactionAbort0, FwpmTransactionBegin0,
-    FwpmTransactionCommit0, FWPM_CONDITION_ALE_APP_ID, FWPM_CONDITION_ALE_USER_ID,
-    FWPM_CONDITION_FLAGS, FWPM_CONDITION_IP_LOCAL_INTERFACE, FWPM_CONDITION_IP_LOCAL_PORT,
-    FWPM_CONDITION_IP_PROTOCOL, FWPM_CONDITION_IP_REMOTE_ADDRESS, FWPM_CONDITION_IP_REMOTE_PORT,
-    FWPM_FILTER0, FWPM_FILTER_CONDITION0, FWPM_FILTER_FLAG_PERSISTENT,
-    FWPM_LAYER_ALE_AUTH_CONNECT_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V6,
-    FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6, FWPM_PROVIDER0,
-    FWPM_PROVIDER_FLAG_PERSISTENT, FWPM_SUBLAYER0, FWPM_SUBLAYER_FLAG_PERSISTENT, FWP_ACTION_BLOCK,
-    FWP_ACTION_PERMIT, FWP_BYTE_BLOB, FWP_BYTE_BLOB_TYPE, FWP_CONDITION_FLAG_IS_LOOPBACK,
-    FWP_CONDITION_VALUE0, FWP_CONDITION_VALUE0_0, FWP_MATCH_EQUAL, FWP_MATCH_FLAGS_ALL_SET,
-    FWP_MATCH_TYPE, FWP_SECURITY_DESCRIPTOR_TYPE, FWP_UINT16, FWP_UINT32, FWP_UINT64, FWP_UINT8,
+    FwpmGetAppIdFromFileName0, FwpmProviderAdd0, FwpmProviderDeleteByKey0, FwpmSubLayerAdd0,
+    FwpmSubLayerDeleteByKey0, FwpmTransactionAbort0, FwpmTransactionBegin0, FwpmTransactionCommit0,
+    FWPM_CONDITION_ALE_APP_ID, FWPM_CONDITION_ALE_USER_ID, FWPM_CONDITION_FLAGS,
+    FWPM_CONDITION_IP_LOCAL_INTERFACE, FWPM_CONDITION_IP_LOCAL_PORT, FWPM_CONDITION_IP_PROTOCOL,
+    FWPM_CONDITION_IP_REMOTE_ADDRESS, FWPM_CONDITION_IP_REMOTE_PORT, FWPM_FILTER0,
+    FWPM_FILTER_CONDITION0, FWPM_FILTER_FLAG_PERSISTENT, FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+    FWPM_LAYER_ALE_AUTH_CONNECT_V6, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
+    FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6, FWPM_PROVIDER0, FWPM_PROVIDER_FLAG_PERSISTENT,
+    FWPM_SUBLAYER0, FWPM_SUBLAYER_FLAG_PERSISTENT, FWP_ACTION_BLOCK, FWP_ACTION_PERMIT,
+    FWP_BYTE_BLOB, FWP_BYTE_BLOB_TYPE, FWP_CONDITION_FLAG_IS_LOOPBACK, FWP_CONDITION_VALUE0,
+    FWP_CONDITION_VALUE0_0, FWP_MATCH_EQUAL, FWP_MATCH_FLAGS_ALL_SET, FWP_MATCH_TYPE,
+    FWP_SECURITY_DESCRIPTOR_TYPE, FWP_UINT16, FWP_UINT32, FWP_UINT64, FWP_UINT8,
     FWP_V4_ADDR_AND_MASK, FWP_V4_ADDR_MASK, FWP_V6_ADDR_AND_MASK, FWP_V6_ADDR_MASK, FWP_VALUE0,
     FWP_VALUE0_0,
 };
@@ -61,6 +61,7 @@ use crate::guard_wfp::{
 };
 
 /// The engine's "already exists" and "not found" answers, and the two that mean "try again".
+const FWP_E_ALREADY_EXISTS: u32 = 0x8032_0009;
 const FWP_E_IN_USE: u32 = 0x8032_000A;
 const FWP_E_NOT_FOUND: u32 = 0x8032_0008;
 const FWP_E_PROVIDER_NOT_FOUND: u32 = 0x8032_0005;
@@ -103,6 +104,18 @@ fn check(call: &'static str, code: u32) -> Result<(), EngineError> {
         Ok(())
     } else {
         Err(EngineError::Call { call, code })
+    }
+}
+
+/// Like [`check`], but an object that is already there is fine: when something that is not ours still sits in our
+/// sublayer, the removal leaves the (empty) sublayer and provider behind, and the next guard must go in under them
+/// rather than fail for ever because they exist (review 2026-11-10). The keys are fixed and ours; the filters, which
+/// are what block, are always made fresh.
+fn exists_is_fine(call: &'static str, code: u32) -> Result<(), EngineError> {
+    if code == FWP_E_ALREADY_EXISTS {
+        Ok(())
+    } else {
+        check(call, code)
     }
 }
 
@@ -212,26 +225,13 @@ impl Engine {
         }))
     }
 
-    /// Whether the guard's provider is in the firewall.
+    /// Whether any filter of the guard is in the firewall. It is the filters that block, not the provider or the
+    /// sublayer they hang from: when something that is not ours sits in our sublayer, a removal leaves the empty
+    /// sublayer and provider behind (they are in use), and that is not a guard (review 2026-11-10).
     pub fn is_installed(&self) -> Result<bool, EngineError> {
-        let key = to_guid(PROVIDER_KEY);
-        let mut provider: *mut FWPM_PROVIDER0 = ptr::null_mut();
-        // SAFETY: `key` and `provider` are valid for the call; a result is freed below.
-        let code = unsafe { FwpmProviderGetByKey0(self.0, &key, &mut provider) };
-        if code == 0 {
-            // SAFETY: the engine allocated `provider`, and it is freed once.
-            unsafe {
-                FwpmFreeMemory0(&mut provider as *mut *mut FWPM_PROVIDER0 as *mut *mut c_void)
-            };
-            return Ok(true);
-        }
-        if matches!(code, FWP_E_PROVIDER_NOT_FOUND | FWP_E_NOT_FOUND) {
-            return Ok(false);
-        }
-        Err(EngineError::Call {
-            call: "FwpmProviderGetByKey0",
-            code,
-        })
+        let mut any = false;
+        self.each_ours(|_| any = true)?;
+        Ok(any)
     }
 
     /// Replace the guard with `filters`, all or nothing.
@@ -316,7 +316,7 @@ impl Engine {
             serviceName: PWSTR(service.as_mut_ptr()),
         };
         // SAFETY: `provider` and the strings it points at live across the call; no security descriptor is given.
-        check("FwpmProviderAdd0", unsafe {
+        exists_is_fine("FwpmProviderAdd0", unsafe {
             FwpmProviderAdd0(self.0, &provider, PSECURITY_DESCRIPTOR::default())
         })
     }
@@ -337,7 +337,7 @@ impl Engine {
             weight: SUBLAYER_WEIGHT,
         };
         // SAFETY: as for the provider; `provider` outlives the call.
-        check("FwpmSubLayerAdd0", unsafe {
+        exists_is_fine("FwpmSubLayerAdd0", unsafe {
             FwpmSubLayerAdd0(self.0, &sublayer, PSECURITY_DESCRIPTOR::default())
         })
     }
@@ -404,6 +404,36 @@ impl Engine {
     /// Visit each filter whose provider is ours, once, while the engine's block is still alive.
     fn each_ours(&self, mut visit: impl FnMut(&FWPM_FILTER0)) -> Result<(), EngineError> {
         let ours = to_guid(PROVIDER_KEY);
+        self.each_filter(|filter| {
+            // SAFETY: a non-null provider key points at a GUID the engine owns for as long as the block lives.
+            let is_ours = !filter.providerKey.is_null() && unsafe { *filter.providerKey } == ours;
+            if is_ours {
+                visit(filter);
+            }
+        })
+    }
+
+    /// How many filters that are **not ours** sit in the guard's sublayer. Our block has the lowest weight there is,
+    /// so a permit of another provider in the same sublayer ties with it and can win: only an administrator can put
+    /// one there, but a guard that reads back as verified while one is present would overstate its protection
+    /// (found in the lab, review 2026-11-10). Nothing of a foreign filter is read except where it sits.
+    pub fn foreign_in_our_sublayer(&self) -> Result<usize, EngineError> {
+        let provider = to_guid(PROVIDER_KEY);
+        let sublayer = to_guid(SUBLAYER_KEY);
+        let mut found = 0usize;
+        self.each_filter(|filter| {
+            // SAFETY: a non-null provider key points at a GUID the engine owns for as long as the block lives.
+            let is_ours =
+                !filter.providerKey.is_null() && unsafe { *filter.providerKey } == provider;
+            if !is_ours && filter.subLayerKey == sublayer {
+                found += 1;
+            }
+        })?;
+        Ok(found)
+    }
+
+    /// Visit every filter the engine holds, once, while the engine's block is still alive.
+    fn each_filter(&self, mut visit: impl FnMut(&FWPM_FILTER0)) -> Result<(), EngineError> {
         let mut handle = HANDLE::default();
         // SAFETY: no template lists everything; `handle` is a valid place for the result.
         check("FwpmFilterCreateEnumHandle0", unsafe {
@@ -425,13 +455,7 @@ impl Engine {
             if !entries.is_null() {
                 for i in 0..count as usize {
                     // SAFETY: the engine returned `count` valid pointers; each is read before the block is freed.
-                    let filter = unsafe { &**entries.add(i) };
-                    // SAFETY: a non-null provider key points at a GUID the engine owns for as long as the block lives.
-                    let is_ours =
-                        !filter.providerKey.is_null() && unsafe { *filter.providerKey } == ours;
-                    if is_ours {
-                        visit(filter);
-                    }
+                    visit(unsafe { &**entries.add(i) });
                 }
                 // SAFETY: the block the engine allocated, freed once (also when it held no entries).
                 unsafe {
@@ -1048,6 +1072,13 @@ pub fn install_guard(
                 }
             }
             problems.extend(dnet_core::guard::verify(plan, &installed));
+            match engine.foreign_in_our_sublayer() {
+                Ok(0) => {}
+                Ok(n) => problems.push(format!(
+                    "{n} filter(s) that are not the guard's sit in the guard's sublayer and can override its block"
+                )),
+                Err(e) => problems.push(e.to_string()),
+            }
             problems
         }
         Err(e) => vec![e.to_string()],

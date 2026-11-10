@@ -78,6 +78,30 @@ Guest 'C:\lab\bin\guard_lab.exe remove' | Out-Null
 Record 'R removed: the provider is gone' ((Guest 'C:\lab\bin\guard_lab.exe status') -match 'not installed') ''
 Record 'R removed: an outside address is reachable again' (Outside-Reachable) "to $Outside:443"
 
+# --------------------------------------------------------------------------------------------- F, something that is not ours
+# A filter of another provider sits in the guard's sublayer. The block has the lowest weight there is, so such a permit
+# ties with it and can override it (observed in this lab: an outside address became reachable). That is why the
+# read-back reports it and a guard is not installed under it. And it must not stop the guard coming out: the sublayer
+# and provider are then "in use" and stay as empty shells; traffic must flow again, the shells are not a guard, and a
+# new guard must be able to go in under them once the foreign filter is gone (T161 review, finding 2).
+Guest "C:\lab\bin\guard_lab.exe install $planArgs" | Out-Null
+Guest 'C:\lab\bin\guard_lab.exe plant-foreign' | Out-Null
+# guard_lab prints a failure on stdout (the lab script stops on any stderr), so a command that is meant to fail is read here.
+$verifyForeign = Guest "C:\lab\bin\guard_lab.exe verify $planArgs"
+Record 'F the read-back reports a filter that is not the guard''s in its sublayer' ($verifyForeign -match 'not the guard') ($verifyForeign -split "`n" | Select-Object -Last 1)
+$removed = Guest 'C:\lab\bin\guard_lab.exe remove'
+Record 'F removal succeeds although the sublayer is in use' ($removed -match 'removed') ($removed -replace "`n", ' ')
+Record 'F after it, no guard is reported (the empty shells are not a guard)' ((Guest 'C:\lab\bin\guard_lab.exe status') -match 'not installed') ''
+Record 'F after it, an outside address is reachable again' (Outside-Reachable) "to $Outside:443"
+$refused = Guest "C:\lab\bin\guard_lab.exe install $planArgs"
+Record 'F a guard is not installed under a filter that could override it' (($refused -match 'not the guard') -and ($refused -notmatch 'read back and verified')) ($refused -replace "`n", ' | ')
+Record 'F and nothing is left blocking after that refusal' (Outside-Reachable) "to $Outside:443"
+Guest 'C:\lab\bin\guard_lab.exe unplant-foreign' | Out-Null
+$again = Guest "C:\lab\bin\guard_lab.exe install $planArgs"
+Record 'F with the foreign filter gone, a guard goes in under the shells and reads back as planned' ($again -match 'read back and verified') ($again -replace "`n", ' | ')
+Guest 'C:\lab\bin\guard_lab.exe remove' | Out-Null
+Record 'F cleaned up: no guard' ((Guest 'C:\lab\bin\guard_lab.exe status') -match 'not installed') ''
+
 $failed = @($Results | Where-Object { -not $_.Pass }).Count
 Write-Host ''
 Write-Host ("{0} checks, {1} failed" -f $Results.Count, $failed)

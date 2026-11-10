@@ -656,8 +656,9 @@ impl DnetService {
             ConfigStore::new(Box::new(TrustedStateFile::new(default_config_path()))),
             Arc::new(machine_secret_store(default_secrets_dir())),
         );
-        // The firewall guard's undo record lives in the same journal as every other network change.
-        let undo = recovery.as_ref().ok().map(|r| Arc::clone(r.undo()));
+        // The firewall guard's undo record lives in the same journal as every other network change. When recovery
+        // failed there is no recovered journal, and the guard's door is wired all the same (see `registry_for`).
+        let undo = crate::guard_control::registry_for(&recovery);
         let service = Self::new(
             state,
             Box::new(crate::console::active_console_session),
@@ -672,15 +673,12 @@ impl DnetService {
 
         // The kill switch (T161): the person's choice sits beside the configuration, and the guard goes into the
         // firewall through the same journal as every other change. Without a journal there is no guard.
-        let service = match undo {
-            Some(undo) => service.with_kill_switch(
-                crate::killswitch::KillSwitch::new(Box::new(TrustedStateFile::new(
-                    default_config_path().with_file_name("kill-switch.json"),
-                ))),
-                Arc::new(crate::guard_control::WindowsGuard::new(undo)),
-            ),
-            None => service,
-        };
+        let service = service.with_kill_switch(
+            crate::killswitch::KillSwitch::new(Box::new(TrustedStateFile::new(
+                default_config_path().with_file_name("kill-switch.json"),
+            ))),
+            Arc::new(crate::guard_control::WindowsGuard::new(undo)),
+        );
 
         // The server downloads this release carries, beside the service in the folder only administrators
         // can change (T150). Absent or unreadable, setting up a server answers that it is not available.
@@ -2799,6 +2797,33 @@ mod tests {
                 first: "access denied".into(),
             }),
         )
+    }
+
+    /// A guard is kept across a restart on purpose, and a failed recovery stops the service connecting: the way out
+    /// must still answer, or the machine has a guard and no network and no working door (T161 review, high 1).
+    #[test]
+    fn after_a_failed_recovery_the_guard_can_still_be_read_and_taken_out() {
+        let guard = Arc::new(crate::guard_control::fake::FakeGuard::default());
+        *guard.is_in.lock().unwrap() = true;
+        let svc = unrecovered_service().with_kill_switch(
+            crate::killswitch::KillSwitch::new(Box::new(MemoryStateFile::with_bytes(Some(
+                br#"{"version":1,"enabled":true}"#.to_vec(),
+            )))),
+            Arc::clone(&guard) as Arc<dyn crate::guard_control::GuardControl>,
+        );
+        let state = json_of(svc.dispatch(&Request::GetGuard));
+        assert_eq!(state["guard_in"], true);
+        assert_eq!(state["kill_switch"], true);
+        let out = json_of(svc.dispatch(&Request::ReleaseGuard));
+        assert_eq!(out["guard_in"], false);
+        assert_eq!(guard.calls(), ["release"]);
+        // Changing the choice is a change like any other and is refused with the reason.
+        match svc.dispatch(&Request::SetKillSwitch { enabled: false }) {
+            Err(IpcError::InternalError { detail }) => {
+                assert!(detail.contains("access denied"), "{detail}")
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

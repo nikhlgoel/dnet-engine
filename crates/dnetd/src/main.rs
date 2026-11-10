@@ -184,7 +184,7 @@ pub(crate) async fn shutdown_orchestrator(handle: Option<orchestrator::Handle>) 
 /// connects.
 #[cfg(windows)]
 pub(crate) fn build_service() -> std::sync::Arc<service_impl::DnetService> {
-    let recovery = recovery::recover_installation();
+    let recovery = recovery::recover_for_service();
     let service = service_impl::DnetService::production(recovery).with_production_orchestrator();
     // Left on before this start (a reboot, an update, a crash): connect again (T147). Only after
     // recovery, and only through an orchestrator that recovery allowed to exist.

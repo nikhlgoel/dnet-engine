@@ -76,8 +76,9 @@ mod tests {
 
     // ------------------------------------------------------------------ the installer
 
-    /// The installer is written (configuration, hooks, manifests, a release workflow) and has not been built
-    /// or run on Windows. The page must say neither "not built" nor that there is nothing.
+    /// The installer is built, signed with the project's own key, and has been installed and removed on a clean
+    /// Windows machine and on one real computer (T114's record). The page must say that, and neither "not built" nor
+    /// that there is nothing.
     #[test]
     fn the_installer_is_described_as_what_it_is() {
         for file in [
@@ -97,8 +98,23 @@ mod tests {
             !page.contains("Installer Not built"),
             "an installer is written"
         );
+        // What the sentence rests on: the signing scripts and the install test exist, and the task list records the run.
+        for file in ["installer/Sign-Files.ps1", "testing/Invoke-InstallTest.ps1"] {
+            assert!(root().join(file).is_file(), "{file}");
+        }
+        let tasks = read("specs/001-network-resilience-client/tasks.md");
         assert!(
-            page.contains("Installer written; not yet built or run on Windows"),
+            tasks.contains(
+                "Install, signing and the release pipeline proven on a clean Windows machine"
+            ),
+            "the record of the run that the page's sentence rests on"
+        );
+        assert!(
+            !page.contains("not yet built or run on Windows"),
+            "the installer has been built and run"
+        );
+        assert!(
+            page.contains("Installer built and signed with the project&rsquo;s own key; installed and removed on a clean Windows machine and on one real computer"),
             "the page must say what is true of the installer"
         );
     }
@@ -189,10 +205,40 @@ mod tests {
             );
         }
 
-        // The kill switch: the operating-system guard is not built, and its task is still open.
+        // The kill switch. While the service does not put the guard in, the page says it is not built; once it does
+        // (`engage_guard` in the effects, and the person's choice in `killswitch.rs`), it says what is true of that:
+        // optional, off by default, tried in a lab and not on a real network. While the task is open it never claims
+        // more than that.
         let tasks = read("specs/001-network-resilience-client/tasks.md");
         let guard_open = tasks.lines().any(|l| l.starts_with("- [ ] T161 "));
-        if guard_open {
+        let wired = read("crates/dnetd/src/effects.rs").contains("fn engage_guard")
+            && root().join("crates/dnetd/src/killswitch.rs").is_file();
+        if wired {
+            assert!(
+                !page.contains("not built yet"),
+                "the service puts the guard in now"
+            );
+            assert!(page.contains("off by default"), "it is optional");
+            assert!(
+                page.contains("lab virtual machine"),
+                "where it has been tried"
+            );
+            if guard_open {
+                assert!(
+                    page.contains("not yet tried on a real network"),
+                    "the task is open: say what has not been done"
+                );
+            }
+            // Whether the guard survives a restart of the service is a fact about the start-up recovery.
+            let keeps = read("crates/dnetd/src/recovery.rs")
+                .contains("pub fn recover_at_start_keeping_the_guard")
+                && read("crates/dnetd/src/main.rs").contains("recovery::recover_for_service()");
+            assert_eq!(
+                page.contains("it survives a restart of the service"),
+                keeps,
+                "the page and the start-up recovery must agree on whether the guard survives a restart"
+            );
+        } else if guard_open {
             assert!(page.contains("not built yet"), "the guard is an open task");
         }
     }
@@ -216,6 +262,26 @@ mod tests {
             assert!(
                 limit.contains("data-state="),
                 "a limit carries its state for the reader and the stylesheet"
+            );
+        }
+    }
+
+    /// The tray and window icons are real once the icon file is more than the spike's 233-byte placeholder (T186).
+    #[test]
+    fn the_icons_are_described_as_what_they_are() {
+        let icon = std::fs::metadata(root().join("apps/dnet-tray/src-tauri/icons/icon.png"))
+            .expect("the window's icon")
+            .len();
+        let page = text_of(&page());
+        if icon > 4096 {
+            assert!(
+                !page.contains("placeholders"),
+                "the icons are real ({icon} bytes)"
+            );
+        } else {
+            assert!(
+                page.contains("placeholders"),
+                "{icon} bytes is a placeholder"
             );
         }
     }
@@ -280,7 +346,7 @@ mod tests {
                 || read("Cargo.toml").contains("GPL-3.0-or-later")
         );
         assert!(
-            text.contains("Checked 2026-11-04"),
+            text.contains("Checked 2026-11-10"),
             "the date the page was last checked"
         );
         // Every link into this repository points at something that is there.

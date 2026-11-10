@@ -68,7 +68,7 @@
         <div><dt>Licence</dt><dd>GPL-3.0-or-later</dd></div>
         <div><dt>Platform</dt><dd>Windows 10 (version 1809) or later, 64-bit</dd></div>
         <div><dt>Server</dt><dd>Yours. None is provided.</dd></div>
-        <div><dt>Status</dt><dd>Early. Installer written, not yet run.</dd></div>
+        <div><dt>Status</dt><dd>Early. An installer exists; nothing has run on a real network.</dd></div>
       </dl>
     </section>
 
@@ -141,15 +141,18 @@
       <h2 id="h-limits">Known limits</h2>
       <p class="hint">Three things it cannot promise yet. For each: why, what is being done, and where it stands.</p>
       <ol class="limit-list">
-        <li class="limit" data-state="not-built">
+        <li class="limit" data-state="built">
           <h3>The kill switch is not a guarantee</h3>
-          <p class="state"><span class="pill pill-wait">Not built yet</span></p>
+          <p class="state"><span class="pill pill-part">Built, tried in a lab only</span></p>
           <dl>
-            <div><dt>Why</dt><dd>The service refuses to send traffic unprotected, but nothing at the operating-system level enforces
-              that. A crash or a stopped service does not guarantee that nothing leaves the machine.</dd></div>
-            <div><dt>Being done</dt><dd>A guard made of firewall filters that outlive the service is designed (ADR-0008, task T161).
-              It changes how the machine&rsquo;s network behaves, so it waits for the owner&rsquo;s approval and for five yes-or-no checks in a lab.</dd></div>
-            <div><dt>Where it stands</dt><dd>Designed. Not built.</dd></div>
+            <div><dt>Why</dt><dd>The kill switch is off by default and optional. When it is on, the service keeps a firewall guard in while you are
+              connected, so a crash, a restart or a stopped service leaves the guard in and nothing goes around the tunnel until the
+              connection is back or you take the guard out. But one connection method (the AmneziaWG one) cannot be covered yet, and
+              nothing has shown it holds on a real network.</dd></div>
+            <div><dt>Being done</dt><dd>The guard is firewall rules tied to the service, put in once the tunnel is up and taken out only when you
+              disconnect, with a button, a command and an offline command to take it out (ADR-0006, task T161). It survives a restart of the
+              service. Still to do: cover the AmneziaWG method, and try it with a real tunnel.</dd></div>
+            <div><dt>Where it stands</dt><dd>Built and checked in a lab virtual machine (ten of ten checks); not yet tried on a real network.</dd></div>
           </dl>
         </li>
         <li class="limit" data-state="built">
@@ -180,7 +183,7 @@
     <section class="wrap status" aria-labelledby="h-status">
       <h2 id="h-status">Where it stands</h2>
       <p class="hint">Early. The engine runs in a simulated network and a Windows lab; it has not been used on a real network.
-        15 parts, in three groups. Checked 2026-11-04.</p>
+        15 parts, in three groups. Checked 2026-11-10.</p>
       <div class="groups">
         <section class="group" data-group="works" aria-labelledby="g-works">
           <h3 id="g-works">Works <span class="count">3</span></h3>
@@ -192,24 +195,24 @@
           </ul>
         </section>
         <section class="group" data-group="built" aria-labelledby="g-built">
-          <h3 id="g-built">Built and tested <span class="count">7</span></h3>
+          <h3 id="g-built">Built and tested <span class="count">9</span></h3>
           <p class="gnote">Not yet met a real network.</p>
           <ul>
             <li>Following the network as it changes (one method; not yet proven on two real networks)</li>
             <li>Destination rules; noticing a sign-in page in the way</li>
-            <li>Tray icon and window (the icons are placeholders)</li>
+            <li>Tray icon and window</li>
             <li>A guide that makes your own server, in your own cloud account or on any Linux server. It asks for no cloud password or key; the setup script has run only in tests</li>
             <li>The live map of every part, with its state, how long and why: in the service, the command line and the window&rsquo;s Activity page</li>
             <li>Cheap checks while connected: about 1 MB an hour idle, worked out from the code, not yet measured on a wire</li>
             <li>The leak settings of the tunnel, pinned by tests for all three methods</li>
+            <li>Installer built and signed with the project&rsquo;s own key; installed and removed on a clean Windows machine and on one real computer (Windows shows an unknown publisher)</li>
+            <li>An optional kill switch: firewall rules that keep traffic inside the tunnel, off by default; checked in a lab virtual machine, not yet tried on a real network</li>
           </ul>
         </section>
         <section class="group" data-group="not-yet" aria-labelledby="g-not">
-          <h3 id="g-not">Not yet <span class="count">5</span></h3>
+          <h3 id="g-not">Not yet <span class="count">3</span></h3>
           <p class="gnote">Written, planned or waiting for a person.</p>
           <ul>
-            <li>Installer written; not yet built or run on Windows</li>
-            <li>The operating-system kill switch (T161)</li>
             <li>Rules by program, connected to the service</li>
             <li>A recorded measurement that a method keeps open transfers alive</li>
             <li>Networks that have only IPv6 (T166)</li>
@@ -253,7 +256,7 @@
       <section aria-labelledby="f-name">
         <h2 id="f-name">The name</h2>
         <p>&ldquo;DNet Engine&rdquo; names the technology; the finished program may be called something else.</p>
-        <p class="fine">This page sets no cookies, loads nothing from other sites and runs no scripts. Checked 2026-11-04.</p>
+        <p class="fine">This page sets no cookies, loads nothing from other sites and runs no scripts. Checked 2026-11-10.</p>
       </section>
     </div>
   </footer>

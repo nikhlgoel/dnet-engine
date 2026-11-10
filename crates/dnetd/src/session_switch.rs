@@ -961,7 +961,19 @@ mod tests {
             OwnedOriginProbe(Origin::parse(&format!("http://127.0.0.1:{port}")).unwrap());
         assert!(answering.attempt().await);
         drop(listener);
-        let closed = OwnedOriginProbe(Origin::parse(&format!("http://127.0.0.1:{port}")).unwrap());
+
+        // "Nothing listens there", without a race. Closing the listener and trusting the port to stay free was flaky:
+        // tests run in parallel, and the system can hand that very port to another test's listener a moment later, so
+        // the "closed" origin then answered (seen on Linux). A socket that is bound but never listens refuses every
+        // connection, and keeps the port to itself until the end of the test.
+        let reserved = tokio::net::TcpSocket::new_v4().unwrap();
+        reserved
+            .bind(std::net::SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .unwrap();
+        let silent_port = reserved.local_addr().unwrap().port();
+        let closed =
+            OwnedOriginProbe(Origin::parse(&format!("http://127.0.0.1:{silent_port}")).unwrap());
         assert!(!closed.attempt().await, "nothing listens there now");
+        drop(reserved);
     }
 }
