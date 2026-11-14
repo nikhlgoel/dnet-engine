@@ -4,6 +4,7 @@
 //! See `specs/001-network-resilience-client/` for the governing specification.
 
 pub mod adapter;
+pub mod cost;
 pub mod echo;
 pub mod error;
 #[cfg(windows)]

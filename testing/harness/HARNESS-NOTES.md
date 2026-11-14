@@ -133,3 +133,13 @@ to test.** Tracked as a Phase 6 prerequisite.
 
 **Always read `report` before trusting a negative result.** A profile that "survived" a
 condition whose rule shows 0 packets was never actually tested (HN-03).
+
+## If every scenario says "got none", including `baseline` (found 2026-11-14)
+
+That is the lab, not the code. After Docker restarts the containers (a reboot, a Docker Desktop update) they can come
+back **without their host port mappings**: `docker ps` shows `8080/tcp, 8443/tcp, ...` where it should show
+`127.0.0.1:8080->8080/tcp, 0.0.0.0:8443->8443/tcp, ...`, nothing on the host can reach them, and every probe fails its
+handshake. `Test-NetConnection 127.0.0.1 -Port 8443` says `False`. Recreate them: `.\harness.ps1 down`, then
+`.\harness.ps1 up` (it holds only simulated state), wait for both containers to be `(healthy)`, and run
+`.\Invoke-Race.ps1` again. The endpoint container may flap once or twice while the cores start; that is normal.
+Result on the code at `7293525`: all eight scenarios match, including the two that must select nothing (`blocked`, `H9`).

@@ -24,6 +24,7 @@ when a pinned program has fallen behind; the rest below is done by reading, and 
 | `tokio` 1.53.1: RUSTSEC-2026-0386, an I/O-safety flaw in `AsyncFd` constructors (patched in 1.53.3) | We never call `AsyncFd` (a Unix API) so we were not exposed, but a warning left standing hides the next real one | Updated to 1.53.3; the workspace audit is clean |
 | `undici` (8 advisories, 4 high) | Reached only through `jsdom` in the test tools; `pnpm audit --prod` was already clean. It runs on a developer's machine, though | Held at the fixed version (>= 8.12.2) with an override in `pnpm-workspace.yaml` |
 | No Rust audit and no schedule in CI | A new advisory against unchanged code would go unseen | `.github/workflows/advisories.yml`: weekly, and on any dependency change |
+| `quinn-udp` 0.5.15: RUSTSEC-2026-0538, a receive loop that can spin after a truncated datagram (fixed in 0.5.16), found 2026-11-14 by the Advisories run on a push, **after** the previous run had been green | It is in the lock file through the HTTP client's QUIC support on non-Windows targets; the Windows build of the service does not compile it, so we were not exposed. A failing audit is a failing audit, and one accepted warning must not hide the next | `cargo update -p quinn-udp --precise 0.5.16`; the local and CI audits are clean apart from the accepted `rustix` warning. This is the first time the weekly watch caught something between releases, which is what it is for |
 
 ## 3. Accepted, with the reason (each is rechecked by the weekly run)
 
