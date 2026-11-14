@@ -69,6 +69,11 @@ jobs:
     name: Windows installer
     needs: server-cores
     runs-on: windows-latest
+    env:
+      # The workflow-level RUSTFLAGS replaces `.cargo/config.toml`, so the C runtime is linked in here too (T197): the
+      # service and the command-line tool get it from `stage-installer`, the tray program from this. A program that
+      # still needs the Visual C++ runtime fails the checks below.
+      RUSTFLAGS: -D warnings -C target-feature=+crt-static
     # A release tag runs in the environment `release`, which holds the signing key and is restricted to release tags
     # and to the owner's approval; any other run (a branch, a manual dispatch) runs in `release-test`, which has no
     # secrets and no restriction (docs/release-signing.md).
@@ -188,6 +193,10 @@ jobs:
         run: pnpm installer
         working-directory: apps/dnet-tray
         # Tauri signs the tray program and the installer itself through bundle.windows.signCommand, by thumbprint.
+      # T197: nothing that ships may need a runtime library a clean Windows does not have. `stage-installer` checks the
+      # service and the command-line tool as it builds them; this is the tray program.
+      - name: The tray program needs no runtime Windows lacks
+        run: cargo xtask check-static-runtime apps/dnet-tray/src-tauri/target/release/dnet-tray.exe
 
       # Not checked here: the tray program inside the installer. Tauri signs it, packs it, and then restores the loose
       # copy in the build folder, which therefore carries no signature. It is checked on the installed files
