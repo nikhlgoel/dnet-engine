@@ -1,3 +1,10 @@
 [alias]
 # `cargo xtask <task>` runs the build tooling in crates/xtask. CI and the docs use this form.
 xtask = "run --package xtask --"
+
+# T197: link the C runtime into every Windows program. A default build needs VCRUNTIME140.dll, which a clean Windows 10
+# or 11 does not have, so the service would not start (found in the lab VM). `cargo xtask check-static-runtime` fails
+# a release that lost this. A RUSTFLAGS environment variable replaces this setting entirely, so `stage-installer` and
+# the release job add the flag themselves rather than trust it to be here.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

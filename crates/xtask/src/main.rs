@@ -12,11 +12,14 @@ mod feed_tool;
 mod fetch_vendor;
 mod import_harness;
 mod lint_branding;
+#[cfg(test)]
+mod log_hygiene;
 mod pins;
 mod server_cores;
 mod site_facts;
 mod spdx;
 mod stage_installer;
+mod static_runtime;
 mod verify_vendor;
 
 fn main() -> Result<()> {
@@ -28,6 +31,10 @@ fn main() -> Result<()> {
         Some("verify-vendor") => verify_vendor::run(&root),
         Some("lint-branding") => lint_branding::run(&root),
         Some("stage-installer") => stage_installer::run(&root),
+        Some("check-static-runtime") => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            static_runtime::run(&rest)
+        }
         Some("build-server-cores") => {
             let rest: Vec<String> = std::env::args().skip(2).collect();
             server_cores::run(&root, &rest)
@@ -65,6 +72,8 @@ fn print_help() {
     eprintln!(
         "  stage-installer verify, build and stage what the installer ships in target/payload"
     );
+    eprintln!("  check-static-runtime <file>...");
+    eprintln!("                  fail if a program needs a C++ runtime library Windows does not ship (T197)");
     eprintln!("  feed-keygen --out <file>");
     eprintln!(
         "                  make a feed key outside the repository; prints only the public key"

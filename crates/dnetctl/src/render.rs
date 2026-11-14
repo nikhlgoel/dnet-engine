@@ -253,13 +253,18 @@ pub fn endpoints(reply: &Value) -> Result<String, String> {
     let rows: Vec<Vec<String>> = items
         .iter()
         .map(|e| {
-            ["label", "address", "enabled", "health"]
+            ["id", "label", "address", "enabled", "health"]
                 .iter()
                 .map(|k| cell(e, k))
                 .collect()
         })
         .collect();
-    Ok(table(&["ENDPOINT", "ADDRESS", "ENABLED", "HEALTH"], &rows))
+    // The id is shown because `remove-endpoint`, `enable-endpoint` and `disable-endpoint` take it, and the label is
+    // not one (found in the lab, T199): a person had no way to learn the id from this table.
+    Ok(table(
+        &["ID", "ENDPOINT", "ADDRESS", "ENABLED", "HEALTH"],
+        &rows,
+    ))
 }
 
 fn kind_label(kind: Kind) -> &'static str {
@@ -732,11 +737,16 @@ mod tests {
         let none = endpoints(&json!({"endpoints": []})).unwrap();
         assert_eq!(none, "No endpoints are configured.");
         let some = endpoints(&json!({"endpoints": [
-            {"id": "x", "label": "harness", "address": "203.0.113.10:443", "enabled": true, "health": "Unknown"}
+            {"id": "5f9af051-e94b-4441-98ce-1d2b10fd7406", "label": "harness", "address": "203.0.113.10:443", "enabled": true, "health": "Unknown"}
         ]}))
         .unwrap();
         assert!(
             some.contains("harness") && some.contains("yes") && some.contains("Unknown"),
+            "{some}"
+        );
+        // The id the other endpoint commands take is in the table.
+        assert!(
+            some.contains("5f9af051-e94b-4441-98ce-1d2b10fd7406"),
             "{some}"
         );
     }

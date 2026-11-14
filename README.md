@@ -45,6 +45,13 @@ that does less.
   default). It has been checked in a lab virtual machine and not on a real network, it survives a
   restart of the service until the connection is back or you take it out, and one connection method is
   not covered yet, so it is not yet a promise that nothing leaves the machine unprotected.
+- **Name lookups can still reach the network you are on.** Measured in the lab on a connected tunnel: Windows
+  asks the tunnel's name server first, but also sends lookups to the resolver of the physical network, as it
+  does with any two connections. That resolver, and whoever runs it, can see which names your computer looks up,
+  and an answer from it can be wrong or blocked. The kill switch does not close this: it keeps the network's own
+  address range reachable, and that is where the resolver is. A fix (a Windows name-resolution policy that sends
+  every lookup to the tunnel) is planned and not built; until then, do not rely on this program to keep the
+  names you look up from the network you are on.
 - **Per-application rules are best-effort.** Rules by destination name or address are reliable.
   Rules by application depend on identifying the program at the moment it connects, which can miss
   short-lived connections. They are labelled best-effort wherever they appear.

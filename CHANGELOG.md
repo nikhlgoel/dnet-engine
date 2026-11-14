@@ -42,12 +42,31 @@ release waits for them.
 - **A Windows installer**, signed with the project's own key (Windows shows "unknown publisher"), with a
   build attestation. About 15 MB.
 
+- **A log file for the service**, in `%ProgramData%\DNet Engine\logs` (readable only by administrators and the system,
+  about 4 MB at most). It records what the service did and why, and each request it refused. It holds no password or
+  key, and never where you go on the network (the service does not know that).
+
+### Fixed
+
+- **The service and `dnetctl` start on a Windows that has never had the Visual C++ runtime installed.** Built the
+  default way they needed a library Windows does not include, so on such a computer the service would not have started.
+  They now carry it, and the release build refuses a program that does not.
+- **A server made by the setup guide now starts, and the program can connect to it over Hysteria 2 and REALITY.**
+  Found by running the real setup script in a lab: the server's main service was not allowed to read the machine's
+  routes and stopped at start, and the program waited for a log line that a quiet connection never prints, so only
+  the AmneziaWG method could connect. Both are fixed.
+- `dnetctl endpoints` shows each server's id, which the commands that remove, enable and disable a server need.
+- A new connection is no longer announced as "the network connection changed ... will not survive the move" when nothing
+  had moved.
+
 ### Known limits
 
 - The kill switch is not a guarantee: see above, and the [README](README.md#read-this-before-relying-on-it).
 - Rules by program are best-effort and not connected to the service yet.
 - Every method is treated as one that drops open transfers when the network changes, until a recorded
   measurement says otherwise.
+- While connected, Windows still sends name lookups to the physical network's resolver as well as the tunnel's, so that
+  network can see the names you look up; the kill switch does not stop this. See the README.
 - Networks that give only IPv6 are not supported.
 - Windows 10 version 1809 or later, 64-bit (x64) only.
 

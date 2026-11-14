@@ -66,8 +66,15 @@ fn a_byte_order_mark_from_a_windows_editor_is_tolerated() {
 
 #[test]
 fn a_file_that_does_not_exist_is_reported_without_a_path_or_content() {
+    // A folder of our own, not a drive letter: a letter can be a network share that takes a minute to give up.
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir
+        .path()
+        .join("no")
+        .join("such")
+        .join("SENTINEL-path.json");
     let error = read_bytes(&CredentialsSource::File(
-        "Z:/no/such/dir/SENTINEL-path.json".into(),
+        missing.to_string_lossy().into_owned(),
     ))
     .unwrap_err();
     assert!(error.contains("could not be opened"), "{error}");
@@ -152,7 +159,9 @@ fn a_document_that_is_not_text_or_not_there_is_refused_without_its_content_or_pa
         unreachable!()
     };
     assert!(read_document(&path).unwrap_err().contains("not text"));
-    let error = read_document("Z:/no/such/SENTINEL-path.json").unwrap_err();
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("no").join("SENTINEL-path.json");
+    let error = read_document(&missing.to_string_lossy()).unwrap_err();
     assert!(error.contains("could not be opened"), "{error}");
     assert!(!error.contains("SENTINEL"), "{error}");
 }

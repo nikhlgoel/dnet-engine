@@ -985,7 +985,8 @@ Requires=dnet-net.service
 [Service]
 # The part of the server that faces the internet and parses what strangers send. It binds ports above 1024,
 # makes no tunnel device (the session runs inside the core), and writes nothing, so it needs no privilege
-# at all: no capabilities, no new ones, a read-only system, no home, no devices, only IP sockets.
+# at all: no capabilities, no new ones, a read-only system, no home, no devices, only IP and local sockets, and
+# netlink (read-only without a capability) for the session's route watching.
 User=dnet
 Group=dnet
 ExecStart=/opt/dnet/bin/primary-core run -c /var/lib/dnet/primary/server.json
@@ -1000,7 +1001,10 @@ ProtectKernelModules=yes
 ProtectControlGroups=yes
 CapabilityBoundingSet=
 AmbientCapabilities=
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# AF_NETLINK is needed, read-only: the session inside the core watches the machine's routes through it, and without it
+# the core stops at start with "subscribe route updates: address family not supported by protocol" (found by running
+# this script in the lab, T200). With no capabilities, a netlink socket can read routes and change nothing.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 RestrictNamespaces=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes

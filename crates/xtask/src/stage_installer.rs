@@ -3,7 +3,8 @@
 //! `target/payload`, from which `installer/hooks.nsh` takes it.
 //!
 //! 1. `verify-vendor` first: nothing is staged from a tree that fails the licence obligations.
-//! 2. `dnetd` and `dnetctl` are built in release mode.
+//! 2. `dnetd` and `dnetctl` are built in release mode, with the C runtime linked in (T197), and checked: a program that
+//!    needs `VCRUNTIME140.dll` does not start on a Windows that has never had another program's installer put it there.
 //! 3. The service, the CLI, both cores and the adapter DLL go to `app/`, which the installer copies to
 //!    the install folder, so they all sit **beside each other** (beside `dnetd.exe`: start-up recovery
 //!    reaps orphans by exactly those paths; beside each core: the patched core loads the DLL only from
@@ -83,12 +84,21 @@ pub fn run(repo_root: &Path) -> Result<()> {
 
     let status = std::process::Command::new(std::env::var("CARGO").unwrap_or("cargo".into()))
         .current_dir(repo_root)
+        .env(
+            "RUSTFLAGS",
+            with_static_runtime(std::env::var("RUSTFLAGS").ok().as_deref()),
+        )
         .args(["build", "--release", "-p", "dnetd", "-p", "dnetctl"])
         .status()
         .context("cargo could not be run")?;
     if !status.success() {
         bail!("building dnetd and dnetctl failed");
     }
+
+    crate::static_runtime::check_staged(
+        repo_root,
+        &["target/release/dnetd.exe", "target/release/dnetctl.exe"],
+    )?;
 
     let payload = repo_root.join(PAYLOAD_DIR);
     if payload.exists() {
@@ -111,6 +121,18 @@ pub fn run(repo_root: &Path) -> Result<()> {
     );
     println!("  next: cd apps/dnet-tray; pnpm installer");
     Ok(())
+}
+
+/// The compiler flags for the build: whatever the person or CI already set, and the C runtime linked in (T197). The
+/// environment's `RUSTFLAGS` replaces the ones in `.cargo/config.toml`, so the flag is added here rather than trusted
+/// to be there.
+fn with_static_runtime(existing: Option<&str>) -> String {
+    const FLAG: &str = "-C target-feature=+crt-static";
+    match existing.map(str::trim).filter(|flags| !flags.is_empty()) {
+        Some(flags) if flags.contains("crt-static") => flags.to_string(),
+        Some(flags) => format!("{flags} {FLAG}"),
+        None => FLAG.to_string(),
+    }
 }
 
 /// Copy one file and check the copy byte for byte. Returns its size.
@@ -136,6 +158,23 @@ fn stage(repo_root: &Path, from: &Path, to: &Path) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_runtime_flag_is_added_once_and_what_was_set_is_kept() {
+        assert_eq!(with_static_runtime(None), "-C target-feature=+crt-static");
+        assert_eq!(
+            with_static_runtime(Some("")),
+            "-C target-feature=+crt-static"
+        );
+        assert_eq!(
+            with_static_runtime(Some("-D warnings")),
+            "-D warnings -C target-feature=+crt-static"
+        );
+        assert_eq!(
+            with_static_runtime(Some("-D warnings -C target-feature=+crt-static")),
+            "-D warnings -C target-feature=+crt-static"
+        );
+    }
 
     /// The service, both cores and the adapter DLL land in one folder: the T114 layout rule.
     #[test]

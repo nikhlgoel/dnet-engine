@@ -143,7 +143,10 @@ pub fn dispatch_frame(
                     .dispatch(&request)
                     .unwrap_or_else(|e| encode_ipc_error(&e))
             }),
-            Err(e) => encode_ipc_error(&e),
+            Err(e) => {
+                log_refusal(request.class(), identity, &e);
+                encode_ipc_error(&e)
+            }
         },
         Err(e) => encode_ipc_error(&e),
     }
@@ -166,6 +169,59 @@ pub enum Reply {
     Stream(Subscription),
 }
 
+/// How often a refused request is written to the log at most. A program that is not allowed to ask can ask as fast as
+/// it likes; one line a few seconds, with a count of the rest, keeps the evidence without letting it push out
+/// everything else the log holds.
+const REFUSAL_LOG_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Decides which refusals reach the log.
+#[derive(Debug, Default)]
+struct RefusalLimiter {
+    last: Option<std::time::Instant>,
+    suppressed: u32,
+}
+
+impl RefusalLimiter {
+    /// `Some(n)` to log this one, where `n` is how many were held back since the last line; `None` to hold it back.
+    fn admit(&mut self, now: std::time::Instant, every: std::time::Duration) -> Option<u32> {
+        match self.last {
+            Some(last) if now.saturating_duration_since(last) < every => {
+                self.suppressed = self.suppressed.saturating_add(1);
+                None
+            }
+            _ => {
+                self.last = Some(now);
+                Some(std::mem::take(&mut self.suppressed))
+            }
+        }
+    }
+}
+
+static REFUSALS: std::sync::Mutex<RefusalLimiter> = std::sync::Mutex::new(RefusalLimiter {
+    last: None,
+    suppressed: 0,
+});
+
+/// Say in the log that a request was refused, and to whom. Only the class of the request, who asked and why it was
+/// refused: never the request's contents.
+fn log_refusal(class: crate::protocol::RequestClass, identity: &ClientIdentity, error: &IpcError) {
+    let held_back = REFUSALS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .admit(std::time::Instant::now(), REFUSAL_LOG_EVERY);
+    if let Some(held_back) = held_back {
+        tracing::warn!(
+            ?class,
+            sid = %identity.sid,
+            session = identity.session_id,
+            elevated = identity.elevated,
+            held_back,
+            %error,
+            "a request was refused"
+        );
+    }
+}
+
 /// Authorize one decoded request against the captured identity and act on it: a `Subscribe`
 /// becomes a stream (when the service offers one), every other request is dispatched.
 ///
@@ -182,6 +238,7 @@ pub fn dispatch_request(
         Err(e) => return Reply::Response(encode_ipc_error(&e)),
     };
     if let Err(e) = authorize(request.class(), identity, console) {
+        log_refusal(request.class(), identity, &e);
         return Reply::Response(encode_ipc_error(&e));
     }
     if matches!(request, Request::Subscribe) {
@@ -553,6 +610,34 @@ mod tests {
     use tokio::io::{duplex, AsyncWriteExt};
 
     use super::*;
+
+    // ------------------------------------------------------------------ the refusal log (T198)
+
+    #[test]
+    fn a_flood_of_refused_requests_writes_one_line_and_counts_the_rest() {
+        let every = Duration::from_secs(5);
+        let start = std::time::Instant::now();
+        let mut limiter = RefusalLimiter::default();
+        assert_eq!(limiter.admit(start, every), Some(0), "the first is logged");
+        for n in 1..=100u64 {
+            let at = start + Duration::from_millis(n * 10);
+            assert_eq!(limiter.admit(at, every), None, "{n} is held back");
+        }
+        // After the interval the next one is logged, and says how many were held back.
+        assert_eq!(limiter.admit(start + every, every), Some(100));
+        // And the count starts again.
+        assert_eq!(limiter.admit(start + every * 2, every), Some(0));
+    }
+
+    #[test]
+    fn a_clock_that_runs_backwards_does_not_panic_or_log_a_burst() {
+        let every = Duration::from_secs(5);
+        let now = std::time::Instant::now();
+        let mut limiter = RefusalLimiter::default();
+        assert_eq!(limiter.admit(now + every, every), Some(0));
+        // An earlier instant than the last one logged: held back, not an underflow.
+        assert_eq!(limiter.admit(now, every), None);
+    }
 
     // ------------------------------------------------------------------ pauses between failures
 

@@ -184,7 +184,13 @@ impl TunnelHost for WindowsHost {
                 OsString::from("--disable-color"),
             ],
             working_dir: Some(layout.core_dir()),
-            ready_marker: Some("started".into()),
+            // A session's core runs quietly (log level `warn`) and so never prints "started"; it is ready when its
+            // control port takes a connection. A core with no session still prints the word (T200).
+            ready_marker: match &plan.session {
+                Some(_) => None,
+                None => Some("started".into()),
+            },
+            ready_port: plan.session.as_ref().map(|s| s.control.port),
             ready_timeout: PRIMARY_READY_TIMEOUT,
         };
         let amneziawg = CoreCommand {
@@ -194,6 +200,7 @@ impl TunnelHost for WindowsHost {
             working_dir: layout.amneziawg_core.parent().map(Path::to_path_buf),
             // Ready when its control pipe appears, which `await_adapter` waits for.
             ready_marker: None,
+            ready_port: None,
             ready_timeout: Duration::from_secs(5),
         };
         let runtime = WindowsCoreRuntime::new(
