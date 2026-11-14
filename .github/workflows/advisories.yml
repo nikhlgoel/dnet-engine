@@ -34,7 +34,7 @@ jobs:
     name: Rust dependencies
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: taiki-e/install-action@67339d17681acb16df9555b4ce5c56459b4266d4 # cargo-audit
         with:
           tool: cargo-audit,cargo-deny
@@ -58,11 +58,11 @@ jobs:
       run:
         working-directory: apps/dnet-tray
     steps:
-      - uses: actions/checkout@v6
-      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
           version: 12.4.2
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -79,7 +79,7 @@ jobs:
     name: Bundled network programs
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       # The two programs are built from pinned commits. The pins do not move by themselves, so say when upstream has
       # moved on: a newer release may carry a fix, and the notes are worth reading before the next release.
       - name: Is a pin behind its upstream?
