@@ -35,6 +35,10 @@ pub struct CoreCommand {
     /// established externally (e.g. the AmneziaWG UAPI pipe appearing), so the process
     /// only has to survive the spawn.
     pub ready_marker: Option<String>,
+    /// A loopback port that accepts connections once the core is ready, used when there is no marker. A core run
+    /// quietly (the session's configurations log at `warn`, so that no destination reaches a log) never prints a
+    /// word like "started", but it opens its listeners last, after everything it dials out with is set up.
+    pub ready_port: Option<u16>,
     pub ready_timeout: Duration,
 }
 
@@ -43,6 +47,7 @@ pub struct RunningCore {
     core: CoreBinding,
     child: Child,
     ready: Option<oneshot::Receiver<()>>,
+    ready_port: Option<u16>,
 }
 
 type ReadySignal = Arc<Mutex<Option<oneshot::Sender<()>>>>;
@@ -186,7 +191,44 @@ pub fn spawn(command: &CoreCommand) -> Result<RunningCore, SupervisorError> {
         core: command.core,
         child,
         ready: command.ready_marker.as_ref().map(|_| rx),
+        ready_port: command.ready_port,
     })
+}
+
+/// Wait until something accepts a connection on loopback `port`. Fails when `timeout` passes, or at once when
+/// `has_exited` says the core is gone (a core that stopped will never listen, and ten seconds is a long time to wait
+/// to be told so).
+pub async fn wait_until_listening(
+    port: u16,
+    timeout: Duration,
+    mut has_exited: impl FnMut() -> bool,
+) -> Result<(), &'static str> {
+    let address = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if has_exited() {
+            return Err("the core exited before it was ready");
+        }
+        let attempt = tokio::time::timeout(
+            Duration::from_millis(250),
+            tokio::net::TcpStream::connect(address),
+        )
+        .await;
+        if matches!(attempt, Ok(Ok(_))) {
+            // Something answered. If another program had taken the port first, the core that was meant to open it
+            // fails to bind and exits a moment later, so look again before believing it: a port that opens while
+            // the core is already gone is not the core's.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            if has_exited() {
+                return Err("the core exited before it was ready");
+            }
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err("its port did not open in time");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 impl RunningCore {
@@ -206,6 +248,14 @@ impl RunningCore {
         let not_ready = |detail: String| SupervisorError::NotReady { core, detail };
 
         let Some(ready) = self.ready.take() else {
+            if let Some(port) = self.ready_port {
+                let child = &mut self.child;
+                return wait_until_listening(port, timeout, || {
+                    child.try_wait().ok().flatten().is_some()
+                })
+                .await
+                .map_err(|why| not_ready(why.into()));
+            }
             return match self.child.try_wait() {
                 Ok(Some(status)) => Err(not_ready(format!("exited immediately ({status})"))),
                 Ok(None) => Ok(()),
@@ -269,8 +319,32 @@ mod tests {
                 .collect(),
             working_dir: None,
             ready_marker: marker.map(str::to_string),
+            ready_port: None,
             ready_timeout: Duration::from_secs(5),
         }
+    }
+
+    /// A core that prints nothing is ready when its port takes a connection, and a core that has already gone is
+    /// reported as that rather than waited for (T200: a session's core logs at `warn` and never says "started").
+    #[tokio::test]
+    async fn a_quiet_core_is_ready_when_its_port_opens_and_not_ready_if_it_exits() {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut quiet = cmd("Start-Sleep -Seconds 60", None);
+        quiet.ready_port = Some(port);
+        let mut core = spawn(&quiet).unwrap();
+        core.wait_ready(Duration::from_secs(10)).await.unwrap();
+        core.kill(Duration::from_secs(5)).await.unwrap();
+
+        let mut gone = cmd("exit 3", None);
+        gone.ready_port = Some(port + 1); // nothing listens there
+        let mut core = spawn(&gone).unwrap();
+        let started = std::time::Instant::now();
+        let error = core.wait_ready(Duration::from_secs(30)).await.unwrap_err();
+        assert!(error.to_string().contains("exited"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(10));
     }
 
     /// A spawned core is in the service's job, so the system ends it when the service's process ends.
@@ -372,6 +446,7 @@ mod unix_tests {
             args: ["-c", script].iter().map(OsString::from).collect(),
             working_dir: None,
             ready_marker: marker.map(str::to_string),
+            ready_port: None,
             ready_timeout: Duration::from_secs(5),
         }
     }
@@ -525,5 +600,85 @@ mod limit_tests {
             for_each_line(&input[..], |l| lines.push(l.len())).await;
             assert_eq!(lines, [kept], "a line of {length} bytes");
         }
+    }
+
+    // ---- readiness is an open port when the core prints nothing (T200)
+
+    #[tokio::test]
+    async fn a_port_that_is_open_is_ready_at_once() {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        wait_until_listening(port, Duration::from_secs(5), || false)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_port_that_opens_a_little_later_is_waited_for() {
+        let free = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = free.local_addr().unwrap().port();
+        drop(free);
+        let opener = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            drop(listener);
+        });
+        wait_until_listening(port, Duration::from_secs(5), || false)
+            .await
+            .unwrap();
+        opener.abort();
+    }
+
+    #[tokio::test]
+    async fn a_port_that_never_opens_is_a_failure_after_the_time_given() {
+        // Bound but never listening: connecting is refused, and no other program can take the port meanwhile.
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket
+            .bind((std::net::Ipv4Addr::LOCALHOST, 0).into())
+            .unwrap();
+        let port = socket.local_addr().unwrap().port();
+        let started = std::time::Instant::now();
+        let result = wait_until_listening(port, Duration::from_millis(600), || false).await;
+        assert_eq!(result, Err("its port did not open in time"));
+        assert!(started.elapsed() < Duration::from_secs(3));
+        drop(socket);
+    }
+
+    /// Another program answers on the port while the core, which could not bind it, is already on its way out: the
+    /// answer must not be taken for the core's.
+    #[tokio::test]
+    async fn an_answer_from_a_port_taken_by_another_program_is_not_ready_if_the_core_then_exits() {
+        let squatter = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let port = squatter.local_addr().unwrap().port();
+        // Alive when first looked at, gone when looked at again after the connection.
+        let looks = std::cell::Cell::new(0);
+        let result = wait_until_listening(port, Duration::from_secs(5), || {
+            looks.set(looks.get() + 1);
+            looks.get() > 1
+        })
+        .await;
+        assert_eq!(result, Err("the core exited before it was ready"));
+        assert_eq!(looks.get(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_core_that_has_exited_is_a_failure_at_once_not_after_the_timeout() {
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket
+            .bind((std::net::Ipv4Addr::LOCALHOST, 0).into())
+            .unwrap();
+        let port = socket.local_addr().unwrap().port();
+        let started = std::time::Instant::now();
+        let result = wait_until_listening(port, Duration::from_secs(30), || true).await;
+        assert_eq!(result, Err("the core exited before it was ready"));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        drop(socket);
     }
 }

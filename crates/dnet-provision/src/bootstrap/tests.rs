@@ -1821,7 +1821,8 @@ fn the_core_that_faces_the_internet_runs_as_an_account_with_no_privilege() {
         "PrivateDevices=yes",
         "CapabilityBoundingSet=\n",
         "AmbientCapabilities=\n",
-        "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX",
+        // AF_NETLINK: the session in the core watches routes through it; without it the core does not start (T200).
+        "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK",
         "RestrictNamespaces=yes",
         "UMask=0077",
     ] {
