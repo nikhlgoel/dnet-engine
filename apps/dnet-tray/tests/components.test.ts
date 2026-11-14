@@ -122,6 +122,19 @@ describe('every view', () => {
     });
   }
 
+  /** In a narrow window the dock shows only the icon of each section it is not on (`Dock.svelte`, a container
+   * query jsdom does not run). The words are hidden then, so each link must keep its name without them. */
+  it('the dock’s links keep their names when their words are hidden in a narrow window', async () => {
+    mount();
+    await screen.findByRole('switch');
+    const nav = screen.getByRole('navigation');
+    for (const words of nav.querySelectorAll<HTMLElement>('a .label')) words.style.display = 'none';
+    for (const name of ['Status', 'Servers', 'Rules', 'Activity', 'Settings']) {
+      expect(within(nav).getByRole('link', { name })).toBeTruthy();
+    }
+    expect(await violations()).toEqual([]);
+  });
+
   /** FR-033, Principle VI: what the obfuscation hides, and what it does not, said where a person looks for it. */
   it('About says the tunnel is not hidden, nor how much is sent or where it goes', async () => {
     mount();
@@ -167,6 +180,40 @@ describe('every view', () => {
     expect(await screen.findByText(/small computer of yours/)).toBeTruthy();
     await fireEvent.click(screen.getByRole('button', { name: 'Set up a server for me' }));
     await screen.findByRole('heading', { level: 1, name: 'Set up your server' });
+  });
+
+  it('Activity lists the parts with their state in words, how long, and why, and no violations', async () => {
+    mount({ initial: { state: 'ok' } });
+    await screen.findByRole('heading', { level: 1, name: 'Connected' });
+    await go('Activity');
+    const parts = await screen.findByRole('list', { name: 'Parts of the system' });
+    const items = within(parts).getAllByRole('listitem');
+    expect(items.length).toBeGreaterThan(2);
+    const text = items.map((i) => i.textContent ?? '').join('\n');
+    expect(text).toMatch(/Working/);
+    expect(text).toMatch(/for \d+ (s|min|h)/);
+    // The kind and the name of a part are two words, not one: "Network Wi-Fi", never "NetworkWi-Fi" (a screen reader reads
+    // the text, and the space inside a span is dropped by the compiler).
+    expect(text).toMatch(/Network [A-Za-z]/);
+    expect(text).not.toMatch(/Network[A-Za-z]/);
+    expect(await violations()).toEqual([]);
+  });
+
+  it('Activity says plainly when the service is too old to list its parts, and shows no part as fine', async () => {
+    mount({ noComponents: true });
+    await screen.findByRole('switch');
+    await go('Activity');
+    expect(await screen.findByText(/too old to list its parts/)).toBeTruthy();
+    expect(screen.queryByRole('list', { name: 'Parts of the system' })).toBeNull();
+    expect(screen.queryByText(/Working/)).toBeNull();
+  });
+
+  it('Activity shows a failed part with its reason whole', async () => {
+    mount({ initial: { state: 'fail', cause: 'NoUsablePath' } });
+    await screen.findByRole('switch');
+    await go('Activity');
+    const parts = await screen.findByRole('list', { name: 'Parts of the system' });
+    expect(within(parts).getByText('Failed')).toBeTruthy();
   });
 
   it('Rules says which rules are best effort in the row, not in a tooltip', async () => {
@@ -248,6 +295,90 @@ describe('Rules: a person adds and removes their own (T108)', () => {
     await go('Rules');
     await screen.findByRole('table');
     expect(screen.queryAllByRole('button', { name: /remove the rule/i })).toHaveLength(0);
+  });
+});
+
+describe('Settings: the kill switch (T161)', () => {
+  const killSwitch = async (): Promise<HTMLInputElement> => {
+    const s = (await screen.findByRole('switch', { name: /block traffic outside the connection/i })) as HTMLInputElement;
+    await waitFor(() => expect(s.disabled).toBe(false));
+    return s;
+  };
+
+  it('it is off, says what it does in the words of what happens, and turning it on sends the choice', async () => {
+    const mock = mount();
+    const set = vi.spyOn(mock, 'setKillSwitch');
+    await screen.findByRole('switch');
+    await go('Settings');
+    const toggle = await killSwitch();
+    expect(toggle.checked).toBe(false);
+    await fireEvent.click(toggle);
+    await waitFor(() => expect(set).toHaveBeenCalledWith(true));
+    await waitFor(() => expect(toggle.checked).toBe(true));
+    // The service's own sentence about what happens next is shown.
+    // Once in the switch's own help, and once as the service's sentence about what the change does.
+    await waitFor(() => expect(screen.getAllByText(/next connection/i)).toHaveLength(2));
+    expect(await violations()).toEqual([]);
+  });
+
+  it('it can be turned off again, and says the guard is out', async () => {
+    const mock = mount({ guard: { killSwitch: true } });
+    const set = vi.spyOn(mock, 'setKillSwitch');
+    await screen.findByRole('switch');
+    await go('Settings');
+    const toggle = await killSwitch();
+    await waitFor(() => expect(toggle.checked).toBe(true));
+    await fireEvent.click(toggle);
+    await waitFor(() => expect(set).toHaveBeenCalledWith(false));
+    await waitFor(() => expect(toggle.checked).toBe(false));
+  });
+
+  it('a guard that is in can be taken out from here, and only then is the button there', async () => {
+    mount({ guard: { killSwitch: true, guardIn: false } });
+    await screen.findByRole('switch');
+    await go('Settings');
+    await killSwitch();
+    expect(screen.queryByRole('button', { name: /take the guard out/i })).toBeNull();
+    cleanup();
+
+    const mock = mount({ guard: { killSwitch: true, guardIn: true } });
+    const release = vi.spyOn(mock, 'releaseGuard');
+    await screen.findByRole('switch');
+    await go('Settings');
+    await killSwitch();
+    await fireEvent.click(await screen.findByRole('button', { name: /take the guard out/i }));
+    await waitFor(() => expect(release).toHaveBeenCalled());
+    await waitFor(() => expect(screen.queryByRole('button', { name: /take the guard out/i })).toBeNull());
+    expect(await screen.findByText(/guard is out/i)).toBeTruthy();
+  });
+
+  it('a firewall that could not be asked is said so, and the person is not told the guard is out', async () => {
+    mount({ guard: { killSwitch: true, guardIn: null } });
+    await screen.findByRole('switch');
+    await go('Settings');
+    await killSwitch();
+    expect(await screen.findByText(/could not be asked/i)).toBeTruthy();
+    // The way out is still offered: not knowing is not a reason to hide it.
+    expect(screen.getByRole('button', { name: /take the guard out/i })).toBeTruthy();
+  });
+
+  it('a service too old to know the kill switch shows nothing about it', async () => {
+    mount({ guard: { supported: false } });
+    await screen.findByRole('switch');
+    await go('Settings');
+    await screen.findByRole('heading', { name: /settings/i });
+    expect(screen.queryByRole('switch', { name: /block traffic outside the connection/i })).toBeNull();
+  });
+
+  it('a refusal is shown in the service’s words and leaves the switch where it was', async () => {
+    const mock = mount({ guard: { killSwitch: false } });
+    vi.spyOn(mock, 'setKillSwitch').mockResolvedValue({ ok: false, reason: 'the service is busy', code: 'ServiceBusy' });
+    await screen.findByRole('switch');
+    await go('Settings');
+    const toggle = await killSwitch();
+    await fireEvent.click(toggle);
+    expect(await screen.findByText('the service is busy')).toBeTruthy();
+    expect(toggle.checked).toBe(false);
   });
 });
 
@@ -408,6 +539,38 @@ describe('theme and motion', () => {
   });
 });
 
+describe('A page that needs the connection off says so and lets it be turned off there', () => {
+  it('Servers: the note has a Disconnect button, and pressing it unlocks the page', async () => {
+    const bridge = mount({ initial: { state: 'ok', networks: 'two' } });
+    await go('Servers');
+    expect(await screen.findByText(/Disconnect before changing endpoints/)).toBeTruthy();
+    const add = screen.getByRole('button', { name: 'Add a server you already have' }) as HTMLButtonElement;
+    expect(add.disabled).toBe(true);
+    const stabilize = vi.spyOn(bridge, 'stabilize');
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Disconnect now' }));
+    expect(stabilize.mock.calls[0]?.[0]).toBe(false);
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Add a server you already have' }) as HTMLButtonElement).disabled).toBe(false));
+    expect(screen.queryByText(/Disconnect before changing endpoints/)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Disconnect now' })).toBeNull();
+  });
+
+  it('Rules and Settings say it the same way', async () => {
+    mount({ initial: { state: 'ok', networks: 'two' } });
+    await go('Rules');
+    expect(await screen.findByRole('button', { name: 'Disconnect now' })).toBeTruthy();
+    await go('Settings');
+    expect((await screen.findAllByRole('button', { name: 'Disconnect now' })).length).toBeGreaterThan(0);
+  });
+
+  it('nothing offers to disconnect when nothing is connected', async () => {
+    mount({ initial: { state: 'off', networks: 'two' } });
+    await go('Servers');
+    await screen.findByRole('button', { name: 'Add a server you already have' });
+    expect(screen.queryByRole('button', { name: 'Disconnect now' })).toBeNull();
+  });
+});
+
 describe('Changes waiting for approval (T160)', () => {
   it('lists a waiting change in the Servers view with what it does, and approving it removes it', async () => {
     const bridge = mount();
@@ -427,6 +590,44 @@ describe('Changes waiting for approval (T160)', () => {
     expect(await bridge.pending()).toEqual([]);
   });
 
+  it('turning a server on that is held for approval is said to be waiting, not shown as a command-line refusal, and works once approved', async () => {
+    const bridge = mount({
+      holdChanges: true,
+      endpoints: [{ id: 'e1', label: 'harness', address: '203.0.113.10:51820', enabled: false, health: 'Unknown' }],
+    });
+    await go('Servers');
+    await fireEvent.click(await screen.findByRole('button', { name: 'Use' }));
+    const notice = await screen.findByText(/waits for your approval above/);
+    expect(notice.getAttribute('role')).toBe('status');
+    const alerts = screen.queryAllByRole('alert').map((a) => a.textContent ?? '');
+    expect(alerts.join(' ')).not.toMatch(/waits for approval|dnetctl/);
+    expect(await bridge.endpoints()).toContainEqual(expect.objectContaining({ label: 'harness', enabled: false }));
+
+    await fireEvent.click(await screen.findByRole('button', { name: /^Approve: Turning on the server "harness"/ }));
+    expect(await screen.findByText('In use')).toBeTruthy();
+    expect(screen.queryByText(/waits for your approval above/)).toBeNull();
+    expect(screen.queryAllByRole('alert').map((a) => (a.textContent ?? '').trim()).filter(Boolean)).toEqual([]);
+    expect(await bridge.endpoints()).toContainEqual(expect.objectContaining({ label: 'harness', enabled: true }));
+  });
+
+  it('turning a server off is not held, and nothing says it waits', async () => {
+    const bridge = mount({ holdChanges: true });
+    await go('Servers');
+    await fireEvent.click(await screen.findByRole('button', { name: 'Don’t use' }));
+    await waitFor(async () => expect(await bridge.endpoints()).toContainEqual(expect.objectContaining({ enabled: false })));
+    expect(screen.queryByText(/waits for your approval/)).toBeNull();
+    expect(screen.queryAllByRole('alert').map((a) => (a.textContent ?? '').trim()).filter(Boolean)).toEqual([]);
+  });
+
+  it('once a change is approved, nothing is said to be waiting: the card that said so is gone', async () => {
+    const bridge = mount();
+    bridge.hold('Adding the server "home" at 203.0.113.9');
+    await go('Servers');
+    await fireEvent.click(await screen.findByRole('button', { name: /^Approve: Adding the server "home"/ }));
+    expect(await screen.findByText('Approved and applied.')).toBeTruthy();
+    expect(screen.queryByRole('heading', { level: 2, name: 'Waiting for your approval' })).toBeNull();
+  });
+
   it('drops a waiting change without applying it', async () => {
     const bridge = mount();
     const id = bridge.hold('Sending example.com around the tunnel');
@@ -437,6 +638,58 @@ describe('Changes waiting for approval (T160)', () => {
     expect(await screen.findByText('Dropped. The change was not applied.')).toBeTruthy();
     expect(dropping).toHaveBeenCalledWith(id);
     expect(approving).not.toHaveBeenCalled();
+    expect(await bridge.pending()).toEqual([]);
+  });
+
+  it('a server added by hand that is held for approval is said to be waiting, not refused, and shows up in the list', async () => {
+    const bridge = mount({ holdChanges: true });
+    await go('Servers');
+    await fireEvent.click(await screen.findByRole('button', { name: 'Add a server you already have' }));
+    await fireEvent.input(screen.getByLabelText('Name'), { target: { value: 'home' } });
+    await fireEvent.input(screen.getByLabelText('Address'), { target: { value: '203.0.113.9' } });
+    const file = new File(['{"version":1}'], 'home.json', { type: 'application/json' });
+    await fireEvent.change(screen.getByLabelText('Connection details'), { target: { files: [file] } });
+    const send = screen.getByRole('button', { name: 'Add server' }) as HTMLButtonElement;
+    await waitFor(() => expect(send.disabled).toBe(false));
+    // jsdom keeps no chosen file for the form's own required-field check, so the form is sent as the button sends it.
+    await fireEvent.submit(send.closest('form') as HTMLFormElement);
+    // Said as news, in the window's words: the service's own text names a command and is not shown.
+    const notice = await screen.findByText(/waits for your approval above/);
+    expect(notice.getAttribute('role')).toBe('status');
+    const alerts = screen.queryAllByRole('alert').map((a) => a.textContent ?? '');
+    expect(alerts.join(' ')).not.toMatch(/waits for approval|dnetctl/);
+    expect(await bridge.endpoints()).not.toContainEqual(expect.objectContaining({ label: 'home' }));
+
+    // Approved in place: the server is then in the list, and the notice has done its work.
+    await fireEvent.click(await screen.findByRole('button', { name: /^Approve: Adding the server "home"/ }));
+    expect(await screen.findByText('home')).toBeTruthy();
+    expect(screen.queryByText(/waits for your approval above/)).toBeNull();
+    expect(await bridge.endpoints()).toContainEqual(expect.objectContaining({ label: 'home' }));
+  });
+
+  it('a rule that sends traffic around the tunnel is held, said to be waiting, and is in the table once approved', async () => {
+    const bridge = mount({ holdChanges: true });
+    await go('Rules');
+    await fireEvent.input(await screen.findByRole('textbox', { name: /Site or address/ }), { target: { value: 'example.com' } });
+    await fireEvent.change(screen.getByRole('combobox', { name: /Send it/ }), { target: { value: 'bypass' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Add rule' }));
+    const notice = await screen.findByText(/waits for your approval above/);
+    expect(notice.getAttribute('role')).toBe('status');
+    expect(screen.queryAllByRole('alert').map((a) => a.textContent ?? '').join(' ')).not.toMatch(/waits for approval|dnetctl/);
+    expect((await bridge.rules()).rules.map((r) => r.value)).not.toContain('example.com');
+
+    await fireEvent.click(await screen.findByRole('button', { name: /^Approve: Sending traffic to example\.com and its subdomains around the tunnel/ }));
+    expect(await screen.findByText('example.com and its subdomains')).toBeTruthy();
+    expect(screen.queryByText(/waits for your approval above/)).toBeNull();
+  });
+
+  it('a rule that keeps traffic in the tunnel is not held, and nothing says it waits', async () => {
+    const bridge = mount({ holdChanges: true });
+    await go('Rules');
+    await fireEvent.input(await screen.findByRole('textbox', { name: /Site or address/ }), { target: { value: 'example.org' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Add rule' }));
+    expect(await screen.findByText('example.org and its subdomains')).toBeTruthy();
+    expect(screen.queryByText(/waits for your approval/)).toBeNull();
     expect(await bridge.pending()).toEqual([]);
   });
 

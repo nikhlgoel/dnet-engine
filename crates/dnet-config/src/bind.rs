@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T053 — Profile A outbound binding (CC-07, research.md §R4).
 //!
 //! When AmneziaWG (Profile A) is active, the primary core must send that traffic out a

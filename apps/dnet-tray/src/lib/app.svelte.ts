@@ -13,7 +13,17 @@ import type { Bridge, Outcome } from './bridge';
 import { plain } from './sanitize';
 import type { ActivityItem, Snapshot } from './model';
 
-export type ViewId = 'status' | 'endpoints' | 'rules' | 'activity' | 'settings' | 'about' | 'firstrun' | 'wizard';
+export type ViewId =
+  | 'status'
+  | 'endpoints'
+  | 'rules'
+  | 'activity'
+  | 'settings'
+  | 'about'
+  | 'firstrun'
+  | 'wizard'
+  | 'join'
+  | 'invite';
 export type ThemePref = 'system' | 'dark' | 'light';
 
 /** The most Activity lines kept: the service holds the session; this is only what is on screen. */
@@ -65,6 +75,8 @@ export class AppState {
   snapshot = $state<Snapshot | null>(null);
   activity = $state<ActivityItem[]>([]);
   view = $state<ViewId>('status');
+  /** The server an owner is adding a friend's device to, while the invite page is open (T188). */
+  inviteFor = $state<string | null>(null);
   drawerOpen = $state(false);
   switcherOpen = $state(false);
   /** The Tier 2 consent is showing. */

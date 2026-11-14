@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Cloud provisioning, server bootstrap, keepalive, cleanup.
 //!
 //! See `specs/001-network-resilience-client/` for the governing specification, and
@@ -12,6 +13,8 @@ pub mod capacity;
 pub mod cleanup;
 pub mod client_keys;
 pub mod credential;
+pub mod devices;
+pub mod fairness;
 pub mod keepalive;
 pub mod ledger;
 pub mod manual;

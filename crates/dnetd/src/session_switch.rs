@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T157 — move the session to another carrier and make sure it follows (ADR-0008;
 //! `docs/research/2026-10-31-solutions.md` §1.3 to 1.5).
 //!
@@ -890,5 +891,90 @@ mod tests {
         let body = text.split("\r\n\r\n").nth(1).expect("a reply body");
         let json: serde_json::Value = serde_json::from_str(body.trim()).expect("a JSON body");
         json["now"].as_str().expect("a `now` field").to_string()
+    }
+
+    // ------------------------------------------------------------------ what the mutation run showed was not pinned
+
+    #[test]
+    fn the_control_secret_prints_as_redacted_in_every_form_and_never_as_itself() {
+        let secret = ControlSecret::new("s3cret-value-".repeat(5)).unwrap();
+        assert_eq!(format!("{secret:?}"), "ControlSecret(<redacted>)");
+        assert_eq!(format!("{secret}"), "<redacted>");
+        assert_eq!(format!("{secret:#?}"), "ControlSecret(<redacted>)");
+        for shown in [format!("{secret:?}"), secret.to_string()] {
+            assert!(!shown.contains("s3cret"), "{shown}");
+        }
+    }
+
+    #[test]
+    fn the_control_port_is_a_real_unused_loopback_port_that_can_be_bound_straight_away() {
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..8 {
+            let port = pick_control_port().unwrap();
+            assert!(port >= 1024, "{port} is a privileged or reserved port");
+            // Nothing is using it: it can be bound right now, which is what the core does a moment later.
+            let taken = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port));
+            assert!(taken.is_ok(), "port {port} was not free");
+            seen.insert(port);
+        }
+        assert!(
+            seen.len() > 1,
+            "eight picks were all the same port: {seen:?}"
+        );
+    }
+
+    #[test]
+    fn a_tag_is_letters_digits_dashes_and_underscores_up_to_the_limit_and_nothing_else() {
+        for good in [
+            "a",
+            "A9",
+            "hy2-main",
+            "reality_1",
+            "a-b_c",
+            &"x".repeat(MAX_TAG),
+        ] {
+            assert!(check_tag(good).is_ok(), "{good}");
+        }
+        for bad in [
+            "",
+            "a b",
+            "a/b",
+            "a.b",
+            "a:b",
+            "a\nb",
+            "é",
+            "a\0b",
+            "../x",
+            &"x".repeat(MAX_TAG + 1),
+        ] {
+            assert!(
+                matches!(check_tag(bad), Err(SwitchError::BadTag)),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_owned_probe_says_yes_for_an_origin_that_answers_and_no_for_one_that_does_not() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let answering =
+            OwnedOriginProbe(Origin::parse(&format!("http://127.0.0.1:{port}")).unwrap());
+        assert!(answering.attempt().await);
+        drop(listener);
+
+        // "Nothing listens there", without a race. Closing the listener and trusting the port to stay free was flaky:
+        // tests run in parallel, and the system can hand that very port to another test's listener a moment later, so
+        // the "closed" origin then answered (seen on Linux). A socket that is bound but never listens refuses every
+        // connection, and keeps the port to itself until the end of the test.
+        let reserved = tokio::net::TcpSocket::new_v4().unwrap();
+        reserved
+            .bind(std::net::SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .unwrap();
+        let silent_port = reserved.local_addr().unwrap().port();
+        let closed =
+            OwnedOriginProbe(Origin::parse(&format!("http://127.0.0.1:{silent_port}")).unwrap());
+        assert!(!closed.attempt().await, "nothing listens there now");
+        drop(reserved);
     }
 }

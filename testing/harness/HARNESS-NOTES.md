@@ -75,6 +75,19 @@ a rule miss that was really a missing interpreter.
   `$LASTEXITCODE` unreliable. Docker writes routine progress to stderr. Native calls run with
   the preference temporarily relaxed and the exit code captured explicitly.
 
+### 6. A length match is the wrong way to make an MTU black hole
+
+The first H10 dropped packets over a size with `-m length`. It reported REALITY unusable even at a limit of 1492,
+and the rule's byte counter showed why: about 5.7 KB per "packet". A virtual NIC hands the firewall merged
+super-packets (GRO/GSO) that no real wire carries, so the rule dropped traffic a real 1500-byte link would pass. The
+condition now does what a real narrow link does: the utm's transit interface gets the smaller MTU (the kernel drops
+what does not fit, with no reply on the virtual link) and the ICMP "fragmentation needed" / "packet too big" answers
+are dropped. Measured with it, 2 MB through each profile: path MTU 1492 and 1400, both profiles work; **1280, Hysteria 2
+fails its handshake (8 s) and REALITY works**, so the race selects REALITY (scenario `H10-1280`; `H10-1400` is the
+control that shows the MTU is the cause). Also measured: `harness.ps1 apply H10 1400` with the value as a positional
+argument is refused by PowerShell (`-Arg 1400` is the form), and a run that did not apply the condition looked like
+a pass, which is why the counter or the interface MTU is read back before a result is believed.
+
 ---
 
 ## Coverage
@@ -120,3 +133,13 @@ to test.** Tracked as a Phase 6 prerequisite.
 
 **Always read `report` before trusting a negative result.** A profile that "survived" a
 condition whose rule shows 0 packets was never actually tested (HN-03).
+
+## If every scenario says "got none", including `baseline` (found 2026-11-14)
+
+That is the lab, not the code. After Docker restarts the containers (a reboot, a Docker Desktop update) they can come
+back **without their host port mappings**: `docker ps` shows `8080/tcp, 8443/tcp, ...` where it should show
+`127.0.0.1:8080->8080/tcp, 0.0.0.0:8443->8443/tcp, ...`, nothing on the host can reach them, and every probe fails its
+handshake. `Test-NetConnection 127.0.0.1 -Port 8443` says `False`. Recreate them: `.\harness.ps1 down`, then
+`.\harness.ps1 up` (it holds only simulated state), wait for both containers to be `(healthy)`, and run
+`.\Invoke-Race.ps1` again. The endpoint container may flap once or twice while the cores start; that is normal.
+Result on the code at `7293525`: all eight scenarios match, including the two that must select nothing (`blocked`, `H9`).

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! ETW real-time session; connect-time PID attribution.
 //!
 //! See `specs/001-network-resilience-client/` for the governing specification, and

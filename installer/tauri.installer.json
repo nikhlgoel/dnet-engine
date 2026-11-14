@@ -14,6 +14,10 @@
         "installerHooks": "../../../installer/hooks.nsh",
         "displayLanguageSelector": false,
         "compression": "lzma"
+      },
+      "signCommand": {
+        "cmd": "powershell",
+        "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "../../../installer/Sign-Files.ps1", "%1"]
       }
     }
   }

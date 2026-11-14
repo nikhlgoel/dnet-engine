@@ -1,0 +1,37 @@
+# What a dependency of this GPL-3.0-or-later project may be licensed under, and where it may come from.
+# Checked in CI (`cargo deny check licenses sources`), for the workspace and for the window shell,
+# which has its own lock file. Known vulnerabilities are a separate check (the Advisories workflow).
+#
+# The list is every licence the dependency tree carries today, each compatible with GPL-3.0-or-later.
+# A new dependency under a licence that is not here fails the check; adding a licence to this list is a
+# decision, not a formality: read the licence, and check the constitution's licence obligations first.
+
+[graph]
+all-features = true
+
+[licenses]
+confidence-threshold = 0.9
+allow = [
+    "GPL-3.0-or-later",
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    "Zlib",
+    "Unlicense",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+    "LGPL-2.1-or-later",
+    "MPL-2.0",
+]
+
+[sources]
+# crates.io only: no dependency from a git repository or another registry gets in unnoticed.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

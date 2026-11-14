@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T078 — a portal whose session ends mid-connection is reported as a portal, not as a generic loss
 //! (US6-3).
 //!

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T112 — the diagnostic bundle (FR-035, IPC-07).
 //!
 //! When something goes wrong, a person needs to be able to hand someone enough to explain it. FR-035 says
@@ -358,3 +359,92 @@ pub fn render(facts: &Facts<'_>, options: Options) -> String {
 
 #[cfg(test)]
 mod tests;
+
+/// What the mutation run showed the bundle's own tests did not pin: the redaction pass on its own (not only the
+/// refusal that follows it), the units, the cut of a long list, and the words used for warnings.
+#[cfg(test)]
+mod pinned_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn values() -> Vec<String> {
+        vec!["secret".to_owned()]
+    }
+
+    #[test]
+    fn the_redaction_pass_reaches_into_lists_and_nested_lists_and_objects() {
+        let mut bundle = json!({
+            "list": ["has a secret in it", "fine"],
+            "nested": [["deep SECRET"], [[ "deeper secret" ]]],
+            "object": { "inner": ["a secret", { "again": "secret" }] },
+            "number": 7,
+            "flag": true,
+            "nothing": null,
+        });
+        redact(&mut bundle, &values());
+        let text = bundle.to_string().to_lowercase();
+        assert!(!text.contains("secret"), "{text}");
+        assert_eq!(bundle["list"][0], "has a <removed> in it");
+        assert_eq!(bundle["list"][1], "fine");
+        assert_eq!(bundle["nested"][0][0], "deep <removed>");
+        assert_eq!(bundle["nested"][1][0][0], "deeper <removed>");
+        assert_eq!(bundle["object"]["inner"][0], "a <removed>");
+        assert_eq!(bundle["object"]["inner"][1]["again"], "<removed>");
+        // What is not text is left as it was.
+        assert_eq!(bundle["number"], 7);
+        assert_eq!(bundle["flag"], true);
+        assert!(bundle["nothing"].is_null());
+    }
+
+    #[test]
+    fn a_value_is_found_ignoring_case_when_it_is_ascii_and_exactly_when_it_is_not() {
+        assert_eq!(scrub("A SeCrEt here", &values()), "A <removed> here");
+        assert_eq!(scrub("secretsecret", &values()), "<removed><removed>");
+        let names = vec!["Zürich".to_owned()];
+        assert_eq!(scrub("in Zürich today", &names), "in <removed> today");
+        assert_eq!(scrub("in zürich today", &names), "in zürich today");
+        assert_eq!(scrub("nothing to hide", &values()), "nothing to hide");
+        assert_eq!(scrub("", &values()), "");
+    }
+
+    #[test]
+    fn a_list_is_kept_whole_up_to_the_limit_and_cut_with_a_count_past_it() {
+        let make = |n: usize| (0..n).map(|i| json!(i)).collect::<Vec<_>>();
+        let at_limit = cut(make(MAX_LISTED));
+        assert_eq!(at_limit.as_array().unwrap().len(), MAX_LISTED);
+        assert!(at_limit.as_array().unwrap().iter().all(Value::is_number));
+        let past = cut(make(MAX_LISTED + 1));
+        let items = past.as_array().unwrap();
+        assert_eq!(items.len(), MAX_LISTED + 1);
+        assert_eq!(items[MAX_LISTED], json!({ "left_out": 1 }));
+        let far_past = cut(make(MAX_LISTED + 30));
+        assert_eq!(
+            far_past.as_array().unwrap()[MAX_LISTED],
+            json!({ "left_out": 30 })
+        );
+        assert_eq!(cut(Vec::new()), json!([]));
+    }
+
+    #[test]
+    fn times_are_milliseconds_to_one_decimal_place() {
+        assert_eq!(millis(Duration::from_millis(1500)), 1500.0);
+        assert_eq!(millis(Duration::from_micros(1234)), 1.2);
+        assert_eq!(millis(Duration::from_micros(1250)), 1.3);
+        assert_eq!(millis(Duration::from_secs(2)), 2000.0);
+        assert_eq!(millis(Duration::from_micros(40)), 0.0);
+        assert_eq!(millis(Duration::from_micros(60)), 0.1);
+        assert_eq!(millis(Duration::ZERO), 0.0);
+    }
+
+    #[test]
+    fn each_warning_has_its_own_plain_name() {
+        let names = [
+            (Warning::Tier2ProfileActive, "Tier2ProfileActive"),
+            (Warning::BrutalEnabled, "BrutalEnabled"),
+            (Warning::EncryptedDnsOverridden, "EncryptedDnsOverridden"),
+        ];
+        for (warning_value, expected) in names {
+            assert_eq!(warning(warning_value), expected);
+        }
+    }
+}

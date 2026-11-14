@@ -112,7 +112,14 @@
     return slot.left ? Math.max(slot.x, w + 14) : Math.min(slot.x, width - w - 14);
   }
 
-  const hit = $derived(radiusFor(height) * 1.25);
+  const hit = $derived(radiusFor(height) * 1.1);
+
+  /** The pointer is over the figure: it lifts itself a little (no outline is drawn over it). */
+  function hovering(on: boolean): void {
+    scene?.setHover(on);
+    // Under reduced motion nothing is running, so one still frame shows the change.
+    if (still || !visible) kick();
+  }
 </script>
 
 <div class="scene" bind:this={box} role="group" aria-label="Your networks">
@@ -127,6 +134,8 @@
     style:width="{hit * 2}px"
     style:height="{hit * 2}px"
     onclick={ontoggle}
+    onpointerenter={() => hovering(true)}
+    onpointerleave={() => hovering(false)}
   ></div>
   <ul class="sats">
     {#each chips as chip, i (chip.id)}
@@ -178,11 +187,6 @@
     position: absolute;
     border-radius: 50%;
     cursor: pointer;
-    transition: box-shadow var(--dur-2) var(--ease);
-  }
-
-  .core-hit:hover {
-    box-shadow: 0 0 0 1px var(--c-line-strong);
   }
 
   .sats {

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T127 — doing what was asked, and saying what happened.
 //!
 //! Generic over how the daemon is reached ([`Connector`]) and where output goes ([`Sink`]), so
@@ -301,6 +302,11 @@ pub async fn run<C: Connector>(
             }
         }
         Command::EncryptedDns { block } => Some(Request::SetEncryptedDnsHandling { block: *block }),
+        Command::KillSwitch { on: Some(enabled) } => {
+            Some(Request::SetKillSwitch { enabled: *enabled })
+        }
+        Command::KillSwitch { on: None } => Some(Request::GetGuard),
+        Command::GuardRelease => Some(Request::ReleaseGuard),
         Command::AddRule {
             kind,
             value,
@@ -535,6 +541,48 @@ pub async fn run<C: Connector>(
                     "Encrypted name lookups by programs are no longer blocked.\n{}",
                     render::plain(consequence)
                 ))
+            })
+            .await
+        }
+        // The state, as the service reports it. A reply that does not say both things is not one to print.
+        Command::KillSwitch { on: None } => {
+            let request = request.expect("built above for the kill-switch state");
+            change(&mut connection, &request, &invocation, sink, |reply| {
+                let on = reply.get("kill_switch").and_then(Value::as_bool)?;
+                let guard = match reply.get("guard_in")? {
+                    Value::Bool(true) => "The guard is in the firewall now.",
+                    Value::Bool(false) => "No guard is in the firewall now.",
+                    Value::Null => "The firewall could not be asked whether the guard is in.",
+                    _ => return None,
+                };
+                Some(format!(
+                    "Kill switch: {}. {guard}",
+                    if on { "on" } else { "off" }
+                ))
+            })
+            .await
+        }
+        Command::KillSwitch { on: Some(enabled) } => {
+            let request = request.expect("built above for the kill-switch choice");
+            change(&mut connection, &request, &invocation, sink, |reply| {
+                reply.get("kill_switch").and_then(Value::as_bool)?;
+                let effect = reply.get("effect").and_then(Value::as_str)?;
+                Some(format!(
+                    "Kill switch turned {}. {}",
+                    if enabled { "on" } else { "off" },
+                    render::plain(effect)
+                ))
+            })
+            .await
+        }
+        Command::GuardRelease => {
+            let request = request.expect("built above for the guard release");
+            change(&mut connection, &request, &invocation, sink, |reply| {
+                if reply.get("guard_in").and_then(Value::as_bool) != Some(false) {
+                    return None;
+                }
+                let effect = reply.get("effect").and_then(Value::as_str)?;
+                Some(render::plain(effect))
             })
             .await
         }

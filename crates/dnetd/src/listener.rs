@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T169 step d — who is listening on a local port, asked of the operating system.
 //!
 //! The service sends the core's control secret to a loopback port it chose a moment before the core bound it

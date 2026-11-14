@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! DNet Engine privileged background service (`dnetd`).
 //!
 //! Runs as LocalSystem. It is the only component permitted to alter routing, DNS, or
@@ -30,12 +31,19 @@ mod approval;
 mod components;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod configure;
+mod devices;
 mod diagnostics;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod domain;
 // `dnetd install`, `uninstall` and `stop` (T114); the words are read on every platform.
 mod install;
 mod intent;
+// The person's kill-switch choice, remembered (T161).
+#[cfg_attr(not(windows), allow(dead_code))]
+mod killswitch;
+// The one door to the firewall guard, and a fake of it for the tests (T161).
+#[cfg_attr(not(windows), allow(dead_code))]
+mod guard_control;
 // Setting up the person's own server from the window (T150).
 #[cfg_attr(not(windows), allow(dead_code))]
 mod server_setup;
@@ -177,7 +185,7 @@ pub(crate) async fn shutdown_orchestrator(handle: Option<orchestrator::Handle>) 
 /// connects.
 #[cfg(windows)]
 pub(crate) fn build_service() -> std::sync::Arc<service_impl::DnetService> {
-    let recovery = recovery::recover_installation();
+    let recovery = recovery::recover_for_service();
     let service = service_impl::DnetService::production(recovery).with_production_orchestrator();
     // Left on before this start (a reboot, an update, a crash): connect again (T147). Only after
     // recovery, and only through an orchestrator that recovery allowed to exist.

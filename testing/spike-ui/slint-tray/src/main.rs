@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Measurement spike (not product code): a native toolkit as a tray-resident app, for comparison
 //! with the Tauri spike. Same timetable (open at 15 s, destroy at 45 s), same content.
 

@@ -8,11 +8,23 @@
  */
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import type { Bridge, Capabilities, NewEndpointInput, Outcome, PreparedServer } from './bridge';
+import type {
+  Bridge,
+  Capabilities,
+  InvitedDevice,
+  JoinRequest,
+  NewEndpointInput,
+  Outcome,
+  OutcomeCode,
+  PreparedDevice,
+  PreparedServer,
+} from './bridge';
 import { brutalWarning } from './messages';
 import {
   parseActivity,
+  parseComponents,
   parseEndpoints,
+  parseGuard,
   parsePending,
   parseProfiles,
   parseRulesReply,
@@ -21,7 +33,7 @@ import {
   type Snapshot,
 } from './model';
 
-const CODES = new Set(['TierConsentRequired', 'ServiceBusy', 'NotConnected', 'Refused']);
+const CODES: ReadonlySet<string> = new Set<OutcomeCode>(['TierConsentRequired', 'ServiceBusy', 'NotConnected', 'ApprovalRequired', 'Refused']);
 
 /** A command's reply as an `Outcome`. Anything that is not clearly a success is a refusal with a reason. */
 function outcome(value: unknown): Outcome & Record<string, unknown> {
@@ -29,8 +41,8 @@ function outcome(value: unknown): Outcome & Record<string, unknown> {
     const v = value as Record<string, unknown>;
     if (v.ok === true) return v as Outcome & Record<string, unknown>;
     if (v.ok === false && typeof v.reason === 'string') {
-      const code = typeof v.code === 'string' && CODES.has(v.code) ? v.code : undefined;
-      return { ok: false, reason: v.reason, ...(code ? { code: code as 'Refused' } : {}) };
+      const code = typeof v.code === 'string' && CODES.has(v.code) ? (v.code as OutcomeCode) : undefined;
+      return { ok: false, reason: v.reason, ...(code ? { code } : {}) };
     }
   }
   return { ok: false, reason: 'The service gave an answer this window does not understand.', code: 'Refused' };
@@ -65,6 +77,42 @@ function parsePrepared(value: Record<string, unknown>): PreparedServer | null {
   if (typeof validForMinutes !== 'number' || !Number.isFinite(validForMinutes) || validForMinutes < 1) return null;
   return { arch, script, ports: checked, validForMinutes: Math.floor(validForMinutes) };
 }
+
+/** A name a person may give a device: the service's own rule, checked again on this side of the door. */
+const DEVICE_NAME = /^(?! )[A-Za-z0-9 ._-]{1,32}(?<! )$/;
+
+function minutes(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.floor(value) : null;
+}
+
+/** The request text a friend sends, read as untrusted: anything but the promised shape is refused. */
+function parseJoinRequest(value: Record<string, unknown>): JoinRequest | null {
+  const { name, text, validForMinutes } = value;
+  const left = minutes(validForMinutes);
+  if (typeof name !== 'string' || !DEVICE_NAME.test(name)) return null;
+  if (typeof text !== 'string' || !text.startsWith('DNET-DEVICE-REQUEST ') || text.length > 16384) return null;
+  if (left === null) return null;
+  return { name, text, validForMinutes: left };
+}
+
+function parsePreparedDevice(value: Record<string, unknown>): PreparedDevice | null {
+  const { name, script, validForMinutes } = value;
+  const left = minutes(validForMinutes);
+  if (typeof name !== 'string' || !DEVICE_NAME.test(name)) return null;
+  if (typeof script !== 'string' || script.length === 0 || script.length > 65536) return null;
+  if (left === null) return null;
+  return { name, script, validForMinutes: left };
+}
+
+function parseInvitedDevice(value: Record<string, unknown>): InvitedDevice | null {
+  const { name, address, invite } = value;
+  if (typeof name !== 'string' || !DEVICE_NAME.test(name)) return null;
+  if (typeof address !== 'string' || !/^\d{1,3}(\.\d{1,3}){3}$/.test(address)) return null;
+  if (typeof invite !== 'string' || invite.length > 65536 || !/^DNET-INVITE-1:[A-Za-z0-9_-]+$/.test(invite)) return null;
+  return { name, address, invite };
+}
+
+const UNEXPECTED = 'The background service’s answer was not what was expected.';
 
 function capabilitiesFrom(value: unknown): Capabilities {
   const v = (typeof value === 'object' && value !== null ? value : {}) as Record<string, unknown>;
@@ -173,8 +221,34 @@ export async function createTauriBridge(): Promise<Bridge> {
       const reply = await call('finish_server', { ...input });
       return reply.ok && typeof reply.id === 'string' ? { ok: true as const, id: reply.id } : reply;
     },
+    async requestJoin(name) {
+      const reply = await call('request_join', { name });
+      if (!reply.ok) return reply;
+      const request = parseJoinRequest(reply);
+      return request ? { ok: true as const, request } : { ok: false as const, reason: UNEXPECTED };
+    },
+    async acceptInvite(invite, label) {
+      const reply = await call('accept_invite', { invite, label: label ?? null });
+      return reply.ok && typeof reply.id === 'string' ? { ok: true as const, id: reply.id } : reply;
+    },
+    async prepareDevice(endpoint, request) {
+      const reply = await call('prepare_device', { endpoint, text: request });
+      if (!reply.ok) return reply;
+      const prepared = parsePreparedDevice(reply);
+      return prepared ? { ok: true as const, prepared } : { ok: false as const, reason: UNEXPECTED };
+    },
+    async finishDevice(endpoint, request, report) {
+      const reply = await call('finish_device', { endpoint, text: request, report });
+      if (!reply.ok) return reply;
+      const invited = parseInvitedDevice(reply);
+      return invited ? { ok: true as const, invited } : { ok: false as const, reason: UNEXPECTED };
+    },
     removeEndpoint: (id) => call('remove_endpoint', { id }),
     setEndpointEnabled: (id, enabled) => call('set_endpoint_enabled', { id, enabled }),
+
+    async components() {
+      return parseComponents(await invoke('list_components'));
+    },
 
     async profiles() {
       return parseProfiles(await invoke('list_profiles'));
@@ -205,6 +279,22 @@ export async function createTauriBridge(): Promise<Bridge> {
     async setEncryptedDns(block) {
       const reply = await call('set_encrypted_dns', { block });
       return reply.ok && typeof reply.consequence === 'string' ? { ok: true as const, consequence: reply.consequence } : reply;
+    },
+
+    async guard() {
+      return parseGuard(await invoke('get_guard'));
+    },
+    async setKillSwitch(enabled) {
+      const reply = await call('set_kill_switch', { enabled });
+      if (!reply.ok) return reply;
+      return typeof reply.effect === 'string' && typeof reply.saved === 'boolean'
+        ? { ok: true as const, effect: reply.effect, saved: reply.saved }
+        : { ok: false as const, reason: UNEXPECTED };
+    },
+    async releaseGuard() {
+      const reply = await call('release_guard');
+      if (!reply.ok) return reply;
+      return typeof reply.effect === 'string' ? { ok: true as const, effect: reply.effect } : { ok: false as const, reason: UNEXPECTED };
     },
 
     async checkUpdates() {

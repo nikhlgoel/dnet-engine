@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T100 — the service's events as lines of the Activity view.
 //!
 //! Every event carries a `because` that is neither empty nor the event's own name (contract §Subscribe), and

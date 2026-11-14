@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T073 — the generated configuration and the rule evaluator agree on every destination (SC-017).
 //!
 //! The primary core routes at run time from a configuration generated out of the rule set; the product

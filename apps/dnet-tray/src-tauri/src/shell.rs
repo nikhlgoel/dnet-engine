@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T100, T101 — the tray, the window's life, and the commands (ADR-0007 R1, R2, R4).
 //!
 //! Everything that decides something is in `dnet-view`; this is the part that touches the operating system.
@@ -41,6 +42,10 @@ struct Shell {
     grace: Mutex<Grace>,
     /// Whether the window is on screen. Nothing is sent to it while it is not.
     visible: AtomicBool,
+    /// The page has drawn its own title bar. The window has no system frame, so if this does not become true soon
+    /// after the window is made, the frame is given back (a page that failed to start must not leave a window that
+    /// cannot be moved or closed).
+    page_ready: AtomicBool,
     /// Wakes the state loop early: the service said something, or the person asked for something.
     wake: tokio::sync::Notify,
     tray: Mutex<Option<TrayParts>>,
@@ -56,6 +61,7 @@ impl Shell {
             backlog: Mutex::new(Backlog::new()),
             grace: Mutex::new(Grace::new()),
             visible: AtomicBool::new(false),
+            page_ready: AtomicBool::new(false),
             wake: tokio::sync::Notify::new(),
             tray: Mutex::new(None),
             text: Mutex::new(None),
@@ -161,8 +167,12 @@ fn open_window(app: &AppHandle) {
         return;
     }
     // Created hidden and shown when the page has loaded, so there is no blank frame (R2).
+    shell.page_ready.store(false, Ordering::Relaxed);
     let built = WebviewWindowBuilder::new(app, WINDOW, WebviewUrl::App("index.html".into()))
         .title("DNet Engine")
+        // No system frame: the page draws the title bar and the edge (ADR-0007 R4 keeps what it may ask of the
+        // window to the four commands below).
+        .decorations(false)
         .inner_size(960.0, 660.0)
         .min_inner_size(560.0, 420.0)
         .visible(false)
@@ -173,12 +183,34 @@ fn open_window(app: &AppHandle) {
         })
         .build();
     match built {
-        Ok(_) => shell.wake.notify_one(),
+        Ok(_) => {
+            shell.wake.notify_one();
+            watch_page(app.clone());
+        }
         Err(error) => {
             shell.visible.store(false, Ordering::Relaxed);
             eprintln!("could not open the window: {error}");
         }
     }
+}
+
+/// How long a new window has to say its title bar is drawn before the system frame is given back.
+const PAGE_READY_WITHIN: Duration = Duration::from_secs(10);
+
+/// Give the window its system frame back if its page never says it is up: the window has none of its own, and a
+/// page that failed to start would otherwise leave it with no way to move or close it.
+fn watch_page(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(PAGE_READY_WITHIN).await;
+        let shell = app.state::<Arc<Shell>>();
+        if shell.page_ready.load(Ordering::Relaxed) {
+            return;
+        }
+        if let Some(window) = app.get_webview_window(WINDOW) {
+            eprintln!("the window's page did not start; giving the window its system frame back");
+            let _ = window.set_decorations(true);
+        }
+    });
 }
 
 /// The window was closed: hide it, send it nothing, and let the web view go if nobody wants it back (R2).
@@ -366,6 +398,45 @@ async fn finish_server(
     Ok(outcome)
 }
 
+/// A friend's computer asks to join a server: the text to send to its owner (T188).
+#[tauri::command]
+async fn request_join(shell: Shared<'_>, name: String) -> Result<Value, String> {
+    Ok(shell.bridge.request_join(&name).await)
+}
+
+/// The owner's invite, pasted: the server is added after an approval, with this computer's own key (T188).
+#[tauri::command]
+async fn accept_invite(
+    shell: Shared<'_>,
+    invite: String,
+    label: Option<String>,
+) -> Result<Value, String> {
+    let outcome = shell.bridge.accept_invite(&invite, label.as_deref()).await;
+    shell.wake.notify_one();
+    Ok(outcome)
+}
+
+/// The owner adds a friend's device to one of their servers: the script to run on it (T188).
+#[tauri::command]
+async fn prepare_device(
+    shell: Shared<'_>,
+    endpoint: String,
+    text: String,
+) -> Result<Value, String> {
+    Ok(shell.bridge.prepare_device(&endpoint, &text).await)
+}
+
+/// What that script printed, pasted back: the invite to send to the friend (T188).
+#[tauri::command]
+async fn finish_device(
+    shell: Shared<'_>,
+    endpoint: String,
+    text: String,
+    report: String,
+) -> Result<Value, String> {
+    Ok(shell.bridge.finish_device(&endpoint, &text, &report).await)
+}
+
 #[tauri::command]
 async fn add_rule(
     shell: Shared<'_>,
@@ -383,6 +454,12 @@ async fn remove_rule(shell: Shared<'_>, id: String) -> Result<Value, String> {
     let outcome = shell.bridge.remove_rule(&id).await;
     shell.wake.notify_one();
     Ok(outcome)
+}
+
+/// The live map of parts, read-only (T170).
+#[tauri::command]
+async fn list_components(shell: Shared<'_>) -> Result<Value, String> {
+    shell.bridge.components().await
 }
 
 #[tauri::command]
@@ -443,9 +520,70 @@ fn run_approver(args: &[String]) -> Option<i32> {
     command.status().ok()?.code()
 }
 
+// ---------------------------------------------------------------------------------------- the window's frame
+//
+// The page draws its own title bar, so it needs four things from the window and no more. Each acts on this
+// program's own window and takes no argument.
+
+#[tauri::command]
+fn window_minimize(app: AppHandle) {
+    if let Some(window) = app.get_webview_window(WINDOW) {
+        let _ = window.minimize();
+    }
+}
+
+#[tauri::command]
+fn window_toggle_maximize(app: AppHandle) {
+    if let Some(window) = app.get_webview_window(WINDOW) {
+        let maximized = window.is_maximized().unwrap_or(false);
+        let _ = if maximized {
+            window.unmaximize()
+        } else {
+            window.maximize()
+        };
+    }
+}
+
+#[tauri::command]
+fn window_start_drag(app: AppHandle) {
+    if let Some(window) = app.get_webview_window(WINDOW) {
+        let _ = window.start_dragging();
+    }
+}
+
+/// Asks to close, which is what the system's own button did: the close handler hides the window and lets the web
+/// view go after its grace (R2). The tray keeps running.
+#[tauri::command]
+fn window_close(app: AppHandle) {
+    if let Some(window) = app.get_webview_window(WINDOW) {
+        let _ = window.close();
+    }
+}
+
+/// The page has drawn its title bar: the system frame is not needed (see `watch_page`).
+#[tauri::command]
+fn window_ready(shell: Shared<'_>) {
+    shell.page_ready.store(true, Ordering::Relaxed);
+}
+
 #[tauri::command]
 async fn set_encrypted_dns(shell: Shared<'_>, block: bool) -> Result<Value, String> {
     Ok(shell.bridge.set_encrypted_dns(block).await)
+}
+
+#[tauri::command]
+async fn get_guard(shell: Shared<'_>) -> Result<Value, String> {
+    shell.bridge.guard().await
+}
+
+#[tauri::command]
+async fn set_kill_switch(shell: Shared<'_>, enabled: bool) -> Result<Value, String> {
+    Ok(shell.bridge.set_kill_switch(enabled).await)
+}
+
+#[tauri::command]
+async fn release_guard(shell: Shared<'_>) -> Result<Value, String> {
+    Ok(shell.bridge.release_guard().await)
 }
 
 #[tauri::command]
@@ -455,7 +593,18 @@ async fn check_updates(shell: Shared<'_>) -> Result<Value, String> {
 
 #[tauri::command]
 fn open_login_page(shell: Shared<'_>) -> Value {
-    shell.bridge.open_login_page()
+    shell.bridge.open_login_page_with(open_in_default_browser)
+}
+
+/// Start the person's default browser on `url`. Windows' own way, `url.dll,FileProtocolHandler`: the address is one
+/// argument, not text a shell reads. The bridge only ever passes the operating system's own probe address, never one
+/// the network chose.
+fn open_in_default_browser(url: &str) -> std::io::Result<()> {
+    std::process::Command::new("rundll32.exe")
+        .arg("url.dll,FileProtocolHandler")
+        .arg(url)
+        .spawn()
+        .map(|_| ())
 }
 
 // ---------------------------------------------------------------------------------------- start
@@ -469,6 +618,25 @@ pub fn run() {
     };
     let shell = Arc::new(Shell::new(Arc::new(PipeLink::with_trust(trust))));
 
+    // One tray per person: a second copy asks the first to open its window and ends (`single`). If the name is held by
+    // something that does not answer, this copy starts anyway: a second tray is a smaller fault than none.
+    let pipe = crate::single::pipe_name();
+    let mut listener = match tauri::async_runtime::block_on(async { crate::single::acquire(&pipe) })
+    {
+        Ok(crate::single::Role::First(listener)) => Some(listener),
+        Ok(crate::single::Role::Second) => {
+            if tauri::async_runtime::block_on(crate::single::tell_first(&pipe)).is_ok() {
+                return;
+            }
+            eprintln!("another copy owns the tray's pipe but did not answer; starting anyway");
+            None
+        }
+        Err(error) => {
+            eprintln!("could not set up the one-tray guard ({error}); starting anyway");
+            None
+        }
+    };
+
     let app = tauri::Builder::default()
         .manage(shell.clone())
         .invoke_handler(tauri::generate_handler![
@@ -481,8 +649,13 @@ pub fn run() {
             remove_endpoint,
             prepare_server,
             finish_server,
+            request_join,
+            accept_invite,
+            prepare_device,
+            finish_device,
             set_endpoint_enabled,
             list_profiles,
+            list_components,
             set_brutal,
             list_rules,
             add_rule,
@@ -491,14 +664,31 @@ pub fn run() {
             reject_change,
             approve_change,
             set_encrypted_dns,
+            get_guard,
+            set_kill_switch,
+            release_guard,
             check_updates,
             open_login_page,
+            window_minimize,
+            window_toggle_maximize,
+            window_start_drag,
+            window_close,
+            window_ready,
         ])
         .on_window_event(|window, event| {
             if window.label() == WINDOW {
-                if let WindowEvent::CloseRequested { api, .. } = event {
-                    api.prevent_close();
-                    close_window(window.app_handle());
+                match event {
+                    WindowEvent::CloseRequested { api, .. } => {
+                        api.prevent_close();
+                        close_window(window.app_handle());
+                    }
+                    // The page draws a Maximize or a Restore button; it is told which, whoever changed it (the
+                    // title bar, a keyboard shortcut, or snapping the window to an edge).
+                    WindowEvent::Resized(_) => {
+                        let maximized = window.is_maximized().unwrap_or(false);
+                        let _ = window.emit_to(WINDOW, "dnet:window", maximized);
+                    }
+                    _ => {}
                 }
             }
         })
@@ -506,9 +696,18 @@ pub fn run() {
             build_tray(app, &shell)?;
             tauri::async_runtime::spawn(watch_state(app.handle().clone(), shell.clone()));
             tauri::async_runtime::spawn(follow_events(app.handle().clone(), shell.clone()));
-            // `--open` starts with the window showing, for a person starting it from a shortcut and for tests.
-            if std::env::args().any(|a| a == "--open") {
+            // The window opens when a person starts the program (a shortcut, the installer's last page, a second copy
+            // asking); only the login start (`--background`) leaves the tray alone.
+            if crate::single::shows_window(std::env::args()) {
                 open_window(app.handle());
+            }
+            if let Some(mut listener) = listener.take() {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    while listener.wait().await.is_ok() {
+                        open_window(&handle);
+                    }
+                });
             }
             Ok(())
         })

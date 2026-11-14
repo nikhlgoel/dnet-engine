@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T037 — the undo-record registry (data-model §Cross-cutting 1, FR-029, SC-016).
 //!
 //! Restoration is owed unconditionally: on disconnect, exit, crash, and uninstall. A crash
@@ -44,6 +45,10 @@ pub enum UndoRecord {
         destination: IpAddr,
         next_hop: IpAddr,
     },
+    /// Take the guard out of the firewall (T161): every filter, the sublayer and the provider the service made. The
+    /// provider is named by its key in text, and only the guard's own key is accepted: the journal is replayed by the
+    /// system's own account, so a record that names any other provider is tampering, never an instruction.
+    GuardFilters { provider: String },
 }
 
 impl UndoRecord {
@@ -68,6 +73,14 @@ impl UndoRecord {
                     return invalid("destination and next hop differ in address family");
                 }
                 Ok(())
+            }
+            UndoRecord::GuardFilters { provider } => {
+                match crate::guard_wfp::Guid::parse(provider) {
+                    Some(key) if crate::guard_wfp::is_ours(&key) => Ok(()),
+                    _ => Err(NetstateError::Journal(
+                        "invalid guard record: it does not name the guard's own provider".into(),
+                    )),
+                }
             }
         }
     }
@@ -198,8 +211,14 @@ impl UndoRegistry {
         })
     }
 
+    /// The lock is held across the caller's OS mutation, so a panic there poisons it. The undo path must still
+    /// work afterwards: it is what puts the network back. That is safe because the journal is consistent at every
+    /// point a panic can unwind from (a record is persisted before its mutation runs, and `journal` is assigned
+    /// only after a successful save), and reversal is idempotent.
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
-        self.inner.lock().expect("undo registry mutex poisoned")
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Records not yet reversed, oldest first.
@@ -370,6 +389,43 @@ mod tests {
             }
             self.inner.save(journal)
         }
+    }
+
+    /// A panic inside the OS call must not take the undo path down with it. The registry holds its lock across
+    /// the mutation, so a panic there poisons it; the journal is consistent at every point a panic can unwind
+    /// from (the record is written before the mutation runs), so the registry must keep answering, and the
+    /// record the dying mutation may have applied must still be reversible.
+    #[test]
+    fn a_panicking_mutation_does_not_stop_the_undo_path() {
+        let store = MemoryStore::new();
+        let registry = UndoRegistry::open(Box::new(store.clone())).unwrap();
+
+        let died = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = registry.apply(route(7), || panic!("the operating system call blew up"));
+        }));
+        assert!(
+            died.is_err(),
+            "the test must really have panicked inside the mutation"
+        );
+
+        // The write-ahead record is still there, in memory and on disk.
+        assert_eq!(registry.outstanding().len(), 1);
+        assert_eq!(stored_records(&store), vec![route(7)]);
+
+        // And it can be reversed, so nothing the mutation may have done is left behind.
+        let executor = Recorder::default();
+        let report = registry.replay(&executor).unwrap();
+        assert_eq!(report.restored, 1);
+        assert_eq!(*executor.reversed.borrow(), vec![route(7)]);
+        assert!(stored_records(&store).is_empty());
+
+        // New work still goes through.
+        let id = registry
+            .apply(route(8), || Ok(Mutation::Applied))
+            .unwrap()
+            .expect("applied");
+        registry.undo(id, &executor).unwrap();
+        assert!(registry.outstanding().is_empty());
     }
 
     #[test]
@@ -603,5 +659,84 @@ mod tests {
             next_hop: IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)),
         };
         assert!(record.validate().is_ok());
+    }
+}
+
+/// The guard's undo record (T161): what the journal may hold about the firewall, and what it may not.
+#[cfg(test)]
+mod guard_record_tests {
+    use super::*;
+    use crate::guard_wfp::{PROVIDER_KEY, SUBLAYER_KEY};
+
+    fn record(provider: &str) -> UndoRecord {
+        UndoRecord::GuardFilters {
+            provider: provider.to_owned(),
+        }
+    }
+
+    #[test]
+    fn the_guards_own_provider_is_accepted() {
+        record(&PROVIDER_KEY.to_text()).validate().unwrap();
+        // The same key in upper case is the same key.
+        record(&PROVIDER_KEY.to_text().to_uppercase())
+            .validate()
+            .unwrap();
+    }
+
+    #[test]
+    fn any_other_provider_or_anything_that_is_not_a_key_is_refused_as_tampering() {
+        for bad in [
+            SUBLAYER_KEY.to_text().as_str(),
+            "00000000-0000-0000-0000-000000000000",
+            // Microsoft's own provider, as a hostile journal might name it.
+            "decc16ca-3f33-4346-be1e-8fb4ae0f3d62",
+            "",
+            "not a guid",
+            "6d6e6574-1f5a-4c1e-9a37-d17e2b40c001 ",
+            "{6d6e6574-1f5a-4c1e-9a37-d17e2b40c001}",
+        ] {
+            let error = record(bad).validate().unwrap_err().to_string();
+            assert!(error.contains("guard's own provider"), "{bad:?}: {error}");
+        }
+    }
+
+    #[test]
+    fn it_is_written_in_the_journals_own_form_and_read_back_unchanged() {
+        let original = record(&PROVIDER_KEY.to_text());
+        let text = serde_json::to_string(&original).unwrap();
+        assert_eq!(
+            text,
+            r#"{"kind":"guard_filters","provider":"6d6e6574-1f5a-4c1e-9a37-d17e2b40c001"}"#
+        );
+        assert_eq!(serde_json::from_str::<UndoRecord>(&text).unwrap(), original);
+    }
+
+    #[test]
+    fn a_record_with_a_field_it_does_not_have_is_not_read() {
+        let hostile = r#"{"kind":"guard_filters","provider":"6d6e6574-1f5a-4c1e-9a37-d17e2b40c001","also":"delete everything"}"#;
+        assert!(serde_json::from_str::<UndoRecord>(hostile).is_err());
+        assert!(serde_json::from_str::<UndoRecord>(r#"{"kind":"guard_filters"}"#).is_err());
+    }
+
+    /// A journal with a guard record in it is registered before the filters are made and withdrawn when they are not.
+    #[test]
+    fn the_record_is_kept_until_the_filters_are_applied_and_withdrawn_if_they_are_not() {
+        let registry = UndoRegistry::open(Box::new(MemoryStore::new())).unwrap();
+        let key = PROVIDER_KEY.to_text();
+        // The filters could not be applied: nothing of ours to reverse, so the record goes.
+        let refused = registry.apply(record(&key), || {
+            Err(NetstateError::Operation(
+                "the firewall engine refused it".into(),
+            ))
+        });
+        assert!(refused.is_err());
+        assert!(registry.outstanding().is_empty());
+        // They were: the record stays, to be reversed.
+        let id = registry
+            .apply(record(&key), || Ok(Mutation::Applied))
+            .unwrap()
+            .expect("kept");
+        assert_eq!(registry.outstanding().len(), 1);
+        assert_eq!(registry.outstanding()[0].id, id);
     }
 }

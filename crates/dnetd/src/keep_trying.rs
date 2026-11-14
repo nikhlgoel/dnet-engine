@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T148 — while the person has left it on, a connection that failed is tried again (FR-036; spec edge
 //! case "the machine sleeps and wakes on a different network").
 //!

@@ -469,42 +469,208 @@ td:last-child {
   color: var(--c-text);
 }
 
+/* ---- known limits ----------------------------------------------------------------------------- */
+.limits,
+.status {
+  padding-block: calc(var(--s-7) * 1.5) 0;
+}
+
+.limit-list {
+  margin: var(--s-5) 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: var(--s-4);
+}
+
+.limit {
+  display: grid;
+  gap: var(--s-3);
+  padding: var(--s-5);
+  background: var(--c-card);
+  border: 1px solid var(--c-line);
+  border-inline-start: 4px solid var(--c-warn);
+  border-radius: var(--r-card);
+}
+
+.limit[data-state='built'] {
+  border-inline-start-color: var(--c-probe);
+}
+
+.limit h3 {
+  margin: 0;
+  font-size: var(--fs-xl);
+  line-height: var(--lh-tight);
+}
+
+.state {
+  margin: 0;
+}
+
+.pill {
+  display: inline-block;
+  padding: var(--s-1) var(--s-3);
+  border: 1px solid currentcolor;
+  border-radius: 999px;
+  font-size: var(--fs-md);
+  font-weight: 600;
+}
+
+.pill-wait {
+  color: var(--c-warn);
+}
+
+.pill-part {
+  color: var(--c-probe);
+}
+
+.limit dl {
+  margin: 0;
+  display: grid;
+  gap: var(--s-3);
+}
+
+@media (min-width: 52rem) {
+  .limit dl {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: var(--s-5);
+  }
+}
+
+.limit dt {
+  font-size: var(--fs-sm);
+  color: var(--c-text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.limit dd {
+  margin: var(--s-1) 0 0;
+  max-width: 44ch;
+}
+
+/* ---- where it stands: three groups with their counts ------------------------------------------ */
+.groups {
+  margin-block-start: var(--s-5);
+  display: grid;
+  gap: var(--s-4);
+}
+
+@media (min-width: 56rem) {
+  .groups {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    align-items: start;
+  }
+}
+
+.group {
+  padding: var(--s-5);
+  background: var(--c-card);
+  border: 1px solid var(--c-line);
+  border-block-start: 4px solid var(--c-line-strong);
+  border-radius: var(--r-card);
+}
+
+.group[data-group='works'] {
+  border-block-start-color: var(--c-ok);
+}
+
+.group[data-group='built'] {
+  border-block-start-color: var(--c-probe);
+}
+
+.group[data-group='not-yet'] {
+  border-block-start-color: var(--c-warn);
+}
+
+.group h3 {
+  margin: 0;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s-3);
+  font-size: var(--fs-xl);
+}
+
+.count {
+  font-family: var(--font-num);
+  font-size: var(--fs-2xl);
+  font-variant-numeric: tabular-nums;
+}
+
+.gnote {
+  margin: var(--s-1) 0 var(--s-3);
+  color: var(--c-text-2);
+}
+
+.group ul {
+  margin: 0;
+  padding-inline-start: 1.1em;
+  display: grid;
+  gap: var(--s-3);
+}
+
+.status .more {
+  margin-block-start: var(--s-4);
+}
+
 /* ---- footer ----------------------------------------------------------------------------------- */
 .foot {
   margin-block-start: var(--s-7);
-  padding-block: var(--s-6);
-  border-block-start: 1px solid var(--c-line);
+  padding-block: var(--s-7);
+  border-block-start: 1px solid var(--c-line-strong);
+  background: var(--c-card);
   color: var(--c-text-2);
   font-size: var(--fs-md);
 }
 
 .foot-grid {
   display: grid;
-  gap: var(--s-5);
+  gap: var(--s-6);
 }
 
-@media (min-width: 52rem) {
+@media (min-width: 40rem) {
   .foot-grid {
     grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (min-width: 64rem) {
+  .foot-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: var(--s-7);
   }
 }
 
-.foot nav {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--s-1) var(--s-5);
+.foot h2 {
+  margin: 0 0 var(--s-3);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--c-text);
 }
 
-.foot nav a {
+.foot ul {
+  margin: 0 0 var(--s-3);
+  padding: 0;
+  list-style: none;
+}
+
+.foot li a {
   display: inline-flex;
   align-items: center;
   min-height: var(--hit);
 }
 
 .foot p {
-  margin: 0;
-  max-width: 56ch;
+  margin: 0 0 var(--s-3);
+  max-width: 34ch;
+}
+
+.foot .fine {
+  font-size: var(--fs-sm);
+  color: var(--c-text-3);
 }
 
 /* ---- the first screen's picture: a connection that moves between networks ---------------------- */

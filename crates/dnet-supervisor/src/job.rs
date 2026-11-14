@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T163 — the cores die with the service (audit E11; `docs/research/2026-10-31-solutions.md` section 5).
 //!
 //! Both cores run as SYSTEM and parse what strangers send them. `kill_on_drop` ends a core when the service
@@ -112,6 +113,7 @@ mod tests {
 
     /// A process that would run for a minute if nothing ended it.
     fn long_lived() -> Child {
+        let _one_at_a_time = crate::process::spawning();
         Command::new("ping")
             .args(["-n", "60", "127.0.0.1"])
             .stdout(Stdio::null())

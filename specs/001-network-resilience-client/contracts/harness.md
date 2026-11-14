@@ -22,6 +22,7 @@ Each is independently selectable and composable.
 | **H7** | Interface loss and restore | Bring a container interface down/up at will | SC-005 |
 | **H8** | Endpoint blocklisting | Drop traffic to a specific endpoint address | SC-008, US4 |
 | **H9** | Bandwidth ceiling | `tc tbf` | Detects "handshake succeeded but unusable" (FR-004) |
+| **H10** | MTU black hole (added 2026-11-08, T190; arg = bytes, default 1280) | smaller MTU on the utm's transit interface, ICMP "fragmentation needed" / "packet too big" dropped | A narrow link that never says so: small packets pass, full-size ones stall. Measured: at 1280 Hysteria 2's QUIC handshake fails and REALITY carries 2 MB, so a race must pick REALITY; at 1400 and 1492 both work |
 
 **H3 and H4 are the ones that matter most.** A harness that only degrades quality proves nothing
 about DPI evasion — it must actively drop recognised signatures, or the obfuscation claim is

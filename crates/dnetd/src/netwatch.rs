@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T138 — watching the network while a tunnel is up, and moving it when it should move.
 //!
 //! This is the daemon half of failover. The decisions are made by pure code in `dnet-core`
@@ -599,6 +600,8 @@ mod tests {
         carried: Vec<(InterfaceId, Option<IpAddr>)>,
         fail_carry: bool,
         observed: Vec<(InterfaceId, Strategy)>,
+        /// Every target a probe was asked about, with the gateway it was given.
+        targets: Vec<ProbeTarget>,
         /// What a probe sees; anything not listed is an answer in 10 ms.
         answers: HashMap<(InterfaceId, Strategy), Option<Observation>>,
         probe_takes: Duration,
@@ -616,6 +619,7 @@ mod tests {
                 carried: Vec::new(),
                 fail_carry: false,
                 observed: Vec::new(),
+                targets: Vec::new(),
                 answers: HashMap::new(),
                 probe_takes: Duration::ZERO,
                 carry_takes: Duration::ZERO,
@@ -638,6 +642,7 @@ mod tests {
                 let (takes, answer) = {
                     let mut w = world.lock().unwrap();
                     w.observed.push((target.interface, strategy));
+                    w.targets.push(target);
                     let answer = w
                         .answers
                         .get(&(target.interface, strategy))
@@ -1322,6 +1327,74 @@ mod tests {
         assert!(
             snap.paths.iter().all(|p| !p.measured),
             "nothing is probed for an observed profile, so nothing is called measured"
+        );
+    }
+
+    /// A profile that is only followed reports where the tunnel is when that changes, and says nothing while it stays
+    /// where it was: a network event that leaves the tunnel on the same adapter is not a move.
+    #[tokio::test(start_paused = true)]
+    async fn a_followed_tunnel_that_stays_where_it_is_is_not_reported_again() {
+        let world = World::new(vec![wifi(true), wired(true)], Some(2));
+        let mut h = start(
+            world,
+            Profile {
+                carrier: Carrier::Udp,
+                endpoint_tcp: true,
+                steer: false,
+                needs_gateway: false,
+            },
+        );
+        assert_eq!(h.next_move().await.to, id(2));
+        secs(3).await;
+        for _ in 0..3 {
+            h.changed().await;
+            secs(3).await;
+        }
+        assert!(
+            h.no_move_pending(),
+            "the tunnel did not move, so nothing is reported"
+        );
+    }
+
+    /// A probe is told the IPv4 gateway of the path it measures, and of that path only: another network's gateway, an
+    /// IPv6 gateway or no gateway at all is no gateway to ping.
+    #[tokio::test(start_paused = true)]
+    async fn each_probe_is_given_the_ipv4_gateway_of_its_own_path_and_none_for_other_kinds() {
+        let v6: IpAddr = "fe80::1".parse().unwrap();
+        let paths = vec![
+            wifi(true),
+            wired(true),
+            path(3, PathKind::Cellular, 5, Some(v6), true),
+            path(4, PathKind::Other, 1, None, true),
+        ];
+        let world = World::new(paths.clone(), Some(1));
+        let h = start(world, AWG);
+        secs(20).await;
+        let targets = h.world.lock().unwrap().targets.clone();
+        let given = |n: u64| -> Vec<Option<std::net::Ipv4Addr>> {
+            targets
+                .iter()
+                .filter(|t| t.interface == id(n))
+                .map(|t| t.gateway)
+                .collect()
+        };
+        let v4_of = |p: &NetworkPath| match p.gateway {
+            Some(IpAddr::V4(g)) => Some(g),
+            _ => None,
+        };
+        for (n, path) in [(1u64, &paths[0]), (2, &paths[1]), (3, &paths[2])] {
+            let seen = given(n);
+            assert!(!seen.is_empty(), "path {n} was never probed");
+            assert!(
+                seen.iter().all(|g| *g == v4_of(path)),
+                "path {n} was given {seen:?}, its own is {:?}",
+                v4_of(path)
+            );
+        }
+        assert!(v4_of(&paths[0]).is_some() && v4_of(&paths[0]) != v4_of(&paths[1]));
+        assert!(
+            given(3).iter().all(Option::is_none),
+            "an IPv6 gateway is not a gateway to ping"
         );
     }
 

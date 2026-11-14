@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The trial generation: what a verified feed can still get wrong once its values are put together.
 //! The documents here are built directly, not parsed, so that values the feed parser would have
 //! refused can reach the generator: this layer must not depend on that parser having been right.

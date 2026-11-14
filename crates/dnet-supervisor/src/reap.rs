@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T045 — orphan reaping and ordered startup (SUP-05).
 //!
 //! A crashed `dnetd` can leave core processes running. At service start those orphans

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Tests for the diagnostic bundle (IPC-07, FR-035).
 
 use std::time::Duration;

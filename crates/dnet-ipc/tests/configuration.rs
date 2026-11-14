@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Configuration requests carry payloads (Phase 9; FR-010, FR-025, FR-025a, contracts/ipc-protocol.md).
 //!
 //! | ID     | Assertion |
@@ -58,6 +59,9 @@ fn ipc_17_each_configuration_request_round_trips() {
         },
         Request::SetEncryptedDnsHandling { block: true },
         Request::SetEncryptedDnsHandling { block: false },
+        Request::SetKillSwitch { enabled: true },
+        Request::SetKillSwitch { enabled: false },
+        Request::ReleaseGuard,
     ] {
         assert_eq!(request.class(), RequestClass::Mutating, "{request:?}");
         assert_eq!(
@@ -88,6 +92,11 @@ fn ipc_17_the_wire_form_is_what_the_contract_says() {
         wire,
         json!({ "request": "SetEncryptedDnsHandling", "block": false })
     );
+    let wire: Value =
+        serde_json::from_str(&encode_request(&Request::SetKillSwitch { enabled: true })).unwrap();
+    assert_eq!(wire, json!({ "request": "SetKillSwitch", "enabled": true }));
+    let wire: Value = serde_json::from_str(&encode_request(&Request::ReleaseGuard)).unwrap();
+    assert_eq!(wire, json!({ "request": "ReleaseGuard" }));
 
     let add = add_wire();
     let mut keys: Vec<&str> = add
@@ -113,6 +122,8 @@ fn ipc_18_an_unknown_field_is_refused_in_every_configuration_request() {
         json!({ "request": "RemoveEndpoint", "endpoint": id }),
         json!({ "request": "SetEndpointEnabled", "endpoint": id, "enabled": true }),
         json!({ "request": "SetEncryptedDnsHandling", "block": true }),
+        json!({ "request": "SetKillSwitch", "enabled": true }),
+        json!({ "request": "ReleaseGuard" }),
         add_wire(),
     ];
     for mut value in requests {
@@ -147,6 +158,11 @@ fn ipc_18_a_missing_or_null_field_is_refused_not_defaulted() {
             "endpoint",
         ),
         (json!({ "request": "SetEncryptedDnsHandling" }), "block"),
+        (json!({ "request": "SetKillSwitch" }), "enabled"),
+        (
+            json!({ "request": "SetKillSwitch", "enabled": null }),
+            "enabled",
+        ),
         (
             json!({ "request": "SetEncryptedDnsHandling", "block": null }),
             "block",
@@ -178,6 +194,10 @@ fn ipc_18_a_flag_must_be_a_boolean_and_an_id_must_be_a_uuid() {
         assert!(
             decode_value(&json!({ "request": "SetEncryptedDnsHandling", "block": bad.clone() }))
                 .is_err(),
+            "{bad}"
+        );
+        assert!(
+            decode_value(&json!({ "request": "SetKillSwitch", "enabled": bad.clone() })).is_err(),
             "{bad}"
         );
         assert!(
@@ -247,7 +267,7 @@ fn ipc_19_the_label_is_short_printable_ascii() {
 }
 
 #[test]
-fn ipc_19_the_host_is_an_address_or_a_name_and_nothing_else() {
+fn ipc_19_the_host_is_a_plain_ipv4_address_a_server_can_have_and_nothing_else() {
     for bad in [
         "",
         "  ",
@@ -257,10 +277,16 @@ fn ipc_19_the_host_is_an_address_or_a_name_and_nothing_else() {
         "exa mple.org",
         "a..b",
         "-x.example",
+        "localhost",
         "0.0.0.0",
         "::",
         "224.0.0.1",
         "ff02::1",
+        // The same addresses in an IPv6 coat, and the one every host on a link receives.
+        "255.255.255.255",
+        "::ffff:0.0.0.0",
+        "::ffff:224.0.0.1",
+        "::ffff:255.255.255.255",
         "user@example.org",
         &"a".repeat(300),
         "evil.example;rm",
@@ -270,15 +296,50 @@ fn ipc_19_the_host_is_an_address_or_a_name_and_nothing_else() {
         wire["host"] = json!(bad);
         assert!(decode_value(&wire).is_err(), "{bad:?}");
     }
-    for good in [
-        "203.0.113.9",
-        "2001:db8::7",
-        "vpn.example.org",
-        "VPN.Example.Org",
-    ] {
+    for good in ["203.0.113.9", "127.0.0.1", "10.0.0.5", "198.51.100.200"] {
         let mut wire = add_wire();
         wire["host"] = json!(good);
         assert!(decode_value(&wire).is_ok(), "{good}");
+    }
+}
+
+/// A host name would have to be looked up on whatever network the computer is on, before the tunnel exists, and
+/// whoever controls that network could answer with their own address. The connection refuses a name (`plan`), so
+/// adding one must say so now, not at the first connect.
+/// The connection refuses an IPv6 server too (`plan::dialled`: "not supported yet"), so adding one must say so now.
+#[test]
+fn ipc_19_an_ipv6_address_is_refused_when_the_server_is_added_not_when_it_is_first_used() {
+    for address in ["2001:db8::7", "::1", "fe80::1", "::ffff:203.0.113.9"] {
+        let mut wire = add_wire();
+        wire["host"] = json!(address);
+        let error = decode_value(&wire).unwrap_err().to_string();
+        assert!(error.contains("`host`"), "{error}");
+        assert!(error.contains("IPv4 address"), "{error}");
+        assert!(error.contains("IPv6"), "{error}");
+        assert!(
+            !error.contains(address),
+            "an error never repeats what was sent: {error}"
+        );
+    }
+}
+
+#[test]
+fn ipc_19_a_host_name_is_refused_when_the_server_is_added_not_when_it_is_first_used() {
+    for name in [
+        "vpn.example.org",
+        "VPN.Example.Org",
+        "xn--bcher-kva.example",
+    ] {
+        let mut wire = add_wire();
+        wire["host"] = json!(name);
+        let error = decode_value(&wire).unwrap_err().to_string();
+        assert!(error.contains("`host`"), "{error}");
+        assert!(error.contains("IPv4 address"), "{error}");
+        assert!(error.contains("host name"), "{error}");
+        assert!(
+            !error.contains(name),
+            "an error never repeats what was sent: {error}"
+        );
     }
 }
 

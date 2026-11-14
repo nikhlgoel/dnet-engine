@@ -369,6 +369,80 @@ export function parseRules(value: unknown): RuleView[] {
   });
 }
 
+// ------------------------------------------------------------------ the map of parts (T170)
+
+export const COMPONENT_KINDS = [
+  'NetworkPath', 'CarrierLeaf', 'Session', 'Endpoint', 'CoreProcess', 'Adapter', 'Routes', 'DnsHandling', 'Guard', 'CaptivePortal',
+] as const;
+export type ComponentKind = (typeof COMPONENT_KINDS)[number];
+
+export const COMPONENT_STATES = ['Unknown', 'Off', 'Starting', 'Ok', 'Degraded', 'Blocked', 'Failed'] as const;
+export type ComponentState = (typeof COMPONENT_STATES)[number];
+
+/** One part of the system: its state, why, how long it has been so, and what was measured (if anything was). */
+export interface ComponentView {
+  kind: ComponentKind;
+  id: string;
+  state: ComponentState;
+  /** The part's own account, whole. */
+  reason: string;
+  ageSeconds: number;
+  /** A measurement that was not taken is null, never zero. */
+  latencyMs: number | null;
+  lossPermille: number | null;
+  restarts: number | null;
+}
+
+export interface ComponentsView {
+  /** False for a service too old to know the request: the window says so and does not imply "no parts" or "fine". */
+  supported: boolean;
+  overall: ComponentState;
+  parts: ComponentView[];
+}
+
+export function parseComponents(value: unknown): ComponentsView {
+  const o = obj(value, 'the parts');
+  const supported = o.supported === true;
+  const overall = oneOf(o.overall, COMPONENT_STATES, 'the overall state');
+  const parts = list(o.parts, 'the parts', 128).map((item) => {
+    const p = obj(item, 'a part');
+    const age = num(p.ageSeconds, 'an age');
+    if (age < 0) throw new ModelError('an age is negative');
+    const loss = optionalNum(p.lossPermille, 'a loss');
+    if (loss !== null && (loss < 0 || loss > 1000)) throw new ModelError('a loss is out of range');
+    return {
+      kind: oneOf(p.kind, COMPONENT_KINDS, 'a part kind'),
+      id: text(p.id, 'a part id', 64),
+      state: oneOf(p.state, COMPONENT_STATES, 'a part state'),
+      reason: text(p.reason, 'a reason', 512),
+      ageSeconds: age,
+      latencyMs: optionalNum(p.latencyMs, 'a latency'),
+      lossPermille: loss,
+      restarts: optionalNum(p.restarts, 'a restart count'),
+    };
+  });
+  if (!supported && parts.length > 0) throw new ModelError('a service that cannot list parts listed some');
+  return { supported, overall, parts };
+}
+
+/** Whether the kill switch is on and whether a guard is in the firewall now (T161). */
+export interface GuardView {
+  /** False for a service too old to know the question; then nothing else here is claimed. */
+  supported: boolean;
+  killSwitch: boolean;
+  /** `null` is "the firewall could not be asked", which is not the same as "no guard is in". */
+  guardIn: boolean | null;
+}
+
+export function parseGuard(value: unknown): GuardView {
+  const o = obj(value, 'the kill switch');
+  if (typeof o.supported !== 'boolean') throw new ModelError('the kill switch did not say whether it is supported');
+  if (typeof o.killSwitch !== 'boolean') throw new ModelError('the kill switch did not say whether it is on');
+  if (o.guardIn !== null && typeof o.guardIn !== 'boolean') throw new ModelError('the kill switch did not say whether a guard is in');
+  if (!o.supported && (o.killSwitch || o.guardIn !== null)) throw new ModelError('a service that cannot say claimed something');
+  return { supported: o.supported, killSwitch: o.killSwitch, guardIn: o.guardIn };
+}
+
 /** One line of the Activity view: something the service did, and why (principle 3). */
 export interface ActivityItem {
   seq: number | null;

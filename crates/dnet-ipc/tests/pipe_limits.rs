@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The real control pipe under a crowd of clients that say nothing.
 //!
 //! The pipe is open to every signed-in user, and the service stops when its listener ends, so a
@@ -16,7 +17,7 @@ use std::time::Duration;
 use dnet_ipc::authz::ConsoleSession;
 use dnet_ipc::frame;
 use dnet_ipc::protocol::{IpcError, Request};
-use dnet_ipc::server::{run_control_listener_with, Limits, PIPE_NAME};
+use dnet_ipc::server::{run_control_listener_on, Limits};
 use dnet_ipc::service::Service;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
@@ -32,10 +33,15 @@ impl Service for Nothing {
     }
 }
 
+/// A pipe name of this test's own (the real one belongs to an installed service, if there is one).
+fn pipe_name() -> String {
+    format!(r"\\.\pipe\DNetEngine\test-limits-{}", std::process::id())
+}
+
 async fn connect(deadline: Duration) -> Option<NamedPipeClient> {
     let until = tokio::time::Instant::now() + deadline;
     while tokio::time::Instant::now() < until {
-        if let Ok(client) = ClientOptions::new().open(PIPE_NAME) {
+        if let Ok(client) = ClientOptions::new().open(pipe_name()) {
             return Some(client);
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -70,7 +76,11 @@ async fn silent_clients_are_let_go_the_listener_lives_and_the_next_client_is_ser
         first_request_within: Duration::from_millis(800),
         idle_for: Duration::from_millis(800),
     };
-    let listener = tokio::spawn(run_control_listener_with(Arc::new(Nothing), limits));
+    let name = pipe_name();
+    let listener =
+        tokio::spawn(
+            async move { run_control_listener_on(&name, Arc::new(Nothing), limits).await },
+        );
 
     // As many silent clients as the limit allows: every slot is in use, so no instance of the pipe is
     // left waiting and the next client has to wait its turn.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T031 — the built-in, non-deletable rule set (data-model §4, FR-024, FR-026, SC-018).
 //!
 //! Lowest precedence first (lower wins):

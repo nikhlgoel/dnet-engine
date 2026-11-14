@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Text and files the configuration code reads must not be able to crash it.
 //!
 //! Credentials arrive as an imported bundle (a file a person chose, from an endpoint they set up or

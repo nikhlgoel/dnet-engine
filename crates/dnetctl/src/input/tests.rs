@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Reading credentials: bounded, tolerant of what a Windows editor writes, and silent about content.
 
 use std::io::Write;

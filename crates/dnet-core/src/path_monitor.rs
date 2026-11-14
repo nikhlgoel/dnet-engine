@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T133 — the path monitor: what the machine's paths are, how good each is, and which carries.
 //!
 //! The three pieces that come before it each do one thing. `paths` (in `dnet-netstate`) reads the

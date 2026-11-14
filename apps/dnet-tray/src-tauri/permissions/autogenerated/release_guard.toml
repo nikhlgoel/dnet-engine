@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-release-guard"
+description = "Enables the release_guard command without any pre-configured scope."
+commands.allow = ["release_guard"]
+
+[[permission]]
+identifier = "deny-release-guard"
+description = "Denies the release_guard command without any pre-configured scope."
+commands.deny = ["release_guard"]

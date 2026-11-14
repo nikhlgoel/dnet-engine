@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T074 — the real-time ETW session on `Microsoft-Windows-Kernel-Network` (ADR-0001, research R7).
 //!
 //! The session subscribes to the provider, and for every TCP connect event (IPv4 and IPv6) reads the

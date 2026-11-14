@@ -2,7 +2,7 @@
   "activeEndpoint": null,
   "activeProfile": null,
   "failure": {
-    "action": "Correct the setting named above in the endpoint or profile settings, then try again.",
+    "action": "Fix the problem described above; if you have no server yet, add one. Then try again.",
     "cause": "ConfigurationInvalid",
     "detail": "an endpoint's address is not usable",
     "title": "The configuration cannot be used"

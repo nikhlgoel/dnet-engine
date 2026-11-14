@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T160 — asking Windows for elevation, and knowing whether this program has it.
 //!
 //! The elevated half of `dnetctl approve` runs in a window of its own, opened with the `runas` verb,

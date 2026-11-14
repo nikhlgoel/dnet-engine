@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! `DnetService` — the daemon's implementation of the IPC `Service` seam.
 //!
 //! Bridges authorized IPC requests to the in-memory domain store. Reached only after
@@ -33,7 +34,9 @@ use crate::configure::{added_reply, dns_reply, rule_added_reply, Configurator, A
 use crate::domain::DomainState;
 use crate::feed_fetch::{Busy, Fetcher, Pace, Transport};
 use crate::feed_service::{FeedNote, FeedRefusal, FeedService, SharedDefinitions};
+use crate::guard_control::GuardControl;
 use crate::intent::{Intent, Remembered};
+use crate::killswitch::KillSwitch;
 use crate::orchestrator::Handle;
 use crate::recovery::{Recovered, RecoveryError};
 
@@ -81,9 +84,16 @@ pub struct DnetService {
     check_requester: Option<CheckRequester>,
     /// What the person last asked for, kept across restarts (T147). Without it nothing is remembered.
     intent: Option<Intent>,
+    /// The person's kill-switch choice and the one door to the firewall guard (T161). Without them the three
+    /// requests about it answer that they are not available.
+    kill_switch: Option<(Arc<KillSwitch>, Arc<dyn GuardControl>)>,
     /// Setting up the person's own server from a script and a pasted result (T150). Without it the
     /// requests answer that they are not available.
     server_setup: Option<crate::server_setup::ServerSetup>,
+    /// This computer asking to join a friend's server, and the owner's invites for friends' devices (T188).
+    /// In memory only.
+    joining: crate::devices::Joining,
+    inviting: crate::devices::Inviting,
     /// Changes that redirect traffic, waiting for an elevated client to approve them (T160).
     pending: Mutex<crate::approval::PendingChanges>,
     /// Held across approving a change, so the same one is not applied twice by two approvers.
@@ -102,6 +112,17 @@ type CheckRequester = Box<dyn Fn() -> Result<FetchRoute, Busy> + Send + Sync>;
 /// nothing, why. Also logged, since nobody may be subscribed.
 /// A setup that cannot proceed, as the client is told. A build with no server downloads is the
 /// service's limit, not the client's mistake.
+/// A guard that would not come out. It says what to do next, because this is the one failure a person cannot
+/// reason their way past: the way out is `dnetctl guard-release` from an elevated prompt, or restarting the service.
+fn release_failed(error: String) -> IpcError {
+    IpcError::InternalError {
+        detail: format!(
+            "the guard could not be taken out: {error}. Run `dnetctl guard-release`, or `dnetd release-guard` from an \
+             elevated prompt (it needs no running service), or restart the DNet Engine service"
+        ),
+    }
+}
+
 fn setup_refusal(error: crate::server_setup::SetupError) -> IpcError {
     use crate::server_setup::SetupError;
     match error {
@@ -110,6 +131,20 @@ fn setup_refusal(error: crate::server_setup::SetupError) -> IpcError {
                 detail: error.to_string(),
             }
         }
+        other => IpcError::InvalidRequest {
+            detail: other.to_string(),
+        },
+    }
+}
+
+/// A device step that cannot proceed, as the client is told. The person's own mistakes are theirs to correct; a
+/// key that could not be made is the service's.
+fn devices_refusal(error: crate::devices::DevicesError) -> IpcError {
+    use crate::devices::DevicesError;
+    match error {
+        DevicesError::Keys => IpcError::InternalError {
+            detail: error.to_string(),
+        },
         other => IpcError::InvalidRequest {
             detail: other.to_string(),
         },
@@ -245,7 +280,10 @@ impl DnetService {
             feed: None,
             check_requester: None,
             intent: None,
+            kill_switch: None,
             server_setup: None,
+            joining: crate::devices::Joining::new(),
+            inviting: crate::devices::Inviting::new(),
             pending: Mutex::new(crate::approval::PendingChanges::new()),
             approving: Mutex::new(()),
             hold_changes: true,
@@ -280,6 +318,17 @@ impl DnetService {
     #[cfg_attr(not(windows), allow(dead_code))] // Windows builds it; the tests supply their own.
     pub fn with_server_setup(mut self, setup: crate::server_setup::ServerSetup) -> Self {
         self.server_setup = Some(setup);
+        self
+    }
+
+    /// Keep the person's kill-switch choice in `kill_switch` and reach the firewall guard through `guard` (T161).
+    #[cfg_attr(not(windows), allow(dead_code))] // Windows builds it; the tests supply their own.
+    pub fn with_kill_switch(
+        mut self,
+        kill_switch: impl Into<Arc<KillSwitch>>,
+        guard: Arc<dyn GuardControl>,
+    ) -> Self {
+        self.kill_switch = Some((kill_switch.into(), guard));
         self
     }
 
@@ -343,10 +392,13 @@ impl DnetService {
             .as_ref()
             .and_then(|o| o.paths())
             .unwrap_or_default();
-        self.components
+        let cores = orchestrator.as_ref().map(|o| o.cores()).unwrap_or_default();
+        let mut tracker = self
+            .components
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .refresh(&snapshot, &paths);
+            .unwrap_or_else(PoisonError::into_inner);
+        tracker.set_cores(cores);
+        tracker.refresh(&snapshot, &paths);
     }
 
     /// Keep the parts' states recorded once a second for as long as the service exists (T170). It holds the service
@@ -529,6 +581,13 @@ impl DnetService {
         };
         let bus = self.events.clone();
         let definitions = Arc::clone(&self.definitions);
+        let guard =
+            self.kill_switch
+                .as_ref()
+                .map(|(switch, control)| crate::guard_control::GuardWiring {
+                    switch: Arc::clone(switch),
+                    control: Arc::clone(control),
+                });
         // Used now, and again whenever a saved change replaces the orchestrator.
         let build = move |state: &DomainState| -> Handle {
             let (effects, profiles, usable) = RealEffects::new(
@@ -540,6 +599,7 @@ impl DnetService {
                     undo: Arc::clone(&undo),
                     layout: layout.clone(),
                     definitions: Arc::clone(&definitions),
+                    guard: guard.clone(),
                 },
             );
             // Only endpoints that can be used, and profiles they can serve, are known to the engine,
@@ -597,6 +657,9 @@ impl DnetService {
             ConfigStore::new(Box::new(TrustedStateFile::new(default_config_path()))),
             Arc::new(machine_secret_store(default_secrets_dir())),
         );
+        // The firewall guard's undo record lives in the same journal as every other network change. When recovery
+        // failed there is no recovered journal, and the guard's door is wired all the same (see `registry_for`).
+        let undo = crate::guard_control::registry_for(&recovery);
         let service = Self::new(
             state,
             Box::new(crate::console::active_console_session),
@@ -608,6 +671,15 @@ impl DnetService {
         .with_intent(Intent::new(Box::new(TrustedStateFile::new(
             default_config_path().with_file_name("connection-intent.json"),
         ))));
+
+        // The kill switch (T161): the person's choice sits beside the configuration, and the guard goes into the
+        // firewall through the same journal as every other change. Without a journal there is no guard.
+        let service = service.with_kill_switch(
+            crate::killswitch::KillSwitch::new(Box::new(TrustedStateFile::new(
+                default_config_path().with_file_name("kill-switch.json"),
+            ))),
+            Arc::new(crate::guard_control::WindowsGuard::new(undo)),
+        );
 
         // The server downloads this release carries, beside the service in the folder only administrators
         // can change (T150). Absent or unreadable, setting up a server answers that it is not available.
@@ -648,6 +720,82 @@ impl DnetService {
                 service
             }
         }
+    }
+
+    /// `{ kill_switch, guard_in }`: the person's choice, and whether the firewall holds the guard now (`null` when
+    /// the firewall could not be asked).
+    fn guard_state(&self) -> Result<String, IpcError> {
+        let Some((switch, guard)) = &self.kill_switch else {
+            return Self::not_available("the kill switch");
+        };
+        Ok(serde_json::json!({
+            "kill_switch": switch.enabled(),
+            "guard_in": guard.is_in().ok(),
+        })
+        .to_string())
+    }
+
+    /// Remember the choice. Off takes a guard that is in out at once; on waits for the next connection, because a
+    /// guard is built for a tunnel and there is none to build it for.
+    fn set_kill_switch(&self, enabled: bool) -> Result<String, IpcError> {
+        let Some((switch, guard)) = &self.kill_switch else {
+            return Self::not_available("the kill switch");
+        };
+        let saved = match switch.set(enabled) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(%error, "the kill-switch choice could not be saved");
+                false
+            }
+        };
+        let mut effect = if enabled {
+            let up = self.orchestrator().is_some_and(|o| !o.is_idle());
+            if up {
+                "The guard goes in at the next connection; the one that is up now is not covered."
+            } else {
+                "The guard goes in at the next connection."
+            }
+            .to_owned()
+        } else if guard.is_in().unwrap_or(true) {
+            // Only a guard that is in, or that cannot be told about, is touched.
+            guard.release().map_err(release_failed)?;
+            "The guard is out.".to_owned()
+        } else {
+            "No guard was in.".to_owned()
+        };
+        if !saved {
+            effect.push_str(
+                " The choice could not be saved, so it stands only until the service stops.",
+            );
+        }
+        Ok(serde_json::json!({
+            "kill_switch": enabled,
+            "saved": saved,
+            "guard_in": guard.is_in().ok(),
+            "effect": effect,
+        })
+        .to_string())
+    }
+
+    /// The way out: take the guard out now. It asks the firewall itself rather than trusting what the service
+    /// believes is in, and it leaves the person's choice as it was.
+    fn release_guard(&self) -> Result<String, IpcError> {
+        let Some((switch, guard)) = &self.kill_switch else {
+            return Self::not_available("the kill switch");
+        };
+        guard.release().map_err(release_failed)?;
+        let on = switch.enabled();
+        Ok(serde_json::json!({
+            "kill_switch": on,
+            "guard_in": false,
+            "effect": if on {
+                "The guard is out. The kill switch is still on, so the next connection puts it back; \
+                 turn it off to keep it out."
+            } else {
+                "The guard is out."
+            },
+        })
+        .to_string())
     }
 
     fn not_available(what: &str) -> Result<String, IpcError> {
@@ -725,6 +873,16 @@ impl Service for DnetService {
             }
             Request::RejectChange { id } => return self.reject_change(id),
             Request::ApproveChange { id } => return self.approve_change(id),
+            // The kill switch never touches the domain store, so it never waits for it either: the way out in
+            // particular must answer when the store is busy with a slow request or poisoned by a panic elsewhere
+            // (T161 review). Turning it on or off is a change like any other and meets the same gate; releasing
+            // the guard and reading its state do not.
+            Request::GetGuard => return self.guard_state(),
+            Request::SetKillSwitch { enabled } => {
+                self.refuse_while_unsafe()?;
+                return self.set_kill_switch(*enabled);
+            }
+            Request::ReleaseGuard => return self.release_guard(),
             _ => {}
         }
         if self.hold_changes {
@@ -741,6 +899,22 @@ impl Service for DnetService {
 }
 
 impl DnetService {
+    /// What an owner's computer knows about the server `endpoint`, read from the sealed store (T188).
+    fn server_facts(
+        configurator: &Configurator,
+        state: &DomainState,
+        endpoint: dnet_core::ids::EndpointId,
+    ) -> Result<crate::devices::ServerFacts, crate::devices::DevicesError> {
+        configurator
+            .server_for_invite(state, endpoint)
+            .map(|(label, host, credentials)| crate::devices::ServerFacts {
+                label,
+                host,
+                credentials,
+            })
+            .map_err(|e| crate::devices::DevicesError::Unreadable(IpcError::from(e).to_string()))
+    }
+
     /// The strict gate (T038, T124): refuses a change while a previous run's network changes are
     /// unrestored or the saved configuration was refused.
     fn refuse_while_unsafe(&self) -> Result<(), IpcError> {
@@ -779,6 +953,44 @@ impl DnetService {
                 shown(label),
                 shown(host)
             )),
+            Request::FinishDevice {
+                endpoint, request, ..
+            } => {
+                // An invite holds the server's access details, so making one waits for an approval like any
+                // change that hands out access. One that was approved and is waiting is handed over as asked.
+                if self
+                    .inviting
+                    .is_ready(*endpoint, request, unix_millis() / 1000)
+                {
+                    return None;
+                }
+                let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+                let server = state
+                    .endpoints()
+                    .iter()
+                    .find(|e| e.id() == *endpoint)
+                    .map(|e| e.label().to_owned())?;
+                let device = dnet_provision::devices::DeviceRequest::decode(request)
+                    .ok()
+                    .map(|r| r.name().to_owned())?;
+                Some(format!(
+                    "Making an invite for the device \"{}\" on the server \"{}\"; it holds that server's access details",
+                    shown(&device),
+                    shown(&server)
+                ))
+            }
+            Request::AcceptInvite { invite, label } => {
+                // What the invite names is shown to the person who approves it; an invite that cannot be read is
+                // refused before anything is held, so this is only the wording.
+                Some(match dnet_config::invite::Invite::decode(invite) {
+                    Ok(read) => format!(
+                        "Adding the server \"{}\" at {} from a friend's invite",
+                        shown(label.as_deref().unwrap_or_else(|| read.label())),
+                        shown(read.host())
+                    ),
+                    Err(_) => "Adding a server from a friend's invite".to_string(),
+                })
+            }
             Request::SetEndpointEnabled {
                 endpoint,
                 enabled: true,
@@ -805,10 +1017,90 @@ impl DnetService {
         }
     }
 
+    /// Refuse now what applying `request` would refuse now, with the same reason, so nobody is asked
+    /// to approve a change that cannot be made: a name in use, a pasted result that does not match
+    /// the setup waiting, a rule the store would not take, a connection that is up, a build that
+    /// cannot make the change at all. Nothing is changed or saved here; approving checks again,
+    /// because the store may change while the change waits.
+    ///
+    /// An imported feed is not checked here: taking its documents is what checks them, and that
+    /// changes the feed's own store.
+    fn refuse_what_cannot_apply(&self, request: &Request) -> Result<(), IpcError> {
+        match request {
+            Request::AddEndpoint(new) => {
+                let configurator = self.before_change()?;
+                let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+                configurator.check_add_endpoint(&state, new)?;
+            }
+            Request::FinishServer {
+                label,
+                host,
+                report,
+            } => {
+                let configurator = self.before_change()?;
+                let Some(setup) = &self.server_setup else {
+                    return Self::not_available("setting up a server").map(drop);
+                };
+                // The keys read off the result are dropped here; approving reads them again.
+                let credentials = setup
+                    .finish(report, unix_millis() / 1000)
+                    .map_err(setup_refusal)?;
+                let new = dnet_ipc::protocol::NewEndpoint::new(label, host, credentials)?;
+                let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+                configurator.check_add_endpoint(&state, &new)?;
+            }
+            Request::AcceptInvite { invite, label } => {
+                let configurator = self.before_change()?;
+                // The key read out is dropped here; approving reads it again.
+                let accepted = self
+                    .joining
+                    .accept(invite, unix_millis() / 1000)
+                    .map_err(devices_refusal)?;
+                let new = dnet_ipc::protocol::NewEndpoint::new(
+                    label.as_deref().unwrap_or(&accepted.label),
+                    &accepted.host,
+                    accepted.credentials,
+                )?;
+                let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+                configurator.check_add_endpoint(&state, &new)?;
+            }
+            Request::FinishDevice {
+                endpoint,
+                request,
+                report,
+            } => {
+                let Some(configurator) = &self.configurator else {
+                    return Self::not_available("adding a friend's device").map(drop);
+                };
+                let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+                self.inviting
+                    .check(
+                        *endpoint,
+                        request,
+                        report,
+                        || Self::server_facts(configurator, &state, *endpoint),
+                        unix_millis() / 1000,
+                    )
+                    .map_err(devices_refusal)?;
+            }
+            Request::AddRule { matcher, action } => {
+                let configurator = self.before_change()?;
+                let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+                configurator.check_add_rule(&state, matcher, *action)?;
+            }
+            Request::SetEndpointEnabled { .. } => {
+                self.before_change()?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     /// Hold `request` and say so as the refusal it is: nothing was applied.
     fn hold_change(&self, request: &Request, what: String) -> Result<String, IpcError> {
         // A change that could not be applied even if approved is not worth anyone's prompt.
         self.refuse_while_unsafe()?;
+        self.refuse_what_cannot_apply(request)?;
         let held = self
             .pending
             .lock()
@@ -1037,6 +1329,76 @@ impl DnetService {
                 self.reload(&state);
                 Ok(added_reply(id))
             }
+            // T188: a friend's computer asks to join. Nothing is saved: a key is made and kept in memory.
+            Request::RequestJoin { name } => self
+                .joining
+                .request(name, unix_millis() / 1000)
+                .map(|reply| dnet_ipc::devices::encode_join_requested(&reply))
+                .map_err(devices_refusal),
+            Request::AcceptInvite { invite, label } => {
+                let configurator = self.before_change()?;
+                let accepted = self
+                    .joining
+                    .accept(invite, unix_millis() / 1000)
+                    .map_err(devices_refusal)?;
+                let new = dnet_ipc::protocol::NewEndpoint::new(
+                    label.as_deref().unwrap_or(&accepted.label),
+                    &accepted.host,
+                    accepted.credentials,
+                )?;
+                let id = configurator.add_endpoint(&mut state, &new)?;
+                // Saved: the key that was waiting for it is no longer needed.
+                self.joining.complete();
+                self.reload(&state);
+                Ok(added_reply(id))
+            }
+            Request::PrepareDevice { endpoint, request } => {
+                let Some(configurator) = &self.configurator else {
+                    return Self::not_available("adding a friend's device");
+                };
+                let (_, _, credentials) = configurator.server_for_invite(&state, *endpoint)?;
+                self.inviting
+                    .prepare(
+                        *endpoint,
+                        request,
+                        credentials.session.is_some(),
+                        unix_millis() / 1000,
+                    )
+                    .map(|reply| dnet_ipc::devices::encode_device_prepared(&reply))
+                    .map_err(devices_refusal)
+            }
+            Request::FinishDevice {
+                endpoint,
+                request,
+                report,
+            } => {
+                let Some(configurator) = &self.configurator else {
+                    return Self::not_available("adding a friend's device");
+                };
+                let now_s = unix_millis() / 1000;
+                // An invite that was approved and is waiting is handed over, once.
+                if let Some(invited) = self.inviting.take_ready(*endpoint, request, now_s) {
+                    return Ok(dnet_ipc::devices::encode_device_invited(&invited));
+                }
+                // Otherwise this is the approved change (or, where changes are not held, the request itself):
+                // make the invite, and keep it for the person who approved it to ask for.
+                let invited = self
+                    .inviting
+                    .finish(
+                        *endpoint,
+                        request,
+                        report,
+                        || Self::server_facts(configurator, &state, *endpoint),
+                        now_s,
+                    )
+                    .map_err(devices_refusal)?;
+                if self.hold_changes {
+                    Ok(APPLIED.to_string())
+                } else {
+                    self.inviting.take_ready(*endpoint, request, now_s);
+                    Ok(dnet_ipc::devices::encode_device_invited(&invited))
+                }
+            }
             Request::AddRule { matcher, action } => {
                 let configurator = self.before_change()?;
                 let id = configurator.add_rule(&mut state, matcher.clone(), *action)?;
@@ -1082,6 +1444,13 @@ impl DnetService {
                 let consequence = configurator.set_encrypted_dns(&mut state, *block)?;
                 self.reload(&state);
                 Ok(dns_reply(*block, consequence))
+            }
+
+            // Answered in `dispatch`, before this function takes the store; here only to keep the match complete.
+            Request::GetGuard | Request::SetKillSwitch { .. } | Request::ReleaseGuard => {
+                Err(IpcError::InternalError {
+                    detail: "this request is answered before the store, not through it".to_owned(),
+                })
             }
 
             Request::ImportFeed(import) => self.import_feed(import),
@@ -1633,6 +2002,168 @@ mod tests {
         assert!(reply.get("consequence").is_none());
     }
 
+    // ---------------------------------------------------------------- the kill switch (T161)
+
+    fn service_with_kill_switch(
+        stored: Option<&str>,
+    ) -> (
+        DnetService,
+        Arc<crate::guard_control::fake::FakeGuard>,
+        Arc<dnet_config::persist::MemoryStateFile>,
+    ) {
+        let file = Arc::new(dnet_config::persist::MemoryStateFile::with_bytes(
+            stored.map(|s| s.as_bytes().to_vec()),
+        ));
+        let guard = Arc::new(crate::guard_control::fake::FakeGuard::default());
+        let svc = service().with_kill_switch(
+            crate::killswitch::KillSwitch::new(Box::new(Arc::clone(&file))),
+            Arc::clone(&guard) as Arc<dyn crate::guard_control::GuardControl>,
+        );
+        (svc, guard, file)
+    }
+
+    #[test]
+    fn without_a_guard_attached_the_kill_switch_requests_say_it_is_not_available() {
+        let svc = service();
+        for request in [
+            Request::GetGuard,
+            Request::SetKillSwitch { enabled: true },
+            Request::ReleaseGuard,
+        ] {
+            assert!(
+                matches!(svc.dispatch(&request), Err(IpcError::InternalError { .. })),
+                "{request:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_guard_state_reads_off_and_out_until_the_person_turns_it_on() {
+        let (svc, guard, _) = service_with_kill_switch(None);
+        let reply = json_of(svc.dispatch(&Request::GetGuard));
+        assert_eq!(reply["kill_switch"], false);
+        assert_eq!(reply["guard_in"], false);
+        assert!(
+            guard.calls().is_empty(),
+            "reading puts nothing in the firewall"
+        );
+    }
+
+    #[test]
+    fn turning_it_on_is_remembered_and_waits_for_the_next_connection() {
+        let (svc, guard, file) = service_with_kill_switch(None);
+        let reply = json_of(svc.dispatch(&Request::SetKillSwitch { enabled: true }));
+        assert_eq!(reply["kill_switch"], true);
+        assert_eq!(reply["saved"], true);
+        assert_eq!(reply["guard_in"], false);
+        assert!(
+            reply["effect"]
+                .as_str()
+                .unwrap()
+                .contains("next connection"),
+            "{reply}"
+        );
+        assert!(
+            guard.calls().is_empty(),
+            "nothing is put in without a tunnel"
+        );
+        assert!(file.bytes().is_some());
+        assert_eq!(
+            json_of(svc.dispatch(&Request::GetGuard))["kill_switch"],
+            true
+        );
+    }
+
+    #[test]
+    fn turning_it_off_takes_a_guard_that_is_in_out_at_once() {
+        let (svc, guard, file) = service_with_kill_switch(Some(r#"{"version":1,"enabled":true}"#));
+        *guard.is_in.lock().unwrap() = true;
+        let reply = json_of(svc.dispatch(&Request::SetKillSwitch { enabled: false }));
+        assert_eq!(reply["kill_switch"], false);
+        assert_eq!(reply["guard_in"], false);
+        assert_eq!(guard.calls(), ["release"]);
+        assert_eq!(file.bytes(), None);
+    }
+
+    #[test]
+    fn turning_it_off_with_no_guard_in_does_not_touch_the_firewall() {
+        let (svc, guard, _) = service_with_kill_switch(Some(r#"{"version":1,"enabled":true}"#));
+        let reply = json_of(svc.dispatch(&Request::SetKillSwitch { enabled: false }));
+        assert_eq!(reply["kill_switch"], false);
+        assert!(guard.calls().is_empty());
+    }
+
+    #[test]
+    fn a_guard_that_will_not_come_out_is_an_error_but_the_choice_stands() {
+        let (svc, guard, _) = service_with_kill_switch(Some(r#"{"version":1,"enabled":true}"#));
+        *guard.is_in.lock().unwrap() = true;
+        *guard.fail_release.lock().unwrap() = Some("the firewall engine refused".into());
+        match svc.dispatch(&Request::SetKillSwitch { enabled: false }) {
+            Err(IpcError::InternalError { detail }) => {
+                assert!(detail.contains("the firewall engine refused"), "{detail}");
+                assert!(
+                    detail.contains("guard-release"),
+                    "tells what to do: {detail}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            json_of(svc.dispatch(&Request::GetGuard))["kill_switch"],
+            false
+        );
+    }
+
+    #[test]
+    fn releasing_the_guard_works_whatever_the_setting_and_keeps_the_setting() {
+        let (svc, guard, _) = service_with_kill_switch(Some(r#"{"version":1,"enabled":true}"#));
+        *guard.is_in.lock().unwrap() = true;
+        let reply = json_of(svc.dispatch(&Request::ReleaseGuard));
+        assert_eq!(reply["guard_in"], false);
+        assert_eq!(
+            reply["kill_switch"], true,
+            "the choice is the person's, not changed by a release"
+        );
+        assert_eq!(guard.calls(), ["release"]);
+    }
+
+    #[test]
+    fn releasing_when_nothing_is_in_is_not_an_error_and_still_asks_the_firewall() {
+        let (svc, guard, _) = service_with_kill_switch(None);
+        let reply = json_of(svc.dispatch(&Request::ReleaseGuard));
+        assert_eq!(reply["guard_in"], false);
+        // The way out never trusts the service's own belief about what is in.
+        assert_eq!(guard.calls(), ["release"]);
+    }
+
+    #[test]
+    fn a_setting_that_could_not_be_saved_is_said_to_be_unsaved() {
+        struct Broken;
+        impl dnet_config::persist::StateFile for Broken {
+            fn read(&self) -> Result<Option<Vec<u8>>, String> {
+                Ok(None)
+            }
+            fn write(&self, _: &[u8]) -> Result<(), String> {
+                Err("disk full".into())
+            }
+            fn remove(&self) -> Result<(), String> {
+                Err("disk full".into())
+            }
+        }
+        let guard = Arc::new(crate::guard_control::fake::FakeGuard::default());
+        let svc = service().with_kill_switch(
+            crate::killswitch::KillSwitch::new(Box::new(Broken)),
+            guard as Arc<dyn crate::guard_control::GuardControl>,
+        );
+        let reply = json_of(svc.dispatch(&Request::SetKillSwitch { enabled: true }));
+        assert_eq!(reply["kill_switch"], true);
+        assert_eq!(reply["saved"], false);
+        assert!(reply["effect"]
+            .as_str()
+            .unwrap()
+            .contains("until the service stops"));
+    }
+
     fn enable_brutal() -> Request {
         Request::EnableBrutal {
             profile: ProfileId::new("hy2-default"),
@@ -1819,6 +2350,292 @@ mod tests {
         );
     }
 
+    // ---------------------------------------------------------------- T188: a friend's device
+
+    /// An owner's service with a server set up through the guide, and that server's id.
+    fn owner_with_a_server() -> (DnetService, EndpointId) {
+        let (svc, _file) = serving();
+        let prepared =
+            dnet_ipc::server_setup::decode_prepared(&svc.dispatch(&prepare_amd64()).unwrap())
+                .unwrap();
+        let added = json_of(svc.dispatch(&finish("my server", printed(&prepared))));
+        let id = id_in(&added);
+        (svc, id)
+    }
+
+    /// What the add script prints on that server for the device in `request_text`.
+    fn device_report(request_text: &str, address: &str) -> String {
+        let request = dnet_provision::devices::DeviceRequest::decode(request_text).unwrap();
+        format!(
+            "root@vm:~# sh add.sh\n{}{}\nroot@vm:~# ",
+            dnet_provision::devices::REPORT_PREFIX,
+            serde_json::json!({
+                "version": 1, "action": "add", "public_key": request.public_key(),
+                "name": request.name(), "address": address, "added": true,
+                "server_public_key": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=",
+                "port": 25182, "devices": 2,
+            })
+        )
+    }
+
+    fn ask_to_join(friend: &DnetService, name: &str) -> String {
+        dnet_ipc::devices::decode_join_requested(
+            &friend
+                .dispatch(&Request::RequestJoin {
+                    name: name.to_owned(),
+                })
+                .unwrap(),
+        )
+        .unwrap()
+        .text
+    }
+
+    fn invite_for(owner: &DnetService, endpoint: EndpointId, text: &str, address: &str) -> String {
+        let prepared = dnet_ipc::devices::decode_device_prepared(
+            &owner
+                .dispatch(&Request::PrepareDevice {
+                    endpoint,
+                    request: text.to_owned(),
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(prepared.script.contains("dnet-devices"));
+        dnet_ipc::devices::decode_device_invited(
+            &owner
+                .dispatch(&Request::FinishDevice {
+                    endpoint,
+                    request: text.to_owned(),
+                    report: device_report(text, address),
+                })
+                .unwrap(),
+        )
+        .unwrap()
+        .invite
+    }
+
+    #[test]
+    fn t188_a_friend_joins_the_owners_server_with_a_key_of_their_own_after_an_approval() {
+        let (owner, endpoint) = owner_with_a_server();
+        let (friend, file) = holding_configurable_service();
+        let text = ask_to_join(&friend, "Ravi laptop");
+        let invite = invite_for(&owner, endpoint, &text, "10.9.0.3");
+
+        let accept = Request::AcceptInvite {
+            invite: invite.clone(),
+            label: None,
+        };
+        // Adding a server redirects traffic, so it waits for an elevated approval, naming what it would add.
+        let id = match friend.dispatch(&accept) {
+            Err(IpcError::ApprovalRequired { id, what }) => {
+                assert!(what.contains("my server"), "{what}");
+                assert!(
+                    what.contains("203.0.113.10") || what.contains("invite"),
+                    "{what}"
+                );
+                id
+            }
+            other => panic!("{other:?}"),
+        };
+        // The list of what waits never shows the invite.
+        let waiting = friend.dispatch(&Request::ListPending).unwrap();
+        assert!(!waiting.contains("DNET-INVITE"), "{waiting}");
+        assert!(friend
+            .dispatch(&Request::ListEndpoints)
+            .unwrap()
+            .contains("[]"));
+
+        json_of(friend.dispatch(&Request::ApproveChange { id }));
+        let listed = json_of(friend.dispatch(&Request::ListEndpoints));
+        assert_eq!(listed["endpoints"][0]["label"], "my server");
+        // What was saved holds the friend's session at the address the server gave, and neither key is the
+        // owner's: the owner's device key is not in the file the friend's computer wrote.
+        assert!(file.bytes().is_some());
+        // The key waited only for this server: a second paste finds nothing waiting.
+        assert!(matches!(
+            friend.dispatch(&Request::AcceptInvite {
+                invite,
+                label: None
+            }),
+            Err(IpcError::InvalidRequest { .. })
+        ));
+    }
+
+    #[test]
+    fn t188_an_invite_for_another_device_is_refused_before_anything_is_held() {
+        let (owner, endpoint) = owner_with_a_server();
+        let (ravi, _) = holding_configurable_service();
+        let (asha, _) = holding_configurable_service();
+        let for_ravi = ask_to_join(&ravi, "Ravi");
+        ask_to_join(&asha, "Asha");
+        let invite = invite_for(&owner, endpoint, &for_ravi, "10.9.0.3");
+        match asha.dispatch(&Request::AcceptInvite {
+            invite,
+            label: None,
+        }) {
+            Err(IpcError::InvalidRequest { detail }) => {
+                assert!(detail.contains("another device"), "{detail}")
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(pending_ids(&asha).is_empty());
+    }
+
+    #[test]
+    fn t188_an_invite_needs_a_request_a_known_server_a_prepared_step_and_a_server_with_a_session() {
+        let (owner, endpoint) = owner_with_a_server();
+        let friend = service();
+        let text = ask_to_join(&friend, "Ravi");
+        // Finishing what was never prepared.
+        match owner.dispatch(&Request::FinishDevice {
+            endpoint,
+            request: text.clone(),
+            report: device_report(&text, "10.9.0.3"),
+        }) {
+            Err(IpcError::InvalidRequest { detail }) => {
+                assert!(detail.contains("start again"), "{detail}")
+            }
+            other => panic!("{other:?}"),
+        }
+        // A server nobody has.
+        assert!(matches!(
+            owner.dispatch(&Request::PrepareDevice {
+                endpoint: EndpointId::new(),
+                request: text.clone(),
+            }),
+            Err(IpcError::InvalidRequest { .. })
+        ));
+        // A server added by hand has no private session to add a device to.
+        let (by_hand, _file) = configurable_service();
+        let added = json_of(by_hand.dispatch(&Request::AddEndpoint(Box::new(new_endpoint("old")))));
+        match by_hand.dispatch(&Request::PrepareDevice {
+            endpoint: id_in(&added),
+            request: text,
+        }) {
+            Err(IpcError::InvalidRequest { detail }) => {
+                assert!(detail.contains("no private session"), "{detail}")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn t188_making_an_invite_waits_for_an_approval_and_is_handed_over_once_after_it() {
+        // The owner's service as it is built for real: changes that hand out access are held.
+        let (owner, _file) = holding_configurable_service();
+        let owner =
+            owner.with_server_setup(crate::server_setup::ServerSetup::new(Some(setup_pins())));
+        let prepared =
+            dnet_ipc::server_setup::decode_prepared(&owner.dispatch(&prepare_amd64()).unwrap())
+                .unwrap();
+        let setup_id = held_id(owner.dispatch(&finish("my server", printed(&prepared))));
+        let added = json_of(owner.dispatch(&Request::ApproveChange { id: setup_id }));
+        let endpoint = id_in(&added);
+
+        let friend = service();
+        let text = ask_to_join(&friend, "Ravi laptop");
+        owner
+            .dispatch(&Request::PrepareDevice {
+                endpoint,
+                request: text.clone(),
+            })
+            .unwrap();
+        let make = Request::FinishDevice {
+            endpoint,
+            request: text.clone(),
+            report: device_report(&text, "10.9.0.3"),
+        };
+        // Nothing is made, and the caller gets nothing but the wait.
+        let id = match owner.dispatch(&make) {
+            Err(IpcError::ApprovalRequired { id, what }) => {
+                assert!(what.contains("Ravi laptop"), "{what}");
+                assert!(what.contains("my server"), "{what}");
+                id
+            }
+            other => panic!("{other:?}"),
+        };
+        let waiting = owner.dispatch(&Request::ListPending).unwrap();
+        assert!(!waiting.contains("DNET-INVITE"), "{waiting}");
+        // Approving makes it; the approver is not given it.
+        let approved = owner.dispatch(&Request::ApproveChange { id }).unwrap();
+        assert!(!approved.contains("DNET-INVITE"), "{approved}");
+        // The person asks again and has it, once.
+        let invite = dnet_ipc::devices::decode_device_invited(&owner.dispatch(&make).unwrap())
+            .unwrap()
+            .invite;
+        assert!(invite.starts_with("DNET-INVITE-1:"));
+        assert!(matches!(
+            owner.dispatch(&make),
+            Err(IpcError::InvalidRequest { .. })
+        ));
+    }
+
+    #[test]
+    fn t188_an_invite_that_cannot_be_made_is_not_held_for_anyone_to_approve() {
+        let (owner, _file) = holding_configurable_service();
+        let owner =
+            owner.with_server_setup(crate::server_setup::ServerSetup::new(Some(setup_pins())));
+        let prepared =
+            dnet_ipc::server_setup::decode_prepared(&owner.dispatch(&prepare_amd64()).unwrap())
+                .unwrap();
+        let setup_id = held_id(owner.dispatch(&finish("my server", printed(&prepared))));
+        let endpoint = id_in(&json_of(
+            owner.dispatch(&Request::ApproveChange { id: setup_id }),
+        ));
+        let text = ask_to_join(&service(), "Ravi");
+        // Never prepared.
+        let never = Request::FinishDevice {
+            endpoint,
+            request: text.clone(),
+            report: device_report(&text, "10.9.0.3"),
+        };
+        assert!(matches!(
+            owner.dispatch(&never),
+            Err(IpcError::InvalidRequest { .. })
+        ));
+        // Prepared, but the result is not one.
+        owner
+            .dispatch(&Request::PrepareDevice {
+                endpoint,
+                request: text.clone(),
+            })
+            .unwrap();
+        let junk = Request::FinishDevice {
+            endpoint,
+            request: text,
+            report: "hello".to_owned(),
+        };
+        assert!(matches!(
+            owner.dispatch(&junk),
+            Err(IpcError::InvalidRequest { .. })
+        ));
+        assert!(pending_ids(&owner).is_empty());
+    }
+
+    #[test]
+    fn t188_what_a_person_pasted_is_never_repeated_in_a_refusal() {
+        let (owner, endpoint) = owner_with_a_server();
+        let (friend, _file) = configurable_service();
+        ask_to_join(&friend, "Ravi");
+        for reply in [
+            owner.dispatch(&Request::PrepareDevice {
+                endpoint,
+                request: "SENTINEL not a request".to_owned(),
+            }),
+            friend.dispatch(&Request::AcceptInvite {
+                invite: "DNET-INVITE-1:SENTINEL".to_owned(),
+                label: None,
+            }),
+        ] {
+            match reply {
+                Err(IpcError::InvalidRequest { detail }) => {
+                    assert!(!detail.contains("SENTINEL"), "{detail}")
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn t150_without_downloads_in_this_build_it_says_so() {
         let (svc, _file) = configurable_service();
@@ -1983,6 +2800,33 @@ mod tests {
         )
     }
 
+    /// A guard is kept across a restart on purpose, and a failed recovery stops the service connecting: the way out
+    /// must still answer, or the machine has a guard and no network and no working door (T161 review, high 1).
+    #[test]
+    fn after_a_failed_recovery_the_guard_can_still_be_read_and_taken_out() {
+        let guard = Arc::new(crate::guard_control::fake::FakeGuard::default());
+        *guard.is_in.lock().unwrap() = true;
+        let svc = unrecovered_service().with_kill_switch(
+            crate::killswitch::KillSwitch::new(Box::new(MemoryStateFile::with_bytes(Some(
+                br#"{"version":1,"enabled":true}"#.to_vec(),
+            )))),
+            Arc::clone(&guard) as Arc<dyn crate::guard_control::GuardControl>,
+        );
+        let state = json_of(svc.dispatch(&Request::GetGuard));
+        assert_eq!(state["guard_in"], true);
+        assert_eq!(state["kill_switch"], true);
+        let out = json_of(svc.dispatch(&Request::ReleaseGuard));
+        assert_eq!(out["guard_in"], false);
+        assert_eq!(guard.calls(), ["release"]);
+        // Changing the choice is a change like any other and is refused with the reason.
+        match svc.dispatch(&Request::SetKillSwitch { enabled: false }) {
+            Err(IpcError::InternalError { detail }) => {
+                assert!(detail.contains("access denied"), "{detail}")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
     #[test]
     fn after_a_failed_recovery_every_mutating_request_is_refused_with_the_reason() {
         let svc = unrecovered_service();
@@ -2023,6 +2867,77 @@ mod tests {
             "the saved configuration has an invalid entry (endpoint 0: the host is neither an IP address nor a host name)"
                 .into(),
         ))
+    }
+
+    /// Review 2026-11-10: the way out answers without the domain store. A store whose lock was poisoned by a panic
+    /// elsewhere, or is held by a slow request, must not stop it.
+    #[test]
+    fn releasing_the_guard_needs_neither_a_healthy_nor_a_free_domain_store() {
+        let (svc, guard, _file) = service_with_kill_switch(None);
+        let svc = Arc::new(svc);
+        *guard.is_in.lock().unwrap() = true;
+
+        // Held by someone else: the answer still comes.
+        let (held, release) = std::sync::mpsc::channel::<()>();
+        let (taken, locked) = std::sync::mpsc::channel::<()>();
+        let holder = {
+            let svc = Arc::clone(&svc);
+            std::thread::spawn(move || {
+                let _store = svc.state.lock().unwrap();
+                taken.send(()).unwrap();
+                let _ = release.recv_timeout(Duration::from_secs(10));
+            })
+        };
+        locked.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (answered, reply) = std::sync::mpsc::channel();
+        {
+            let svc = Arc::clone(&svc);
+            std::thread::spawn(move || {
+                let _ = answered.send(svc.dispatch(&Request::ReleaseGuard));
+            });
+        }
+        let reply = reply
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the release waited for the store");
+        assert_eq!(json_of(reply)["guard_in"], false);
+        held.send(()).unwrap();
+        holder.join().unwrap();
+
+        // Poisoned: the answer still comes.
+        let poisoner = Arc::clone(&svc);
+        let _ = std::thread::spawn(move || {
+            let _store = poisoner.state.lock().unwrap();
+            panic!("a handler failed while holding the store");
+        })
+        .join();
+        *guard.is_in.lock().unwrap() = true;
+        assert_eq!(
+            json_of(svc.dispatch(&Request::ReleaseGuard))["guard_in"],
+            false
+        );
+        assert_eq!(json_of(svc.dispatch(&Request::GetGuard))["guard_in"], false);
+    }
+
+    /// The way out is never behind the gate that stops everything else: a service that cannot restore, or whose
+    /// saved configuration is refused, is the very situation in which a person needs the guard taken out.
+    #[test]
+    fn releasing_the_guard_works_while_everything_else_is_refused() {
+        let guard = Arc::new(crate::guard_control::fake::FakeGuard::default());
+        *guard.is_in.lock().unwrap() = true;
+        let svc = service_with_refused_config().with_kill_switch(
+            crate::killswitch::KillSwitch::new(Box::new(MemoryStateFile::with_bytes(None))),
+            Arc::clone(&guard) as Arc<dyn crate::guard_control::GuardControl>,
+        );
+        let reply = json_of(svc.dispatch(&Request::ReleaseGuard));
+        assert_eq!(reply["guard_in"], false);
+        assert_eq!(guard.calls(), ["release"]);
+        // Turning it on is a change like any other, and is refused with the reason.
+        assert!(matches!(
+            svc.dispatch(&Request::SetKillSwitch { enabled: true }),
+            Err(IpcError::InternalError { .. })
+        ));
+        // Reading is always allowed.
+        assert_eq!(json_of(svc.dispatch(&Request::GetGuard))["guard_in"], false);
     }
 
     #[test]
@@ -2157,7 +3072,10 @@ mod tests {
         }
 
         fn orchestrated_service() -> DnetService {
-            let service = service();
+            orchestrate(service())
+        }
+
+        fn orchestrate(service: DnetService) -> DnetService {
             let endpoint = Endpoint::new(
                 EndpointId::new(),
                 "home",
@@ -2190,6 +3108,44 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
             panic!("never reached {want:?}; last {:?}", state_of(svc));
+        }
+
+        /// T160: a change cannot be made while a connection is up, so it is refused at once, not
+        /// held for a prompt that could only end in that refusal.
+        #[tokio::test(start_paused = true)]
+        async fn a_change_asked_for_while_connected_is_refused_not_held() {
+            let (configurator, _file) = memory_configurator();
+            let svc = orchestrate(holding_service().with_configurator(configurator));
+            // A server of the store's, turned off, to be turned on again while connected.
+            let id = held_id(svc.dispatch(&add_home()));
+            let endpoint = id_in(&json_of(svc.dispatch(&Request::ApproveChange { id })));
+            svc.dispatch(&Request::SetEndpointEnabled {
+                endpoint,
+                enabled: false,
+            })
+            .unwrap();
+            svc.dispatch(&connect_request()).unwrap();
+            until_status(&svc, ConnectionStatus::Connected).await;
+
+            for request in [
+                Request::AddEndpoint(Box::new(new_endpoint("office"))),
+                Request::AddRule {
+                    matcher: RuleMatcher::Domain("example.com".into()),
+                    action: RuleAction::Bypass,
+                },
+                Request::SetEndpointEnabled {
+                    endpoint,
+                    enabled: true,
+                },
+            ] {
+                match svc.dispatch(&request) {
+                    Err(IpcError::InvalidRequest { detail }) => {
+                        assert!(detail.contains("disconnect"), "{detail}")
+                    }
+                    other => panic!("expected a refusal, got {other:?}"),
+                }
+            }
+            assert!(pending_ids(&svc).is_empty());
         }
 
         #[tokio::test(start_paused = true)]
@@ -2810,6 +3766,58 @@ mod tests {
         assert!(!refused["reason"].as_str().unwrap().is_empty());
     }
 
+    /// The window's side of the kill switch (`dnet-view`) against the real producer, as for the other settings: a
+    /// shape the window reads is tested here with what the service really says (T161).
+    #[tokio::test]
+    async fn the_window_can_read_what_the_service_really_says_about_the_kill_switch() {
+        use std::future::Future;
+
+        use dnet_ipc::client::{classify_reply, ClientError, Reply};
+        use dnet_ipc::protocol::encode_ipc_error;
+
+        struct Direct(Arc<DnetService>);
+        impl dnet_view::Link for Direct {
+            fn call(
+                &self,
+                request: Request,
+            ) -> impl Future<Output = Result<Reply, ClientError>> + Send {
+                let reply = match self.0.dispatch(&request) {
+                    Ok(text) => classify_reply(&text),
+                    Err(error) => classify_reply(&encode_ipc_error(&error)),
+                };
+                async move { reply }
+            }
+        }
+
+        let (svc, guard, _file) = service_with_kill_switch(None);
+        let bridge = dnet_view::Bridge::new(Direct(Arc::new(svc)));
+
+        let state = bridge.guard().await.expect("the guard state is readable");
+        assert_eq!(
+            state,
+            serde_json::json!({ "supported": true, "killSwitch": false, "guardIn": false })
+        );
+
+        let on = bridge.set_kill_switch(true).await;
+        assert_eq!(on["ok"], true, "{on}");
+        assert_eq!(on["saved"], true);
+        assert!(on["effect"].as_str().unwrap().contains("next connection"));
+        assert_eq!(bridge.guard().await.unwrap()["killSwitch"], true);
+
+        // A guard that is in comes out when the person releases it, and the window is told it is out.
+        *guard.is_in.lock().unwrap() = true;
+        assert_eq!(bridge.guard().await.unwrap()["guardIn"], true);
+        let out = bridge.release_guard().await;
+        assert_eq!(out["ok"], true, "{out}");
+        assert_eq!(bridge.guard().await.unwrap()["guardIn"], false);
+
+        // One that will not come out arrives as the service's own words, never as success.
+        *guard.fail_release.lock().unwrap() = Some("access denied".into());
+        let stuck = bridge.release_guard().await;
+        assert_eq!(stuck["ok"], false);
+        assert!(stuck["reason"].as_str().unwrap().contains("guard-release"));
+    }
+
     // ------------------------------------------------------------------ T160: held changes
 
     /// A service built the way the real one is (changes that redirect traffic are held), with a
@@ -3006,7 +4014,7 @@ mod tests {
 
     #[test]
     fn an_imported_feed_and_a_server_from_the_guide_wait_too() {
-        let (svc, _file) = holding_configurable_service();
+        let svc = holding_serving();
         let import = Request::ImportFeed(FeedImport::new(Some("{}".to_string()), None).unwrap());
         match svc.dispatch(&import) {
             Err(IpcError::ApprovalRequired { what, .. }) => {
@@ -3014,10 +4022,13 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+        let prepared =
+            dnet_ipc::server_setup::decode_prepared(&svc.dispatch(&prepare_amd64()).unwrap())
+                .unwrap();
         let finish = Request::FinishServer {
             label: "from the guide".into(),
             host: "203.0.113.9".into(),
-            report: "{}".into(),
+            report: printed(&prepared),
         };
         match svc.dispatch(&finish) {
             Err(IpcError::ApprovalRequired { what, .. }) => {
@@ -3032,12 +4043,18 @@ mod tests {
     #[test]
     fn a_change_that_fails_when_approved_stays_waiting() {
         let (svc, _file) = holding_configurable_service();
+        // Two servers under one name, asked for before either is added: each could be added then,
+        // so both wait. Once the first is added, the second cannot be, and approving it fails with
+        // the store's reason.
         let first = held_id(svc.dispatch(&add_home()));
+        let elsewhere = dnet_ipc::protocol::NewEndpoint::new(
+            "home",
+            "198.51.100.7",
+            crate::configure::tests::credentials(),
+        )
+        .unwrap();
+        let second = held_id(svc.dispatch(&Request::AddEndpoint(Box::new(elsewhere))));
         json_of(svc.dispatch(&Request::ApproveChange { id: first }));
-        // Another server under the same name cannot be added; it is held all the same, and approving
-        // it fails with the store's reason.
-        let other = Request::AddEndpoint(Box::new(new_endpoint("home")));
-        let second = held_id(svc.dispatch(&other));
         assert!(matches!(
             svc.dispatch(&Request::ApproveChange { id: second.clone() }),
             Err(IpcError::InvalidRequest { .. })
@@ -3082,5 +4099,106 @@ mod tests {
         assert_eq!(shown("ho\u{7}me\nx"), "homex");
         let long = "a".repeat(200);
         assert!(shown(&long).chars().count() <= 67);
+    }
+
+    // ------------------------------------------------- T160: what cannot be applied is not held
+
+    /// The holding service with the guided setup, as it is built for real.
+    fn holding_serving() -> DnetService {
+        holding_configurable_service()
+            .0
+            .with_server_setup(crate::server_setup::ServerSetup::new(Some(setup_pins())))
+    }
+
+    /// What a refusal says, for a change that must be refused and not held.
+    fn refusal(reply: Result<String, IpcError>) -> String {
+        match reply {
+            Err(IpcError::InvalidRequest { detail } | IpcError::InternalError { detail }) => detail,
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    /// Nobody is asked to approve a change that applying would refuse: the same reason is given at
+    /// once, and nothing waits.
+    #[test]
+    fn a_server_whose_name_is_taken_is_refused_before_anyone_is_asked() {
+        let (svc, _file) = holding_configurable_service();
+        let id = held_id(svc.dispatch(&add_home()));
+        json_of(svc.dispatch(&Request::ApproveChange { id }));
+
+        let reason = refusal(svc.dispatch(&add_home()));
+        assert!(reason.contains("label already exists"), "{reason}");
+        assert!(pending_ids(&svc).is_empty());
+    }
+
+    #[test]
+    fn a_pasted_result_that_cannot_be_used_is_refused_before_anyone_is_asked() {
+        let svc = holding_serving();
+        // Nothing prepared yet, so there is nothing for the result to finish.
+        refusal(svc.dispatch(&finish("guide", "DNET-BOOTSTRAP-REPORT {}".into())));
+        let prepared =
+            dnet_ipc::server_setup::decode_prepared(&svc.dispatch(&prepare_amd64()).unwrap())
+                .unwrap();
+        // Prepared, but what was pasted holds no report.
+        refusal(svc.dispatch(&finish("guide", "root@vm:~# ls\n".into())));
+        assert!(pending_ids(&svc).is_empty());
+
+        // The control: the server's own result waits, and approving it adds the server once.
+        let id = held_id(svc.dispatch(&finish("guide", printed(&prepared))));
+        json_of(svc.dispatch(&Request::ApproveChange { id }));
+        let listed = json_of(svc.dispatch(&Request::ListEndpoints));
+        assert_eq!(listed["endpoints"][0]["label"], "guide");
+        assert!(pending_ids(&svc).is_empty());
+    }
+
+    #[test]
+    fn a_result_for_a_setup_that_waited_too_long_is_refused_before_anyone_is_asked() {
+        let setup = crate::server_setup::ServerSetup::new(Some(setup_pins()));
+        // Prepared at the start of the clock: its six hours are long over.
+        let prepared = setup
+            .prepare(dnet_ipc::server_setup::ServerKind::Amd64, 0)
+            .unwrap();
+        let svc = holding_configurable_service().0.with_server_setup(setup);
+
+        let reason = refusal(svc.dispatch(&finish("guide", printed(&prepared))));
+        assert!(reason.contains("six hours"), "{reason}");
+        assert!(pending_ids(&svc).is_empty());
+    }
+
+    #[test]
+    fn a_server_from_the_guide_in_a_build_that_cannot_set_one_up_is_not_held() {
+        let (svc, _file) = holding_configurable_service();
+        let reason = refusal(svc.dispatch(&finish("guide", "DNET-BOOTSTRAP-REPORT {}".into())));
+        assert!(reason.contains("not available"), "{reason}");
+        assert!(pending_ids(&svc).is_empty());
+    }
+
+    #[test]
+    fn a_rule_that_cannot_be_applied_is_refused_before_anyone_is_asked() {
+        let (svc, _file) = holding_configurable_service();
+        let program = Request::AddRule {
+            matcher: RuleMatcher::Application(r"C:\app.exe".into()),
+            action: RuleAction::Bypass,
+        };
+        let reason = refusal(svc.dispatch(&program));
+        assert!(reason.contains("program"), "{reason}");
+        assert!(pending_ids(&svc).is_empty());
+    }
+
+    #[test]
+    fn a_change_in_a_service_that_cannot_save_is_not_held() {
+        // No configurator: no change to the configuration can be made, so none is held.
+        let svc = holding_service();
+        for request in [
+            add_home(),
+            Request::AddRule {
+                matcher: RuleMatcher::Domain("example.com".into()),
+                action: RuleAction::Bypass,
+            },
+        ] {
+            let reason = refusal(svc.dispatch(&request));
+            assert!(reason.contains("not available"), "{reason}");
+        }
+        assert!(pending_ids(&svc).is_empty());
     }
 }

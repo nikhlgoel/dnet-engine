@@ -22,10 +22,11 @@ dnet-view = { path = "../../../crates/dnet-view" }
 serde_json = "1"
 # `tray-icon` is the native tray (ADR-0007 R1). No plugin is used: the capability list is the minimum (build.rs).
 tauri = { version = "2", features = ["tray-icon"] }
-tokio = { version = "1", default-features = false, features = ["time", "sync", "macros"] }
+# `net` is for the named pipe that keeps one tray per person (`single`).
+tokio = { version = "1", default-features = false, features = ["time", "sync", "macros", "net"] }
 
 [build-dependencies]
-tauri-build = "2"
+tauri-build = { version = "2", features = [] }
 
 [profile.release]
 opt-level = "s"

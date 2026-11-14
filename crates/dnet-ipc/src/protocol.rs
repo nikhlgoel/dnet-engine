@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Request and response types, the error model, and wire-level validators.
 //!
 //! Contract: `specs/001-network-resilience-client/contracts/ipc-protocol.md`.
@@ -58,6 +59,10 @@ pub enum Request {
     /// and it carries no endpoint label, address or network name. Same note as `GetPaths`: a service that
     /// predates it answers `InvalidRequest`, which a client reads as "this service cannot say".
     GetComponents,
+    /// Whether the kill switch is on and whether a firewall guard is in now (T161). Read-only; it names no address,
+    /// program or account. A service that predates it answers `InvalidRequest`, which a client reads as "this
+    /// service cannot say".
+    GetGuard,
     ListEndpoints,
     ListProfiles,
     ListRules,
@@ -115,6 +120,17 @@ pub enum Request {
     SetEncryptedDnsHandling {
         block: bool,
     },
+    /// The person's choice about the kill switch (T161, ADR-0006 §5a): `enabled: true` makes the service keep
+    /// a firewall guard in while a connection is up, so a crash or a stopped service leaves no way out around
+    /// the tunnel; `false` (the default) leaves the guard out. The reply says what it did and whether a guard is
+    /// in now. Turning it off takes a guard that is in out at once.
+    SetKillSwitch {
+        enabled: bool,
+    },
+    /// Take the firewall guard out now, whatever else is going on (T161, ADR-0006 §5a condition 3): the way out
+    /// for a person whose connection is down and who needs the network back. It removes only the guard's own
+    /// rules; removing what is not there is not an error.
+    ReleaseGuard,
     /// Hand the service signed profile-feed documents it did not fetch itself (an offline import,
     /// ADR-0002 §7). The service runs exactly the checks a fetched document gets; this grants no
     /// privilege, because an import can only install what the signing keys already authorised.
@@ -136,6 +152,32 @@ pub enum Request {
     FinishServer {
         label: String,
         host: String,
+        report: String,
+    },
+    /// A friend's device asks to join someone's server (T188): the service makes a key that stays on this
+    /// computer and answers with the text to send to the owner (a name and the public half of the key).
+    /// `name` is what the owner will see for this device.
+    RequestJoin {
+        name: String,
+    },
+    /// The owner's invite, pasted (T188). The service checks it, puts this computer's own key in it, and, once
+    /// a person has approved, adds the server. `label` names the server here; without it the invite's name is
+    /// used.
+    AcceptInvite {
+        invite: String,
+        label: Option<String>,
+    },
+    /// The owner adds a friend's device to one of their servers (T188): `request` is the text the friend sent.
+    /// The answer is the script to run on that server.
+    PrepareDevice {
+        endpoint: EndpointId,
+        request: String,
+    },
+    /// Finish it: `report` is what the script printed on the server. The service checks it against the request
+    /// it prepared and answers with the invite to send to the friend.
+    FinishDevice {
+        endpoint: EndpointId,
+        request: String,
         report: String,
     },
     StartProvisioning,
@@ -220,35 +262,69 @@ pub fn check_label(label: &str) -> Result<&str, IpcError> {
     Ok(label)
 }
 
-/// The rules for a server's address.
+/// The rules for a server's address: an IPv4 address a server can have, and nothing else (for now).
+///
+/// What the connection will refuse is refused here, not at the first connect (`dnetd`'s plan, `dialled`). A host name
+/// would have to be looked up on whatever network the computer is on, before the tunnel exists, and that network can
+/// answer with an address of its own choosing. An IPv6 address is not supported yet. A saved file from before may
+/// still hold either; it loads, and the connect refuses it with its own reason.
 pub fn check_host(host: &str) -> Result<&str, IpcError> {
     let host = host.trim();
     if host.len() > MAX_HOST_CHARS || !dnet_config::persist::host_is_acceptable(host) {
         return Err(invalid(
-            "`host` must be an IP address or a host name, with no scheme, port or path",
+            "`host` must be an IPv4 address, with no scheme, port or path",
         ));
     }
-    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        if ip.is_unspecified() || ip.is_multicast() {
-            return Err(invalid("`host` is not an address a server can have"));
+    let ip = match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => ip,
+        Ok(std::net::IpAddr::V6(_)) => {
+            return Err(invalid(
+                "`host` must be an IPv4 address for now: IPv6 servers are not supported yet",
+            ))
         }
+        Err(_) => {
+            return Err(invalid(
+                "`host` must be an IPv4 address for now, not a host name: a name would be looked up on the network this computer is on, before the tunnel exists, and that network could answer with an address of its own",
+            ))
+        }
+    };
+    if !dnet_config::persist::address_could_be_a_server(std::net::IpAddr::V4(ip)) {
+        return Err(invalid("`host` is not an address a server can have"));
     }
     Ok(host)
 }
 
 /// The rules for the text a person pastes back from their server.
 fn check_report(report: &str) -> Result<(), IpcError> {
-    let bad = |c: char| crate::netview::is_hostile(c) && !matches!(c, '\n' | '\r' | '\t');
-    if report.trim().is_empty()
-        || report.chars().count() > crate::server_setup::MAX_REPORT_CHARS
-        || report.chars().any(bad)
-    {
-        return Err(invalid(format!(
+    check_pasted("report", report, crate::server_setup::MAX_REPORT_CHARS).map_err(|_| {
+        invalid(format!(
             "`report` must be the text the server printed, up to {} characters, with no control characters",
             crate::server_setup::MAX_REPORT_CHARS
+        ))
+    })
+}
+
+/// The rules for any text a person pastes: not empty, not longer than `max` characters, and no control or
+/// direction characters other than line breaks and tabs. What the text means is decided by whoever reads it.
+fn check_pasted(field: &str, text: &str, max: usize) -> Result<(), IpcError> {
+    let bad = |c: char| crate::netview::is_hostile(c) && !matches!(c, '\n' | '\r' | '\t');
+    if text.trim().is_empty() || text.chars().count() > max || text.chars().any(bad) {
+        return Err(invalid(format!(
+            "`{field}` must be pasted text of up to {max} characters, with no control characters"
         )));
     }
     Ok(())
+}
+
+/// The rules for the name a friend's device gives itself.
+fn check_device_name(name: &str) -> Result<&str, IpcError> {
+    if !dnet_config::invite::valid_name(name) {
+        return Err(invalid(format!(
+            "`name` must be 1 to {} letters, digits, spaces, dots, dashes or underscores",
+            dnet_config::invite::MAX_NAME_LEN
+        )));
+    }
+    Ok(name)
 }
 
 impl NewEndpoint {
@@ -297,7 +373,7 @@ impl Request {
     pub fn class(&self) -> RequestClass {
         use Request::*;
         match self {
-            GetVersion | GetState | GetSession | GetPaths | GetStats | GetComponents
+            GetVersion | GetState | GetSession | GetPaths | GetStats | GetComponents | GetGuard
             | ListEndpoints | ListProfiles | ListRules | GetDiagnostics | ListPending => {
                 RequestClass::ReadOnly
             }
@@ -313,10 +389,16 @@ impl Request {
             | EnableBrutal { .. }
             | DisableBrutal { .. }
             | SetEncryptedDnsHandling { .. }
+            | SetKillSwitch { .. }
+            | ReleaseGuard
             | ImportFeed(_)
             | FetchFeed
             | PrepareServer { .. }
             | FinishServer { .. }
+            | RequestJoin { .. }
+            | AcceptInvite { .. }
+            | PrepareDevice { .. }
+            | FinishDevice { .. }
             | StartProvisioning
             | CancelProvisioning
             | RejectChange { .. } => RequestClass::Mutating,
@@ -1028,6 +1110,7 @@ pub fn decode_request(wire: &str) -> Result<Request, IpcError> {
         "GetPaths" => Request::GetPaths,
         "GetStats" => Request::GetStats,
         "GetComponents" => Request::GetComponents,
+        "GetGuard" => Request::GetGuard,
         "ListEndpoints" => Request::ListEndpoints,
         "ListProfiles" => Request::ListProfiles,
         "ListRules" => Request::ListRules,
@@ -1135,6 +1218,16 @@ pub fn decode_request(wire: &str) -> Result<Request, IpcError> {
                 block: field_bool(&value, "block")?,
             }
         }
+        "SetKillSwitch" => {
+            only_fields(&value, &["request", "enabled"])?;
+            Request::SetKillSwitch {
+                enabled: field_bool(&value, "enabled")?,
+            }
+        }
+        "ReleaseGuard" => {
+            only_fields(&value, &["request"])?;
+            Request::ReleaseGuard
+        }
         "ImportFeed" => {
             only_fields(&value, &["request", "keys", "feed"])?;
             Request::ImportFeed(FeedImport::new(
@@ -1164,6 +1257,45 @@ pub fn decode_request(wire: &str) -> Result<Request, IpcError> {
                 label,
                 host,
                 report: report.to_owned(),
+            }
+        }
+        "RequestJoin" => {
+            only_fields(&value, &["request", "name"])?;
+            Request::RequestJoin {
+                name: check_device_name(field_str(&value, "name")?)?.to_owned(),
+            }
+        }
+        "AcceptInvite" => {
+            only_fields(&value, &["request", "invite", "label"])?;
+            let invite = field_str(&value, "invite")?;
+            check_pasted("invite", invite, crate::devices::MAX_INVITE_CHARS)?;
+            let label = match optional_string(&value, "label")? {
+                Some(label) => Some(check_label(label)?.to_owned()),
+                None => None,
+            };
+            Request::AcceptInvite {
+                invite: invite.to_owned(),
+                label,
+            }
+        }
+        "PrepareDevice" => {
+            only_fields(&value, &["request", "endpoint", "text"])?;
+            let text = field_str(&value, "text")?;
+            check_pasted("text", text, crate::devices::MAX_REQUEST_CHARS)?;
+            Request::PrepareDevice {
+                endpoint: parse_endpoint_id(field_str(&value, "endpoint")?)?,
+                request: text.to_owned(),
+            }
+        }
+        "FinishDevice" => {
+            only_fields(&value, &["request", "endpoint", "text", "report"])?;
+            let text = field_str(&value, "text")?;
+            check_pasted("text", text, crate::devices::MAX_REQUEST_CHARS)?;
+            check_report(field_str(&value, "report")?)?;
+            Request::FinishDevice {
+                endpoint: parse_endpoint_id(field_str(&value, "endpoint")?)?,
+                request: text.to_owned(),
+                report: field_str(&value, "report")?.to_owned(),
             }
         }
         "StartProvisioning" => Request::StartProvisioning,
@@ -1196,6 +1328,7 @@ pub fn encode_request(request: &Request) -> String {
         Request::GetPaths => "GetPaths",
         Request::GetStats => "GetStats",
         Request::GetComponents => "GetComponents",
+        Request::GetGuard => "GetGuard",
         Request::ListEndpoints => "ListEndpoints",
         Request::ListProfiles => "ListProfiles",
         Request::ListRules => "ListRules",
@@ -1212,10 +1345,16 @@ pub fn encode_request(request: &Request) -> String {
         Request::EnableBrutal { .. } => "EnableBrutal",
         Request::DisableBrutal { .. } => "DisableBrutal",
         Request::SetEncryptedDnsHandling { .. } => "SetEncryptedDnsHandling",
+        Request::SetKillSwitch { .. } => "SetKillSwitch",
+        Request::ReleaseGuard => "ReleaseGuard",
         Request::ImportFeed(_) => "ImportFeed",
         Request::FetchFeed => "FetchFeed",
         Request::PrepareServer { .. } => "PrepareServer",
         Request::FinishServer { .. } => "FinishServer",
+        Request::RequestJoin { .. } => "RequestJoin",
+        Request::AcceptInvite { .. } => "AcceptInvite",
+        Request::PrepareDevice { .. } => "PrepareDevice",
+        Request::FinishDevice { .. } => "FinishDevice",
         Request::StartProvisioning => "StartProvisioning",
         Request::CancelProvisioning => "CancelProvisioning",
         Request::ApproveChange { .. } => "ApproveChange",
@@ -1268,6 +1407,9 @@ pub fn encode_request(request: &Request) -> String {
         Request::SetEncryptedDnsHandling { block } => {
             object.insert("block".into(), Value::Bool(*block));
         }
+        Request::SetKillSwitch { enabled } => {
+            object.insert("enabled".into(), Value::Bool(*enabled));
+        }
         Request::PrepareServer { arch } => {
             object.insert("arch".into(), Value::String(arch.as_str().to_owned()));
         }
@@ -1278,6 +1420,28 @@ pub fn encode_request(request: &Request) -> String {
         } => {
             object.insert("label".into(), Value::String(label.clone()));
             object.insert("host".into(), Value::String(host.clone()));
+            object.insert("report".into(), Value::String(report.clone()));
+        }
+        Request::RequestJoin { name } => {
+            object.insert("name".into(), Value::String(name.clone()));
+        }
+        Request::AcceptInvite { invite, label } => {
+            object.insert("invite".into(), Value::String(invite.clone()));
+            if let Some(label) = label {
+                object.insert("label".into(), Value::String(label.clone()));
+            }
+        }
+        Request::PrepareDevice { endpoint, request } => {
+            object.insert("endpoint".into(), Value::String(endpoint.to_string()));
+            object.insert("text".into(), Value::String(request.clone()));
+        }
+        Request::FinishDevice {
+            endpoint,
+            request,
+            report,
+        } => {
+            object.insert("endpoint".into(), Value::String(endpoint.to_string()));
+            object.insert("text".into(), Value::String(request.clone()));
             object.insert("report".into(), Value::String(report.clone()));
         }
         Request::EnableBrutal {

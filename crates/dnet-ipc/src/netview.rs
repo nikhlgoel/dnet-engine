@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T144 — the wire form of `GetPaths` and `GetStats`: the networks as the interface shows them, and
 //! what the product did during the connection.
 //!

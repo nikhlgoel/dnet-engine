@@ -42,7 +42,7 @@
   ${EndIf}
   ; The tray for everyone who signs in. It holds no privilege: the service does the work, and keeps
   ; doing it whether or not the tray is running.
-  WriteRegStr HKLM "${DNET_RUN_KEY}" "${PRODUCTNAME}" '"$INSTDIR\${MAINBINARYNAME}.exe"'
+  WriteRegStr HKLM "${DNET_RUN_KEY}" "${PRODUCTNAME}" '"$INSTDIR\${MAINBINARYNAME}.exe" --background'
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL

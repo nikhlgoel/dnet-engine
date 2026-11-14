@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Nothing the other end of the pipe sends may crash a program that reads it.
 //!
 //! The server reads requests from any signed-in user, and the clients (`dnetctl`, the tray) read

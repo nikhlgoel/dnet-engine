@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T023 — `EndpointHealth` transition tests (data-model §1.1).
 //!
 //! Written before the implementation (Constitution Principle IV), then completed once

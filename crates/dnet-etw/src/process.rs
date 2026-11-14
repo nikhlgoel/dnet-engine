@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Which program a process id is, as a path (the form application rules are written in).
 //!
 //! An attribution names a process id; an application rule names an executable's path. This connects them.

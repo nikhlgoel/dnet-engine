@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T100 — the words of the tray menu (ADR-0007 R1).
 //!
 //! The tray is native and depends on no JavaScript, so it cannot borrow the window's words at run time. It

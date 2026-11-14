@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T072 — which rule applies to a connection, and which rules can never apply (FR-021, FR-022, FR-023).
 //!
 //! The primary core does the routing at run time, from a configuration generated out of the rule set
@@ -318,6 +319,73 @@ mod tests {
     }
     fn ip(s: &str) -> IpAddr {
         s.parse().unwrap()
+    }
+
+    // ------------------------------------------------------------------ limits and shadowing, from mutation testing
+    //
+    // Each of these edges and kinds went untested: a rule's name could be accepted at one character too many or
+    // too few, and a rule could be reported as never reached (or not) for the wrong kind of matcher.
+
+    #[test]
+    fn a_domain_name_is_a_name_only_within_the_dns_limits() {
+        let label = |n: usize| "a".repeat(n);
+        let name253 = format!("{}.{}.{}.{}", label(63), label(63), label(63), label(61));
+        assert_eq!(name253.len(), 253);
+        assert_eq!(
+            normalize_domain(&name253).as_deref(),
+            Some(name253.as_str())
+        );
+        assert_eq!(
+            normalize_domain(&format!("{name253}.")).as_deref(),
+            Some(name253.as_str()),
+            "a trailing dot is dropped"
+        );
+        let name254 = format!("{}.{}.{}.{}", label(63), label(63), label(63), label(62));
+        assert_eq!(normalize_domain(&name254), None, "254 characters");
+        assert_eq!(
+            normalize_domain(&label(63)).as_deref(),
+            Some(label(63).as_str())
+        );
+        assert_eq!(normalize_domain(&label(64)), None, "a label of 64");
+        for bad in [
+            "",
+            ".",
+            "é.com",
+            "ex ample.com",
+            "a..b",
+            "-a.com",
+            "a-.com",
+            "a.com\u{7}",
+        ] {
+            assert_eq!(normalize_domain(bad), None, "{bad:?}");
+        }
+        assert_eq!(
+            normalize_domain("ExAmple.COM.").as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(
+            normalize_domain("_dmarc.example.com").as_deref(),
+            Some("_dmarc.example.com")
+        );
+    }
+
+    #[test]
+    fn a_rule_covers_another_only_when_it_matches_everything_that_one_would() {
+        let app = |s: &str| RuleMatcher::Application(s.into());
+        // The same name, however it is written.
+        assert!(covers(&domain("Example.com."), &domain("example.com")));
+        assert!(!covers(&domain("example.com"), &domain("other.com")));
+        assert!(!covers(&domain("example.com"), &domain("www.example.com")));
+        // What is not a name covers nothing, not even itself.
+        assert!(!covers(&domain("bad name"), &domain("bad name")));
+        // The same program, however its path is spelled; a different program is not covered.
+        assert!(covers(&app(r"C:\Tools\a.exe"), &app("c:/tools/a.exe")));
+        assert!(!covers(&app(r"C:\Tools\a.exe"), &app(r"C:\Tools\b.exe")));
+        // Kinds never cover each other, except that the DNS-port rule covers itself.
+        assert!(covers(&RuleMatcher::DnsPort, &RuleMatcher::DnsPort));
+        assert!(!covers(&RuleMatcher::DnsPort, &domain("example.com")));
+        assert!(!covers(&domain("example.com"), &RuleMatcher::DnsPort));
+        assert!(!covers(&app(r"C:\Tools\a.exe"), &domain("example.com")));
     }
 
     // ------------------------------------------------------------------ precedence

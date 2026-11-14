@@ -15,8 +15,13 @@
     "allow-remove-endpoint",
     "allow-prepare-server",
     "allow-finish-server",
+    "allow-request-join",
+    "allow-accept-invite",
+    "allow-prepare-device",
+    "allow-finish-device",
     "allow-set-endpoint-enabled",
     "allow-list-profiles",
+    "allow-list-components",
     "allow-set-brutal",
     "allow-list-rules",
     "allow-add-rule",
@@ -25,7 +30,15 @@
     "allow-reject-change",
     "allow-approve-change",
     "allow-set-encrypted-dns",
+    "allow-get-guard",
+    "allow-set-kill-switch",
+    "allow-release-guard",
     "allow-check-updates",
-    "allow-open-login-page"
+    "allow-open-login-page",
+    "allow-window-minimize",
+    "allow-window-toggle-maximize",
+    "allow-window-start-drag",
+    "allow-window-close",
+    "allow-window-ready"
   ]
 }

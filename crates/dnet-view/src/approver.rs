@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T160b — approving a waiting change from the window.
 //!
 //! The window is an ordinary program of the person, so the service refuses it the one thing it must not

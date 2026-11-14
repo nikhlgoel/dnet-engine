@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Acceptance, rollback protection, rule R and restore (ADR-0002 §4).
 //!
 //! Every operation is a pure function from (trust, state, bytes, now) to a new state or a

@@ -84,6 +84,8 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+# Said, not left to the default, so nobody "optimises" it away.
+panic = "unwind"
 # Not "abort": the service guards the machine's traffic, and a panic in one task (one client, one
 # probe) must end that task, not the process. Ending the process drops the tunnel and lets traffic
 # out unprotected. Unwinding costs some binary size; size is tuned after features, by measurement.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T045 (OS half) — orphaned-core discovery and termination (SUP-05).
 //!
 //! Enumerates processes with a Toolhelp snapshot and matches each candidate's **full
@@ -33,11 +34,24 @@ mod win {
         TH32CS_SNAPPROCESS,
     };
     use windows::Win32::System::Threading::{
-        OpenProcess, QueryFullProcessImageNameW, TerminateProcess, PROCESS_NAME_WIN32,
-        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+        GetExitCodeProcess, OpenProcess, QueryFullProcessImageNameW, TerminateProcess,
+        PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
     };
 
     use crate::error::SupervisorError;
+
+    /// The exit code a process reports while it is still running.
+    const STILL_ACTIVE: u32 = 259;
+
+    /// Whether the process behind `handle` has already ended. Ending one that has is refused by the system
+    /// with "access denied" while anything still holds a handle to it, which is not a process left running.
+    /// Needs `PROCESS_QUERY_LIMITED_INFORMATION`; without it, or when the code cannot be read, the answer
+    /// is "no", so a real refusal is never hidden.
+    fn has_ended(handle: &Owned) -> bool {
+        let mut code = 0u32;
+        // SAFETY: the handle is open; `code` is a valid out-pointer.
+        unsafe { GetExitCodeProcess(handle.0, &mut code) }.is_ok() && code != STILL_ACTIVE
+    }
 
     /// Closes a handle on drop.
     struct Owned(HANDLE);
@@ -131,8 +145,15 @@ mod win {
     /// Terminate a process by id. A process that has already exited is not an error; one that
     /// cannot be opened for any other reason is, because it may still be running.
     pub fn terminate(pid: u32) -> Result<(), SupervisorError> {
-        // SAFETY: OpenProcess for termination; the handle is closed by Owned.
-        let handle = match unsafe { OpenProcess(PROCESS_TERMINATE, false, pid) } {
+        // SAFETY: OpenProcess for termination (and the exit code, to tell an ended process from a refusal);
+        // the handle is closed by Owned.
+        let handle = match unsafe {
+            OpenProcess(
+                PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
+                false,
+                pid,
+            )
+        } {
             Ok(h) => Owned(h),
             Err(e) if is_gone(&e) => return Ok(()),
             Err(e) => {
@@ -142,8 +163,14 @@ mod win {
             }
         };
         // SAFETY: the handle carries PROCESS_TERMINATE.
-        unsafe { TerminateProcess(handle.0, 1) }
-            .map_err(|e| SupervisorError::Runtime(format!("terminating pid {pid}: {e}")))
+        match unsafe { TerminateProcess(handle.0, 1) } {
+            Ok(()) => Ok(()),
+            // It ended by itself between the scan and now: nothing is left to end.
+            Err(_) if has_ended(&handle) => Ok(()),
+            Err(e) => Err(SupervisorError::Runtime(format!(
+                "terminating pid {pid}: {e}"
+            ))),
+        }
     }
 
     /// End `pid` if, and only if, it is still one of `images`. The check and the kill are made
@@ -170,9 +197,14 @@ mod win {
             return Ok(false);
         }
         // SAFETY: the handle carries PROCESS_TERMINATE.
-        unsafe { TerminateProcess(handle.0, 1) }
-            .map_err(|e| SupervisorError::Runtime(format!("terminating pid {pid}: {e}")))?;
-        Ok(true)
+        match unsafe { TerminateProcess(handle.0, 1) } {
+            Ok(()) => Ok(true),
+            // It ended by itself after the check: it is gone, and not ended by this call.
+            Err(_) if has_ended(&handle) => Ok(false),
+            Err(e) => Err(SupervisorError::Runtime(format!(
+                "terminating pid {pid}: {e}"
+            ))),
+        }
     }
 
     /// Find and terminate every orphaned core. Returns the ids that were terminated.
@@ -253,8 +285,12 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn a_process_that_is_not_one_of_ours_is_left_alone() {
+        let _one_at_a_time = crate::process::spawning();
+        // `set /p` is a built-in that waits for input from a stdin nobody closes: one process, no child under it, so
+        // ending it can never strand a suspended grandchild holding the test run's pipes (T190).
         let mut bystander = std::process::Command::new("cmd")
-            .args(["/C", "ping -n 30 127.0.0.1 > nul"])
+            .args(["/C", "set /p x="])
+            .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
@@ -294,6 +330,7 @@ mod tests {
             .join(format!("dnet-orphan-probe-{}.exe", std::process::id()));
         std::fs::copy(std::env::current_exe().unwrap(), &image).unwrap();
 
+        let _one_at_a_time = crate::process::spawning();
         let mut child = std::process::Command::new(&image)
             .args([
                 "--ignored",
@@ -329,5 +366,115 @@ mod tests {
         assert!(find_by_image(std::slice::from_ref(&image))
             .unwrap()
             .is_empty());
+    }
+}
+
+#[cfg(all(test, windows))]
+mod pinned_tests {
+    use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount};
+
+    use super::*;
+
+    fn sleeper() -> std::process::Child {
+        let _one_at_a_time = crate::process::spawning();
+        // See the note in `a_process_that_is_not_one_of_ours_is_left_alone`: a built-in waiting on an open stdin.
+        std::process::Command::new("cmd")
+            .args(["/C", "set /p x="])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
+    fn handles() -> u32 {
+        let mut count = 0u32;
+        // SAFETY: the pseudo-handle for this process is always valid; `count` is a valid out-pointer.
+        unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut count) }.unwrap();
+        count
+    }
+
+    #[test]
+    fn a_process_is_ended_by_its_id_and_leaves_with_the_code_it_was_given() {
+        let mut child = sleeper();
+        terminate(child.id()).unwrap();
+        let status = child.wait().unwrap();
+        assert_eq!(
+            status.code(),
+            Some(1),
+            "ended by the supervisor, not finished"
+        );
+    }
+
+    #[test]
+    fn ending_a_process_twice_is_not_an_error_the_second_time() {
+        let mut child = sleeper();
+        let pid = child.id();
+        terminate(pid).unwrap();
+        child.wait().unwrap();
+        terminate(pid).expect("a process that is gone is not an error");
+    }
+
+    #[test]
+    fn a_process_that_is_gone_is_not_ended_and_not_an_error() {
+        let someone = [PathBuf::from(r"C:\Program Files\DNet Engine\core.exe")];
+        assert!(!win::terminate_if_image(0xFFFF_FFF0, &someone).unwrap());
+    }
+
+    /// The service never ends itself, however its own image is listed.
+    #[test]
+    fn the_scan_never_includes_the_process_asking() {
+        let me = std::process::id();
+        let found = find_by_image(&[std::env::current_exe().unwrap()]).unwrap();
+        assert!(
+            !found.contains(&me),
+            "{found:?} includes this process ({me})"
+        );
+    }
+
+    #[test]
+    fn a_scan_for_an_image_nobody_runs_finds_nothing() {
+        let found =
+            find_by_image(&[PathBuf::from(r"C:\no\such\dir\dnet-nothing-runs-this.exe")]).unwrap();
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn a_scan_for_no_images_finds_nothing() {
+        assert!(find_by_image(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn scanning_and_ending_do_not_leak_handles() {
+        let _warm = find_by_image(&[PathBuf::from("dnet-warm.exe")]).unwrap();
+        let before = handles();
+        for _ in 0..200 {
+            let _ = find_by_image(&[PathBuf::from("dnet-leak-check.exe")]).unwrap();
+            let _ = terminate(0xFFFF_FFF0);
+        }
+        let after = handles();
+        assert!(after < before + 150, "{before} handles became {after}");
+    }
+
+    #[test]
+    fn a_real_process_is_ended_through_its_image_and_a_look_alike_is_not() {
+        let mut ours = sleeper();
+        let mut other = sleeper();
+        // The image of both is the same program; only the path given decides.
+        let cmd_path =
+            PathBuf::from(std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into()))
+                .join("System32")
+                .join("cmd.exe");
+        let not_cmd = [PathBuf::from(r"C:\elsewhere\cmd.exe")];
+        assert!(!win::terminate_if_image(other.id(), &not_cmd).unwrap());
+        assert!(
+            other.try_wait().unwrap().is_none(),
+            "a look-alike was ended"
+        );
+
+        assert!(win::terminate_if_image(ours.id(), std::slice::from_ref(&cmd_path)).unwrap());
+        assert_eq!(ours.wait().unwrap().code(), Some(1));
+        let _ = other.kill();
+        let _ = other.wait();
     }
 }

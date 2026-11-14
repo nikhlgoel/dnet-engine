@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T105 — turning Brutal congestion control on and off (FR-006, contracts/ipc-protocol.md IPC-24).
 //!
 //! | ID     | Assertion |

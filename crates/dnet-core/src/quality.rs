@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T081 — path quality: smoothing raw samples, and naming what the smoothed value means (FR-018).
 //!
 //! A path's quality arrives as a stream of samples, each a probe that either came back after some

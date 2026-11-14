@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Supervision errors.
 
 use dnet_core::profile::CoreBinding;

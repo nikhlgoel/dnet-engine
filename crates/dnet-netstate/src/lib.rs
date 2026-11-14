@@ -1,10 +1,15 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Interfaces, routes, DNS, change notification, and restoration guarantees.
 //!
 //! See `specs/001-network-resilience-client/` for the governing specification.
 
 pub mod adapter;
+pub mod cost;
 pub mod echo;
 pub mod error;
+#[cfg(windows)]
+pub mod guard_engine;
+pub mod guard_wfp;
 pub mod host_route;
 pub mod notify;
 pub mod paths;

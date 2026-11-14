@@ -1,0 +1,8 @@
+# One maintainer reviews everything. The paths below are named so that a change to them is never merged
+# on a glance: they are the privilege boundary, the undo path and the release pipeline.
+*                               @nikhlgoel
+/crates/dnet-ipc/               @nikhlgoel
+/crates/dnet-netstate/          @nikhlgoel
+/crates/dnetd/src/recovery.rs   @nikhlgoel
+/.github/workflows/             @nikhlgoel
+/installer/                     @nikhlgoel

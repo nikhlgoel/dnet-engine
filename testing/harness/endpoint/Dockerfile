@@ -20,7 +20,7 @@ RUN git init -q \
 # Only the server side is needed here, so the TUN-related tags the client uses are omitted;
 # `with_quic` serves Hysteria 2 and `with_utls` serves REALITY.
 FROM golang:1.25-alpine AS primary-build
-ARG PRIMARY_CORE_COMMIT=0b8995879f29a9b98ee027bc17b75e101445b238
+ARG PRIMARY_CORE_COMMIT=c005f35300ce76427dc285481ec5695f5b179cd2
 RUN apk add --no-cache git
 WORKDIR /src
 RUN git init -q \

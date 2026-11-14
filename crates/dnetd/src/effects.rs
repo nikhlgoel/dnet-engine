@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T126 step 2 — the real effects (Windows).
 //!
 //! The orchestrator decides when; this does. It is deliberately thin: what to start is decided by
@@ -308,6 +309,8 @@ pub struct RealEffects {
     /// configuration is generated, so a feed accepted mid-session reaches the next connection and
     /// never the one that is up.
     definitions: SharedDefinitions,
+    /// The kill switch (T161): the person's choice and the door to the firewall guard, when there is one.
+    guard: Option<crate::guard_control::GuardWiring>,
 }
 
 /// A session connection that is up (ADR-0008): which endpoint it is on, its carriers and the one it runs on, how
@@ -367,9 +370,39 @@ pub struct Dependencies {
     pub layout: Layout,
     /// What the applied profile feed says about the client-only parameters.
     pub definitions: SharedDefinitions,
+    /// The person's kill-switch choice and the door to the firewall guard (T161); `None` leaves the guard out.
+    pub guard: Option<crate::guard_control::GuardWiring>,
 }
 
 impl RealEffects {
+    /// Put the guard into the firewall around the tunnel that just came up (T161). Off the async threads: the
+    /// firewall engine is a blocking call, and so is the adapter lookup.
+    async fn engage_guard(&self, control_port: u16) -> Result<(), String> {
+        let Some(wiring) = &self.guard else {
+            return Ok(());
+        };
+        let control = Arc::clone(&wiring.control);
+        let switch = Arc::clone(&wiring.switch);
+        let core = self.layout.primary_core.clone();
+        tokio::task::spawn_blocking(move || {
+            let service = std::env::current_exe()
+                .map_err(|e| format!("the service's own path is not known: {e}"))?;
+            let luid =
+                dnet_netstate::adapter::interface_luid_value(dnet_config::primary::TUN_INTERFACE)
+                    .map_err(|e| e.to_string())?;
+            let plan = crate::guard_control::plan_for(&core, &service, control_port, luid);
+            control.engage(&plan)?;
+            // The person may have turned it off while this was going in (review 2026-11-10): the guard must not
+            // outlive a choice that was changed under it, or the switch would read off with a guard in.
+            if !switch.enabled() {
+                control.release()?;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|_| "putting the guard in was interrupted".to_owned())?
+    }
+
     /// Build the effects for the endpoints in `endpoints` that can be used, and return them with
     /// the profiles and endpoints the engine must be given: exactly these, so it never chooses one
     /// that cannot work or reports a profile blocked that was never tried.
@@ -384,6 +417,7 @@ impl RealEffects {
             undo,
             layout,
             definitions,
+            guard,
         } = dependencies;
         let assessed = crate::plan::assess_endpoints(endpoints, secrets.as_ref());
         // Only profiles some usable endpoint can serve: see `served_profiles`.
@@ -467,6 +501,7 @@ impl RealEffects {
             )),
             portal: Mutex::new(PortalMemory::default()),
             definitions,
+            guard,
         };
         if !effects.watch_paths {
             tracing::warn!("--no-path-watch: the network is not watched and no path is probed");
@@ -624,6 +659,10 @@ impl RealEffects {
 }
 
 impl Effects for RealEffects {
+    async fn core_health(&self) -> Vec<(CoreBinding, dnet_supervisor::runtime::CoreHealth)> {
+        self.tunnels.core_health().await
+    }
+
     fn environment(&self) -> Environment {
         Environment {
             privileged: self.privileged,
@@ -767,7 +806,32 @@ impl Effects for RealEffects {
         };
         drop(credentials);
 
+        // The kill switch (T161): decided before anything is started, so a connection it cannot cover is refused
+        // with the reason instead of being made without the protection that was asked for.
+        let coverage = match &self.guard {
+            Some(wiring) => crate::guard_control::coverage(
+                wiring.switch.enabled(),
+                plan.awg.is_some(),
+                plan.session.as_ref().map(|s| s.control.port),
+            ),
+            None => crate::guard_control::Coverage::NotWanted,
+        };
+        if let crate::guard_control::Coverage::CannotCover(why) = &coverage {
+            return Err(configuration(why.clone()));
+        }
+
         self.tunnels.start(&plan).await?;
+        if let crate::guard_control::Coverage::Wanted { control_port } = coverage {
+            if let Err(detail) = self.engage_guard(control_port).await {
+                // A tunnel up without the protection that was asked for is not what the person chose.
+                tracing::error!(%detail, "the kill switch could not be put in; stopping the tunnel");
+                self.tunnels.stop().await;
+                return Err(configuration(format!(
+                    "the kill switch is on but could not be put in ({detail}); the connection was not made. \
+                     Turn the kill switch off to connect without it"
+                )));
+            }
+        }
         // A session connection can later be moved to another carrier without ending it.
         self.set_live_session(
             plan.session
@@ -792,6 +856,20 @@ impl Effects for RealEffects {
         self.set_watching(None);
         self.set_live_session(None);
         self.tunnels.stop().await;
+    }
+
+    async fn release_guard(&self) {
+        let Some(wiring) = &self.guard else {
+            return;
+        };
+        let control = Arc::clone(&wiring.control);
+        match tokio::task::spawn_blocking(move || control.release()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::error!(%error, "the guard could not be taken out on disconnect")
+            }
+            Err(_) => tracing::error!("taking the guard out was interrupted"),
+        }
     }
 
     async fn move_tunnel(&self, profile: &ProfileId, endpoint: EndpointId) -> bool {

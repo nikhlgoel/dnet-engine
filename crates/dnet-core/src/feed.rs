@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T066: signed profile feed verification (ADR-0002, FR-007, FR-008).
 //!
 //! A pure decision layer. It takes envelope bytes, the current time and the stored feed state,

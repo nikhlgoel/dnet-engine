@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T149 — `cargo xtask build-server-cores --base-url <https://…/>`: the Linux builds of the two server-side
 //! cores, from the same pinned commits as the client's (T093 gap: until now nothing made them).
 //!
@@ -120,6 +121,7 @@ fn build_core(src: &GoSource, out: &Path) -> Result<PinnedCore> {
         );
     }
 
+    crate::fetch_vendor::warm_go_cache(&work);
     let mut built = Vec::new();
     for arch in ARCHES {
         let file = asset_name(src.dest, arch);

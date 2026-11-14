@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T170 — the Registry: every part of the connection as a component with a state, a reason in words,
 //! the time it last changed and the evidence behind it (ADR-0008 section 3.6; P1 in section 7).
 //!

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The fetch rules against a fake transport that records every URL it is asked for, so what is asserted
 //! is what the service would have *requested*, not only what it ended up with.
 
@@ -510,4 +511,117 @@ fn jitter_is_below_its_maximum_and_zero_when_there_is_none() {
     for _ in 0..200 {
         assert!(jitter(Duration::from_secs(30 * 60)) < Duration::from_secs(30 * 60));
     }
+}
+
+// ------------------------------------------------------------------ the address rules against a real parser
+
+/// Many hostile variations of the real asset addresses: every character a URL parser treats specially, put at every
+/// position, and put in place of every character.
+fn hostile_variations() -> Vec<String> {
+    let bases = [
+        asset_url(FEED_ASSET),
+        asset_url(KEYS_ASSET),
+        "https://release-assets.githubusercontent.com/github-production-release-asset/1?sig=a"
+            .to_owned(),
+    ];
+    let specials = [
+        "\\",
+        "@",
+        ":",
+        "\t",
+        "\n",
+        "\r",
+        " ",
+        "%",
+        "%40",
+        "%2e",
+        ".",
+        "#",
+        "?",
+        "/",
+        "[",
+        "]",
+        "..",
+        "//",
+        "\\\\",
+        "\u{ff0e}",
+        "\u{2024}",
+        "\u{3002}",
+        "\u{0}",
+        "\u{a0}",
+        "@evil.example",
+        ":443",
+        ".evil.example",
+        "\\@evil.example/",
+        "@evil.example\\",
+    ];
+    let mut out = Vec::new();
+    for base in &bases {
+        let mut boundaries: Vec<usize> = base.char_indices().map(|(at, _)| at).collect();
+        boundaries.push(base.len());
+        for (n, &at) in boundaries.iter().enumerate() {
+            for special in specials {
+                // Put in ...
+                out.push(format!("{}{}{}", &base[..at], special, &base[at..]));
+                // ... and put in place of the character there.
+                if let Some(&next) = boundaries.get(n + 1) {
+                    out.push(format!("{}{}{}", &base[..at], special, &base[next..]));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// How many of `hostile_variations` the check accepted, and how many of those a real URL parser (the HTTP
+/// library's own) reads as something other than HTTPS, an allowed host, no credentials and no port.
+fn disagreements(accepts: impl Fn(&str) -> bool) -> (usize, usize) {
+    use dnet_core::feed::fetch::ALLOWED_HOSTS;
+    let (mut accepted, mut wrong) = (0, 0);
+    for candidate in hostile_variations() {
+        if !accepts(&candidate) {
+            continue;
+        }
+        accepted += 1;
+        // A candidate the parser refuses is a request that fails, not one that goes astray.
+        if let Ok(url) = reqwest::Url::parse(&candidate) {
+            let host = url.host_str().unwrap_or_default();
+            let fine = url.scheme() == "https"
+                && ALLOWED_HOSTS.contains(&host)
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.port().is_none();
+            if !fine {
+                wrong += 1;
+            }
+        }
+    }
+    (accepted, wrong)
+}
+
+#[test]
+fn whatever_the_address_rules_accept_a_real_url_parser_reads_the_same_way() {
+    let checked = hostile_variations().len();
+    assert!(
+        checked > 5_000,
+        "{checked} variations is too few to mean anything"
+    );
+    let (accepted, wrong) = disagreements(is_allowed_url);
+    assert_eq!(
+        wrong, 0,
+        "the rules accepted an address the parser reads as somewhere else"
+    );
+    // Some variations are harmless (the character lands in the path or query) and must still be accepted, or the
+    // rules would be refusing everything and this test would prove nothing.
+    assert!(accepted > 100, "only {accepted} of {checked} accepted");
+}
+
+#[test]
+fn the_same_test_catches_a_check_that_only_looks_at_the_start_of_the_address() {
+    // A negative control: the obvious, wrong way to write the rule. If this found nothing, the test above could
+    // not find anything either.
+    let (_, wrong) = disagreements(|url| url.starts_with("https://github.com"));
+    assert!(wrong > 0, "the harness failed to catch a prefix check");
+    let (_, wrong) = disagreements(|url| url.contains("github.com") && url.starts_with("https://"));
+    assert!(wrong > 0, "the harness failed to catch a substring check");
 }

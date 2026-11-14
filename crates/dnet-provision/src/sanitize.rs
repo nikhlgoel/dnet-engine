@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Everything a provider says on its own account passes through here before a person or a log sees it
 //! (PR-04: the credential never appears in logs, diagnostics, IPC messages, error text or telemetry).
 //!
@@ -198,5 +199,73 @@ mod tests {
             .with_secret(Secret::new("second-secret-value-bbbb"));
         let cleaned = both.clean("a first-secret-value-aaaa and a second-secret-value-bbbb");
         assert!(!cleaned.contains("secret-value"), "{cleaned}");
+    }
+}
+
+/// What the mutation run showed the sanitizer's own tests did not pin: where the cut falls, and the exact
+/// size at which a stretch of a secret is long enough to count.
+#[cfg(test)]
+mod edge_tests {
+    use super::*;
+
+    #[test]
+    fn text_of_exactly_the_longest_length_is_kept_whole_and_one_more_is_cut() {
+        let exactly = "a".repeat(MAX_TEXT_CHARS);
+        assert_eq!(Sanitizer::new().clean(&exactly), exactly);
+        let one_more = "a".repeat(MAX_TEXT_CHARS + 1);
+        let cut = Sanitizer::new().clean(&one_more);
+        assert_eq!(cut.chars().count(), MAX_TEXT_CHARS + 1);
+        assert!(cut.ends_with('…'));
+        assert_eq!(cut.chars().filter(|c| *c == 'a').count(), MAX_TEXT_CHARS);
+    }
+
+    #[test]
+    fn a_stretch_of_exactly_the_minimum_length_is_a_match_and_one_short_is_not() {
+        let secret = "ABCDEFGHIJKL";
+        let eight = &secret[3..3 + MIN_FRAGMENT];
+        assert_eq!(
+            redact_fragments(&format!("see {eight}!"), secret),
+            "see <redacted>!"
+        );
+        let seven = &secret[3..3 + MIN_FRAGMENT - 1];
+        assert_eq!(
+            redact_fragments(&format!("see {seven}!"), secret),
+            format!("see {seven}!")
+        );
+    }
+
+    #[test]
+    fn a_secret_that_is_exactly_the_minimum_length_is_still_looked_for() {
+        let secret = "ABCDEFGH";
+        assert_eq!(secret.len(), MIN_FRAGMENT);
+        assert_eq!(redact_fragments("x ABCDEFGH y", secret), "x <redacted> y");
+        assert_eq!(redact_fragments("ABCDEFGH", secret), "<redacted>");
+    }
+
+    #[test]
+    fn text_that_is_exactly_the_minimum_length_is_still_searched() {
+        let secret = "0123456789abcdef";
+        let window = &secret[4..4 + MIN_FRAGMENT];
+        assert_eq!(window.len(), MIN_FRAGMENT);
+        assert_eq!(redact_fragments(window, secret), "<redacted>");
+    }
+
+    #[test]
+    fn a_secret_or_text_shorter_than_the_minimum_changes_nothing() {
+        assert_eq!(
+            redact_fragments("ABCDEFG and more words", "ABCDEFG"),
+            "ABCDEFG and more words"
+        );
+        assert_eq!(redact_fragments("ABCDEFG", "ABCDEFGHIJKL"), "ABCDEFG");
+        assert_eq!(redact_fragments("", "ABCDEFGHIJKL"), "");
+        assert_eq!(redact_fragments("anything", ""), "anything");
+    }
+
+    #[test]
+    fn two_separate_stretches_are_each_replaced_once() {
+        let secret = "ABCDEFGHIJKLMNOP";
+        let got = redact_fragments("a ABCDEFGH b IJKLMNOP c", secret);
+        assert_eq!(got.matches("<redacted>").count(), 2, "{got}");
+        assert!(got.starts_with("a ") && got.ends_with(" c"), "{got}");
     }
 }

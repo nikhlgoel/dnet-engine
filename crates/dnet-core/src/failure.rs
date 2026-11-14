@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T064 — telling the user *why* a connection failed (FR-039, SC-020).
 //!
 //! [`classify`] picks exactly one of the seven [`FailureCause`]s from what the daemon can see;
@@ -166,14 +167,18 @@ pub fn explain(cause: &FailureCause) -> Explanation {
             )
         }
         FailureCause::NoUsablePath => (
-            "No network connection is available",
-            "None of this computer's network connections can carry traffic right now.".to_string(),
-            "Connect to Wi-Fi or mobile data, then try again.",
+            "No network connection DNet Engine can use",
+            "None of this computer's network connections has a route to the internet that DNet Engine can use. It \
+             needs an IPv4 route; a network that gives only IPv6 is not supported yet, and a connection that is \
+             down has none."
+                .to_string(),
+            "Connect to Wi-Fi or mobile data that gives IPv4 access, or ask the network's owner whether it \
+             does, then try again.",
         ),
         FailureCause::ConfigurationInvalid { detail } => (
             "The configuration cannot be used",
             detail.clone(),
-            "Correct the setting named above in the endpoint or profile settings, then try again.",
+            "Fix the problem described above; if you have no server yet, add one. Then try again.",
         ),
     };
     Explanation {
@@ -393,12 +398,42 @@ mod tests {
         }
     }
 
+    /// T166: an IPv6-only network works for everything else and is not "no network". The words must not say it is
+    /// down, and must say what this program needs, so a person on one is told the truth instead of looking for a cable.
+    #[test]
+    fn no_usable_path_does_not_claim_the_network_is_down_and_names_what_is_needed() {
+        let e = explain(&FailureCause::NoUsablePath);
+        let text = format!("{} {} {}", e.title, e.detail, e.action).to_lowercase();
+        assert!(
+            !text.contains("no network connection is available"),
+            "{text}"
+        );
+        assert!(!text.contains("carry traffic"), "{text}");
+        assert!(text.contains("ipv4"), "names the requirement: {text}");
+        assert!(
+            text.contains("ipv6"),
+            "says an IPv6-only network is the case it cannot use yet: {text}"
+        );
+    }
+
     #[test]
     fn the_configuration_detail_reaches_the_user() {
         let e = explain(&FailureCause::ConfigurationInvalid {
             detail: "the endpoint address is empty".into(),
         });
         assert!(e.detail.contains("the endpoint address is empty"));
+    }
+
+    #[test]
+    fn a_configuration_problem_tells_a_person_who_has_no_server_what_to_do() {
+        // First run: no endpoint exists, so no setting is named. The one remedy for every configuration problem must
+        // still make sense there.
+        let e = explain(&FailureCause::ConfigurationInvalid {
+            detail: "no endpoint is configured; add one before connecting".into(),
+        });
+        let action = e.action.to_lowercase();
+        assert!(action.contains("no server yet"), "{}", e.action);
+        assert!(!action.contains("named above"), "{}", e.action);
     }
 
     #[test]

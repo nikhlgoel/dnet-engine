@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Contract tests PRV-01 … PRV-09 (contracts/provisioning.md §5), and the guarantees around them.
 //!
 //! Every test runs a whole job through the public API against [`MockProvider`]. **No test creates a real
@@ -1059,5 +1060,111 @@ fn a_label_that_cannot_be_an_endpoint_name_fails_after_cleaning_up() {
         provider.remaining(),
         0,
         "nothing was left running for a job that could not name its result"
+    );
+}
+
+// ------------------------------------------------------------------ the sweep: whatever fails, nothing billable is lost
+
+/// Every call a provider can fail, with every kind of error it can fail with, once and for good. A job that does not
+/// end in an endpoint must leave nothing running at the provider (it costs the person money), or say exactly what is
+/// left; and whatever is left must be in the ledger, so that the next cleanup finds it. One test for the whole
+/// invariant, so a new stage or a new way of failing cannot slip past the individual cases.
+#[test]
+fn whichever_call_fails_with_whichever_error_nothing_billable_is_lost_or_it_is_named_and_recorded()
+{
+    let methods = [
+        "inspect_credential",
+        "check_capacity",
+        "create_instance",
+        "open_ports",
+        "bootstrap",
+        "install_keepalive",
+        "keepalive_installed",
+        "find",
+        "delete",
+    ];
+    let errors = [
+        ProviderError::Transient("busy".into()),
+        ProviderError::Rejected("no".into()),
+        ProviderError::Unauthorized,
+        ProviderError::QuotaExceeded("used".into()),
+    ];
+    let mut ended_in = std::collections::BTreeMap::<&str, usize>::new();
+    for method in methods {
+        for error in &errors {
+            for always in [false, true] {
+                let p = params();
+                let provider = provider_for(&p);
+                if always {
+                    provider.fail_always(method, error.clone());
+                } else {
+                    provider.fail_once(method, error.clone());
+                }
+                let mut ledger = MemoryLedger::new();
+                let (outcome, _events) =
+                    go(&p, &provider, &mut ledger, &all_work(), &CancelToken::new());
+                let label = format!("{method} / {error:?} / always={always}");
+                let left = provider.remaining();
+                match &outcome {
+                    Outcome::Provisioned(_) => {
+                        ended_in
+                            .entry("provisioned")
+                            .and_modify(|n| *n += 1)
+                            .or_insert(1);
+                        assert_eq!(
+                            left, 2,
+                            "{label}: a provisioned job is the instance and its rules"
+                        );
+                    }
+                    Outcome::Failed(failure) => {
+                        ended_in
+                            .entry("failed")
+                            .and_modify(|n| *n += 1)
+                            .or_insert(1);
+                        assert_eq!(
+                            left,
+                            failure.cleanup.unremovable.len(),
+                            "{label}: what is left at the provider is exactly what the failure says could not be removed"
+                        );
+                    }
+                    Outcome::Cancelled { cleanup } => {
+                        ended_in
+                            .entry("cancelled")
+                            .and_modify(|n| *n += 1)
+                            .or_insert(1);
+                        assert_eq!(left, cleanup.unremovable.len(), "{label}");
+                    }
+                    Outcome::NeedsAcknowledgement { .. } | Outcome::CapacityUnavailable { .. } => {
+                        ended_in
+                            .entry("nothing made")
+                            .and_modify(|n| *n += 1)
+                            .or_insert(1);
+                        assert_eq!(
+                            left, 0,
+                            "{label}: nothing was to be made, so nothing is there"
+                        );
+                    }
+                }
+                // Whatever is still at the provider is in the ledger and not marked gone.
+                for token in provider.existing_tokens() {
+                    assert!(
+                        ledger
+                            .entries()
+                            .iter()
+                            .any(|e| e.token == token && e.state != EntryState::Removed),
+                        "{label}: {token} exists at the provider but the ledger does not know it, so no cleanup would find it"
+                    );
+                }
+            }
+        }
+    }
+    // The sweep did not collapse into one kind of ending (a guard against it asserting nothing).
+    assert!(
+        ended_in.get("failed").copied().unwrap_or(0) >= 10,
+        "{ended_in:?}"
+    );
+    assert!(
+        ended_in.get("provisioned").copied().unwrap_or(0) >= 1,
+        "{ended_in:?}"
     );
 }

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! `cargo xtask import-harness-endpoint` — put the simulated harness endpoint into the saved
 //! configuration and the secret store, so the Connect orchestrator (T126) has something to connect to.
 //!

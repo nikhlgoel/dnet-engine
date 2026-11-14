@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T124 — the secret store: where an endpoint's credentials rest.
 //!
 //! The domain holds only a `CredentialRef` (data-model §1); this module is where one is resolved to

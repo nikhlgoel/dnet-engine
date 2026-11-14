@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The probe against a local listener standing in for whatever the network does. No real network.
 
 use std::net::SocketAddr;
@@ -421,4 +422,74 @@ fn a_portal_that_forgets_a_person_who_signed_in_is_recognised_at_once() {
         Some(Recognised::SessionExpired { .. })
     ));
     assert!(memory.is_portal());
+}
+
+// ------------------------------------------------------------------ the limits, pinned
+
+#[test]
+fn the_limits_are_eight_kibibytes_of_head_and_half_a_kibibyte_of_body() {
+    assert_eq!(MAX_HEAD, 8_192);
+    assert_eq!(MAX_BODY, 512);
+}
+
+/// A connection that is opened and closed without a word proves nothing: no answer, not a reply that says nothing.
+#[tokio::test]
+async fn a_connection_that_closes_without_a_word_is_no_answer() {
+    let (address, _) = serve(Vec::new()).await;
+    assert_eq!(
+        fetch(address, Probe::ConnectTest, SHORT).await,
+        Response::NoAnswer
+    );
+    assert_eq!(
+        classify(Probe::ConnectTest, &Response::NoAnswer),
+        PortalState::Unreachable
+    );
+}
+
+/// A long head (many headers) followed by the real page is still read as the real page: the read goes on past the
+/// head to the body, up to the limit of both together.
+#[tokio::test]
+async fn a_long_head_followed_by_the_expected_page_is_still_the_expected_page() {
+    let filler: Vec<String> = (0..138)
+        .map(|i| format!("X-Padding-{i}: {}", "a".repeat(40)))
+        .collect();
+    let headers: Vec<&str> = filler.iter().map(String::as_str).collect();
+    let reply = http("200 OK", &headers, Probe::ConnectTest.expected_body());
+    assert!(
+        reply.len() > 7_680 && reply.len() < MAX_HEAD + MAX_BODY,
+        "{}",
+        reply.len()
+    );
+    assert_eq!(read(reply, Probe::ConnectTest).await, PortalState::Open);
+}
+
+/// A reply that does not stop is read no further than the two limits together (with the one chunk read past it),
+/// and the connection is let go.
+#[tokio::test]
+async fn a_reply_that_never_stops_is_read_only_as_far_as_the_limits_allow() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let sent = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = Arc::clone(&sent);
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = [0u8; 512];
+        let _ = stream.read(&mut request).await;
+        let block = [b'x'; 1024];
+        while stream.write_all(&block).await.is_ok() {
+            counted.fetch_add(block.len(), std::sync::atomic::Ordering::SeqCst);
+            if counted.load(std::sync::atomic::Ordering::SeqCst) > 4 * 1024 * 1024 {
+                break;
+            }
+        }
+    });
+    let _ = fetch(address, Probe::Ncsi, Duration::from_secs(5)).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let sent = sent.load(std::sync::atomic::Ordering::SeqCst);
+    // The kernel buffers some of what was written after the reader stopped; far less than the four mebibytes that
+    // an unbounded read would have taken.
+    assert!(
+        sent < 2 * 1024 * 1024,
+        "{sent} bytes were taken from a reply that does not stop"
+    );
 }

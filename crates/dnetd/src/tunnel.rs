@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T126 step 2 — bringing one tunnel up and taking it down, with nothing left half-done.
 //!
 //! The ordered sequences already exist and are tested where they live: `start_cores` (reap, then
@@ -28,7 +29,7 @@ use dnet_netstate::host_route::{bring_up, move_to_gateway, tear_down, HostRoute,
 use dnet_netstate::NetstateError;
 use dnet_supervisor::error::SupervisorError;
 use dnet_supervisor::reap::start_cores;
-use dnet_supervisor::runtime::CoreRuntime;
+use dnet_supervisor::runtime::{CoreHealth, CoreRuntime};
 use dnet_supervisor::shutdown::shutdown_all;
 use tokio::sync::Mutex;
 
@@ -114,6 +115,23 @@ impl<H: TunnelHost> Tunnels<H> {
             .runtime
             .core_pid(CoreBinding::PrimaryCore)
             .await
+    }
+
+    /// What the runtime says about each transport process of the tunnel that is up; empty when none is, and
+    /// empty while a start or a stop holds the tunnel: a reading of a tunnel that is changing would be stale by
+    /// the time it was taken, and a part with no facts is absent, not shown as it was.
+    pub async fn core_health(&self) -> Vec<(CoreBinding, CoreHealth)> {
+        let Ok(active) = self.active.try_lock() else {
+            return Vec::new();
+        };
+        let Some(running) = active.as_ref() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for core in [CoreBinding::PrimaryCore, CoreBinding::AmneziaWgCore] {
+            out.push((core, running.runtime.core_health(core).await));
+        }
+        out
     }
 
     /// Whether a tunnel is up.
@@ -295,6 +313,16 @@ mod tests {
                 return Err(SupervisorError::Runtime("still running".into()));
             }
             Ok(())
+        }
+        async fn core_health(&self, core: CoreBinding) -> CoreHealth {
+            if core == CoreBinding::PrimaryCore {
+                CoreHealth::Running
+            } else {
+                CoreHealth::Unknown
+            }
+        }
+        async fn core_pid(&self, core: CoreBinding) -> Option<u32> {
+            (core == CoreBinding::PrimaryCore).then_some(4242)
         }
         async fn replay_undo(&self) -> Result<(), SupervisorError> {
             note(&self.log, "undo");
@@ -1020,5 +1048,74 @@ mod tests {
         tunnels.stop().await;
 
         assert_eq!(*discarded.lock().unwrap(), 0);
+    }
+
+    // ------------------------------------------------------------------ the transport processes (T170)
+
+    #[tokio::test]
+    async fn with_no_tunnel_up_no_core_is_spoken_for() {
+        let log = log();
+        let tunnels = Tunnels::new(FakeHost::new(&log));
+        assert!(tunnels.core_health().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_runtime_of_the_tunnel_that_is_up_speaks_for_its_cores() {
+        let log = log();
+        let tunnels = Tunnels::new(FakeHost::new(&log));
+        tunnels
+            .start(&plan(CoreBinding::PrimaryCore))
+            .await
+            .unwrap();
+        assert_eq!(
+            tunnels.core_health().await,
+            vec![
+                (CoreBinding::PrimaryCore, CoreHealth::Running),
+                (CoreBinding::AmneziaWgCore, CoreHealth::Unknown),
+            ]
+        );
+    }
+
+    /// A start or a stop holds the tunnel for as long as it takes. A reading taken meanwhile would be of a
+    /// tunnel that is changing under it, so it says nothing (absent) rather than wait and then be stale.
+    #[tokio::test]
+    async fn a_tunnel_being_started_or_stopped_is_not_waited_for() {
+        let log = log();
+        let tunnels = Tunnels::new(FakeHost::new(&log));
+        tunnels
+            .start(&plan(CoreBinding::PrimaryCore))
+            .await
+            .unwrap();
+        let _busy = tunnels.active.lock().await;
+        let read =
+            tokio::time::timeout(std::time::Duration::from_millis(200), tunnels.core_health())
+                .await
+                .expect("the reading waited for the tunnel");
+        assert!(read.is_empty());
+    }
+
+    /// The service sends the core's control secret only to a port the core alone listens on, and asks the system who
+    /// that is by process id. The id comes from the tunnel that is up, and from nothing else.
+    #[tokio::test]
+    async fn the_primary_cores_process_id_is_the_one_of_the_tunnel_that_is_up_and_there_is_none_otherwise(
+    ) {
+        let log = Log::default();
+        let tunnels = Tunnels::new(FakeHost::new(&log));
+        assert_eq!(
+            tunnels.primary_core_pid().await,
+            None,
+            "no tunnel, no process"
+        );
+        tunnels
+            .start(&plan(CoreBinding::PrimaryCore))
+            .await
+            .unwrap();
+        assert_eq!(tunnels.primary_core_pid().await, Some(4242));
+        tunnels.stop().await;
+        assert_eq!(
+            tunnels.primary_core_pid().await,
+            None,
+            "stopped: nothing to ask about"
+        );
     }
 }

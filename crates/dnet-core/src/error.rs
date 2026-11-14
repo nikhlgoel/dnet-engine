@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Domain validation errors.
 //!
 //! Every constructor that can reject its input returns one of these, so invalid

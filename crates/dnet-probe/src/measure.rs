@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! One measured transfer through a probe's SOCKS proxy (FR-004, HV-12).
 //!
 //! The outcome is expressed in `dnet_core::probe::ProfileProbe` terms, and the mapping is the
@@ -383,13 +384,18 @@ mod tests {
 
     #[tokio::test]
     async fn a_proxy_that_is_not_listening_means_the_handshake_failed() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        drop(listener);
+        // Bound but never listening: connections are refused, and no parallel test can be handed the port the way it
+        // could after closing a listener (the same race made a test in `dnetd` flaky on Linux).
+        let reserved = tokio::net::TcpSocket::new_v4().unwrap();
+        reserved
+            .bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+            .unwrap();
+        let addr = reserved.local_addr().unwrap();
         assert_eq!(
             measure_via_proxy(addr, &origin(), &config(1000), None).await,
             ProfileProbe::HandshakeFailed
         );
+        drop(reserved);
     }
 
     /// FR-004: connected, but nothing comes through.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! A reference to secret material, never the material itself.
 //!
 //! `CredentialRef` is an opaque handle into a secret store. It exposes the store

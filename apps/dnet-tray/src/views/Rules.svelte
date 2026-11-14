@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import type { AppState } from '../lib/app.svelte';
+  import DisconnectNote from '../components/DisconnectNote.svelte';
   import PendingChanges from '../components/PendingChanges.svelte';
   import { en } from '../lib/messages';
   import type { RuleView } from '../lib/model';
@@ -16,6 +17,9 @@
   let value = $state('');
   let action = $state<NewRuleInput['action']>('tunnel');
   let busy = $state(false);
+  /** A rule this view asked for waits for the person's approval (T160); how many times it has asked. */
+  let held = $state(false);
+  let asked = $state(0);
 
   const connected = $derived((app.look?.switch.on ?? false) === true);
 
@@ -39,11 +43,19 @@
     busy = true;
     const outcome = await app.bridge.addRule({ kind, value: value.trim(), action });
     busy = false;
-    changeError = outcome.ok ? null : outcome.reason;
-    if (outcome.ok) {
-      value = '';
-      await load();
-    }
+    // A rule held for approval was not refused: it waits in the list above (T160).
+    const waits = !outcome.ok && outcome.code === 'ApprovalRequired';
+    changeError = outcome.ok || waits ? null : outcome.reason;
+    held = waits;
+    if (waits) asked += 1;
+    if (outcome.ok || waits) value = '';
+    if (outcome.ok) await load();
+  }
+
+  /** A waiting change was approved or dropped in the list: the rules are read again. */
+  async function settled(): Promise<void> {
+    held = false;
+    await load();
   }
 
   async function remove(rule: RuleView): Promise<void> {
@@ -60,38 +72,41 @@
   <h1 id="rules-title">{t.title}</h1>
   <p class="lede">{t.explainer}</p>
 
-  <PendingChanges {app} />
+  <PendingChanges {app} {asked} onsettled={settled} />
 
+  {#if held}
+    <p class="notice" role="status">{t.held}</p>
+  {/if}
   {#if error}
     <p class="notice" role="alert">{error}</p>
   {:else}
+    <h2 class="cat">{t.add}</h2>
     <form class="card add" onsubmit={add}>
-      <h2>{t.add}</h2>
-      <label>
-        {t.match}
-        <select bind:value={kind} disabled={connected || busy}>
-          <option value="domain_suffix">{t.matchSuffix}</option>
-          <option value="domain">{t.matchDomain}</option>
-          <option value="ip_cidr">{t.matchCidr}</option>
-        </select>
-      </label>
-      <label>
-        {t.value}
-        <input type="text" autocomplete="off" spellcheck="false" bind:value disabled={connected || busy} />
-      </label>
-      <p class="help-line">{t.valueHelp}</p>
-      <label>
-        {t.sendIt}
-        <select bind:value={action} disabled={connected || busy}>
-          <option value="tunnel">{t.tunnel}</option>
-          <option value="bypass">{t.bypass}</option>
-        </select>
-      </label>
-      <div>
-        <button type="submit" class="btn" disabled={connected || busy || value.trim() === ''}>{t.addButton}</button>
+      <div class="fields">
+        <label>
+          {t.match}
+          <select class="input" bind:value={kind} disabled={connected || busy}>
+            <option value="domain_suffix">{t.matchSuffix}</option>
+            <option value="domain">{t.matchDomain}</option>
+            <option value="ip_cidr">{t.matchCidr}</option>
+          </select>
+        </label>
+        <label>
+          {t.value}
+          <input class="input" type="text" autocomplete="off" spellcheck="false" bind:value disabled={connected || busy} />
+        </label>
+        <label>
+          {t.sendIt}
+          <select class="input" bind:value={action} disabled={connected || busy}>
+            <option value="tunnel">{t.tunnel}</option>
+            <option value="bypass">{t.bypass}</option>
+          </select>
+        </label>
+        <button type="submit" class="btn primary" disabled={connected || busy || value.trim() === ''}>{t.addButton}</button>
       </div>
+      <p class="help-line">{t.valueHelp}</p>
       {#if connected}
-        <p class="help-line">{en.errors.disconnectFirst}</p>
+        <DisconnectNote {app} />
       {:else}
         <p class="help-line">{t.appliesNext}</p>
       {/if}
@@ -100,55 +115,57 @@
       {/if}
     </form>
 
+    <h2 class="cat">{t.listTitle}</h2>
     {#if own.length === 0}
       <p class="empty">{t.empty}</p>
     {/if}
 
-  <table>
-    <thead>
-      <tr>
-        <th>{t.precedence}</th>
-        <th>{t.matches}</th>
-        <th>{t.action}</th>
-        <th>{t.kind}</th>
-        <th><span class="sr-only">{t.origin}</span></th>
-      </tr>
-    </thead>
-    <tbody>
-      {#each [...own, ...builtin] as rule (rule.id)}
-        <tr>
-          <td class="num">{rule.precedence}</td>
-          <td class="match">{describe(rule)}</td>
-          <td>{rule.action}</td>
-          <!-- Best-effort is said in the row itself, not in a tooltip (Principle VI). -->
-          <td class:best={rule.reliability === 'BestEffort'}>
-            {rule.reliability === 'BestEffort' ? t.bestEffort : t.reliable}
-          </td>
-          <td class="dim">
-            {#if rule.builtin}
-              {t.builtin}
-            {:else}
-              <button
-                type="button"
-                class="btn"
-                disabled={connected}
-                aria-label={t.removeLabel.replace('{value}', rule.value)}
-                onclick={() => remove(rule)}>{t.remove}</button
-              >
-            {/if}
-          </td>
-        </tr>
-      {/each}
-    </tbody>
-  </table>
-  <p class="help-line">{t.bestEffortNote}</p>
+    <div class="panel">
+      <table>
+        <thead>
+          <tr>
+            <th>{t.precedence}</th>
+            <th>{t.matches}</th>
+            <th>{t.action}</th>
+            <th>{t.kind}</th>
+            <th><span class="sr-only">{t.origin}</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          {#each [...own, ...builtin] as rule (rule.id)}
+            <tr>
+              <td class="num order">{rule.precedence}</td>
+              <td class="match">{describe(rule)}</td>
+              <td>{rule.action}</td>
+              <!-- Best-effort is said in the row itself, not in a tooltip (Principle VI). -->
+              <td class:best={rule.reliability === 'BestEffort'}>
+                {rule.reliability === 'BestEffort' ? t.bestEffort : t.reliable}
+              </td>
+              <td class="dim end">
+                {#if rule.builtin}
+                  {t.builtin}
+                {:else}
+                  <button
+                    type="button"
+                    class="btn"
+                    disabled={connected}
+                    aria-label={t.removeLabel.replace('{value}', rule.value)}
+                    onclick={() => remove(rule)}>{t.remove}</button
+                  >
+                {/if}
+              </td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </div>
+    <p class="help-line">{t.bestEffortNote}</p>
   {/if}
 </section>
 
 <style>
   table {
     width: 100%;
-    max-width: 720px;
     border-collapse: collapse;
     font-size: var(--fs-sm);
   }
@@ -156,36 +173,50 @@
   th,
   td {
     text-align: left;
-    padding: 6px var(--s-3) 6px 0;
+    padding: var(--s-3) var(--s-4);
     border-top: 1px solid var(--c-line);
+    vertical-align: middle;
   }
 
-  th {
+  thead th {
     color: var(--c-text-3);
     font-weight: 500;
     font-size: var(--fs-xs);
     border-top: 0;
   }
 
+  .order {
+    width: 1%;
+    white-space: nowrap;
+  }
+
+  .end {
+    text-align: right;
+  }
+
   .best {
     font-weight: 600;
   }
 
-  .add {
+  /* Name, value, where it goes, and the button, on one line; two by two in a narrow window. */
+  .fields {
     display: grid;
-    gap: var(--s-2);
-    max-width: 720px;
-    margin-bottom: var(--s-4);
+    grid-template-columns: 1fr 1.4fr 1fr auto;
+    gap: var(--s-3);
+    align-items: end;
   }
 
-  .add label {
+  .fields label {
     display: grid;
     gap: var(--s-1);
+    font-size: var(--fs-sm);
+    font-weight: 500;
   }
 
-  h2 {
-    font-size: var(--fs-lg);
-    font-weight: 600;
+  @media (max-width: 720px) {
+    .fields {
+      grid-template-columns: 1fr 1fr;
+    }
   }
 
   .match {

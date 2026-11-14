@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T095 — an endpoint exists only once it has been shown to work (PR-10, PRV-06).
 //!
 //! The last stage before an `Endpoint` is created is the one that matters most to the person: it is where

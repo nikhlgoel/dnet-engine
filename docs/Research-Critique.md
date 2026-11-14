@@ -4,7 +4,7 @@
 now under way; current delivery status lives in `specs/001-network-resilience-client/tasks.md`.
 Reconciled with that status on 2026-10-16 (§6.7).
 **Date:** 2026-09-10
-**Reviews:** `docs/DNet-Engine-Research.md` (unverified source blueprint), `docs/Steps.docx` (Spec Kit + Docker test-rig guide)
+**Reviews:** `docs/archive/DNet-Engine-Research.md` (unverified source blueprint), `docs/Steps.docx` (Spec Kit + Docker test-rig guide)
 
 This document records (1) a critical review of the source research, (2) the decisions taken to
 resolve its open questions, and (3) the corrections applied to those decisions. It is the input to
@@ -120,7 +120,12 @@ caveat applied to it.
 
 ### 4.2 D2 — Primary success criterion
 
-1. **Primary:** restore reliable access to blocked or broken destinations (defeat DPI and port blocking).
+1. **Primary:** keep a usable connection to the user's own server on networks that block or break the usual
+   paths. The engineering consequence is that the connection methods must keep working against signature-based
+   DPI and port blocking, and the harness simulates both. **The framing is the constitution's ("Legal posture"):**
+   this is a resilience and tunnel client, not a way around a network's rules, and it is never described as one,
+   in the README, the site or the window. (Until 2026-11-14 this line read "defeat DPI and port blocking", which
+   described the same work in words that contradicted the README; the work did not change, the sentence did.)
 2. **Secondary:** seamless failover — no connection drop when Wi-Fi degrades or the user moves
    between Wi-Fi and cellular.
 

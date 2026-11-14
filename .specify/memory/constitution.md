@@ -6,7 +6,7 @@ an exit node the user owns, resolving DNS locally via a FakeIP pool, routing by 
 over seamlessly between Wi-Fi and cellular.
 
 Authoritative background: `docs/Research-Critique.md` (decisions D1–D10, findings C1–C13, open items
-O1–O6). That document supersedes `docs/DNet-Engine-Research.md` wherever the two disagree.
+O1–O6). That document supersedes `docs/archive/DNet-Engine-Research.md` wherever the two disagree.
 
 ## Core Principles
 
@@ -28,7 +28,7 @@ alternative is six months spent reimplementing `sing-box` badly.
 
 ### II. Verify Against Primary Sources; Never Against the Blueprint
 
-`docs/DNet-Engine-Research.md` is an unverified source blueprint whose citation list does not
+`docs/archive/DNet-Engine-Research.md` is an unverified source blueprint whose citation list does not
 support its technical claims (finding C13). It is context, not truth.
 
 Before any protocol-level detail enters a spec, plan, or implementation it must be verified against
@@ -175,7 +175,7 @@ operations, key material, routing rules, or the transport-profile update channel
 
 ## Governance
 
-This constitution supersedes all other practices, and supersedes `docs/DNet-Engine-Research.md`
+This constitution supersedes all other practices, and supersedes `docs/archive/DNet-Engine-Research.md`
 wherever they conflict.
 
 Amendments require an entry in `docs/Research-Critique.md` recording the change and its reason, a

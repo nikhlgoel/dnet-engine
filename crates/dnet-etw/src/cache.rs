@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T076 — remembering who connected, for a short while, and nothing more (data-model §7).
 //!
 //! An attribution is only useful in the moments after the connect that produced it: the program that

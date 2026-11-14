@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T100 — the state of the connection as the window draws it.
 //!
 //! The service answers three questions separately (`GetState`, `GetPaths`, `GetStats`); the window wants one

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T126 step 2 — what one connection needs, worked out as plain data.
 //!
 //! The real effects start cores, install routes and open pipes. Everything that decides *what* to
@@ -1824,5 +1825,53 @@ mod tests {
         // A REALITY connection never gets the Hysteria 2 carrier's Brutal, even with the carrier present.
         let reality = session_plan(ProfileKind::VlessReality, &creds);
         assert!(!reality.config_json().contains("up_mbps"));
+    }
+
+    // ------------------------------------------------------------------ what the mutation run showed was not pinned
+
+    #[test]
+    fn a_plan_error_shows_its_own_words_and_nothing_else() {
+        let error = PlanError::new("the endpoint address is not valid");
+        assert_eq!(error.to_string(), "the endpoint address is not valid");
+        assert_eq!(error.detail(), "the endpoint address is not valid");
+        assert!(PlanError::new("a").to_string() != PlanError::new("b").to_string());
+    }
+
+    #[test]
+    fn the_control_channel_prints_its_port_and_never_its_secret() {
+        let shown = format!("{:?}", control());
+        assert_eq!(shown, "ControlChannel { port: 29090, secret: <redacted> }");
+        assert!(!shown.contains(&"k".repeat(8)));
+    }
+
+    #[test]
+    fn a_tunnel_plan_prints_what_a_person_can_read_and_hides_the_configuration_and_the_tunnel_parameters(
+    ) {
+        let session = session_plan(ProfileKind::Hysteria2, &with_session());
+        let shown = format!("{session:?}");
+        assert!(shown.starts_with("TunnelPlan {"), "{shown}");
+        assert!(shown.contains("core:"), "{shown}");
+        assert!(shown.contains("bypass:"), "{shown}");
+        assert!(shown.contains("config_json: \"<redacted>\""), "{shown}");
+        assert!(
+            !shown.contains("inbounds"),
+            "the configuration was printed: {shown}"
+        );
+        let awg = plan(ProfileKind::AmneziaWg, "203.0.113.10").unwrap();
+        let shown = format!("{awg:?}");
+        assert!(shown.contains("<tunnel parameters>"), "{shown}");
+        assert!(!shown.contains("private_key"), "{shown}");
+    }
+
+    /// The tunnel's rules are the person's, completed with the endpoint's own bypass: the core's `direct` rule for the
+    /// endpoint mirrors the host route, and the two must agree or the loop returns (R4, CC-05). The session path must
+    /// be given the completed set, not the one without the endpoint.
+    #[test]
+    fn a_session_tunnel_is_given_the_rules_with_the_endpoints_own_bypass_in_them() {
+        let plan = session_plan(ProfileKind::Hysteria2, &with_session());
+        assert!(
+            plan.config_json().contains("203.0.113.10/32"),
+            "the endpoint's bypass rule is missing from the session configuration"
+        );
     }
 }

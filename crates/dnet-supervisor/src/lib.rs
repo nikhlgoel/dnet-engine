@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Child process lifecycle for the supervised transport cores.
 //!
 //! Both cores (primary and AmneziaWG) are spawned as children, restarted with a
@@ -26,4 +27,4 @@ pub mod windows_runtime;
 
 pub use error::SupervisorError;
 pub use restart::{RestartDecision, RestartPolicy};
-pub use runtime::CoreRuntime;
+pub use runtime::{CoreHealth, CoreRuntime};

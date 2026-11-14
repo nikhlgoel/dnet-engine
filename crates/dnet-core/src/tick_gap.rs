@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T162 — noticing that the machine was frozen (`docs/research/2026-10-31-solutions.md` section 6).
 //!
 //! A laptop that sleeps does not always say so: on Modern Standby the old suspend messages are not a

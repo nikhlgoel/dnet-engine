@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Names and addresses that come from outside must not be able to crash the decision layer.
 //!
 //! An origin URL and a REALITY target domain are text a person types or an imported bundle carries.

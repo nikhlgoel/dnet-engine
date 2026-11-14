@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! What an applied feed means for this client (ADR-0002 §6).
 //!
 //! A feed proposes parameters per bundled profile in two sections, and the sections are treated

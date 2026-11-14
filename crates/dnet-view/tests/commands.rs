@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! What each command sends to the service, and what the window is told of the answer.
 
 mod support;
@@ -83,7 +84,7 @@ async fn each_refusal_keeps_its_code_and_the_services_own_words() {
         ("InvalidRequest", "Refused"),
         ("Unauthorized", "Refused"),
         ("InternalError", "Refused"),
-        ("ApprovalRequired", "Refused"),
+        ("ApprovalRequired", "ApprovalRequired"),
     ] {
         let link = FakeLink::new(move |_| refusal(wire, "the reason in the service's words"));
         let out = Bridge::new(link).stabilize(true, false).await;
@@ -106,7 +107,8 @@ async fn a_change_that_waits_for_approval_is_shown_whole() {
     let wording = held.clone();
     let link = FakeLink::new(move |_| refusal("ApprovalRequired", &wording));
     let out = Bridge::new(link).stabilize(true, false).await;
-    assert_eq!(out["code"], json!("Refused"));
+    // Its own code, so the window can say "waiting for your approval" instead of showing a refusal (T160 a).
+    assert_eq!(out["code"], json!("ApprovalRequired"));
     assert_eq!(out["reason"], json!(held));
     assert!(out["reason"]
         .as_str()
@@ -465,14 +467,54 @@ async fn what_the_build_can_do_is_said_plainly() {
     assert_eq!(caps, json!({ "provisioning": false, "updates": true }));
 }
 
+/// The sign-in page the window opens is the operating system's own probe address, which a portal sends a browser
+/// away from. It is the same every time: nothing the network said is ever opened, so a hostile network cannot
+/// choose what the person's browser is sent to. The built-in rules let that address through while fail-closed.
 #[tokio::test]
-async fn the_login_page_is_not_faked() {
-    let out = Bridge::new(echo_ok(json!({}))).open_login_page();
+async fn the_login_page_is_the_systems_own_probe_address_and_nothing_the_network_chose() {
+    let opened = std::cell::RefCell::new(Vec::new());
+    let out = Bridge::new(echo_ok(json!({}))).open_login_page_with(|url| {
+        opened.borrow_mut().push(url.to_owned());
+        Ok(())
+    });
+    assert_eq!(out, json!({ "ok": true }));
+    assert_eq!(
+        *opened.borrow(),
+        ["http://www.msftconnecttest.com/connecttest.txt"]
+    );
+}
+
+#[tokio::test]
+async fn the_address_opened_is_one_the_built_in_rules_let_through_and_is_plain_http() {
+    let opened = std::cell::RefCell::new(String::new());
+    let _ = Bridge::new(echo_ok(json!({}))).open_login_page_with(|url| {
+        *opened.borrow_mut() = url.to_owned();
+        Ok(())
+    });
+    let url = opened.borrow().clone();
+    assert!(url.starts_with("http://"), "{url}");
+    assert!(dnet_core::portal::login_url(&url).is_some(), "{url}");
+    let host = url.trim_start_matches("http://").split('/').next().unwrap();
+    assert!(
+        dnet_core::builtin_rules::CAPTIVE_PORTAL_PROBE_SUFFIXES
+            .iter()
+            .any(|suffix| host == *suffix || host.ends_with(&format!(".{suffix}"))),
+        "{host} is not bypassed, so fail-closed would stop the page from loading"
+    );
+    assert!(
+        !url.contains('@') && !url.contains('?') && !url.contains('#'),
+        "{url}"
+    );
+}
+
+#[tokio::test]
+async fn when_the_browser_cannot_be_started_the_person_is_told_what_to_do_instead() {
+    let out = Bridge::new(echo_ok(json!({})))
+        .open_login_page_with(|_| Err(std::io::Error::other("no default browser")));
     assert_eq!(out["ok"], json!(false));
-    assert!(out["reason"]
-        .as_str()
-        .unwrap()
-        .contains("Open any web page"));
+    let reason = out["reason"].as_str().unwrap();
+    assert!(reason.contains("Open any web page"), "{reason}");
+    assert!(!reason.contains("no default browser"), "{reason}");
 }
 
 // ---------------------------------------------------------------------- Brutal (T105)
@@ -730,6 +772,150 @@ async fn a_result_or_address_the_service_would_refuse_is_not_sent_and_not_repeat
     }
 }
 
+// ---------------------------------------------------------------------- a friend's device (T188)
+
+const SERVER_ID: &str = "31111111-2222-4333-8444-555555555555";
+
+#[tokio::test]
+async fn a_friend_asks_to_join_and_gets_the_text_to_send() {
+    let link = FakeLink::new(|request| match request {
+        Request::RequestJoin { name } => {
+            assert_eq!(name, "Ravi laptop");
+            done(json!({
+                "name": "Ravi laptop",
+                "text": "DNET-DEVICE-REQUEST {\"version\":1}",
+                "valid_for_s": 7200,
+            }))
+        }
+        other => panic!("unexpected {other:?}"),
+    });
+    let out = Bridge::new(link).request_join("Ravi laptop").await;
+    assert_eq!(
+        out,
+        json!({
+            "ok": true, "name": "Ravi laptop",
+            "text": "DNET-DEVICE-REQUEST {\"version\":1}", "validForMinutes": 120,
+        })
+    );
+}
+
+#[tokio::test]
+async fn an_invite_is_sent_as_pasted_and_names_the_new_server() {
+    let link = FakeLink::new(|request| match request {
+        Request::AcceptInvite { invite, label } => {
+            assert_eq!(invite, "DNET-INVITE-1:abc");
+            assert_eq!(label.as_deref(), Some("Ravi server"));
+            done(json!({ "endpoint": SERVER_ID }))
+        }
+        other => panic!("unexpected {other:?}"),
+    });
+    let out = Bridge::new(link)
+        .accept_invite("DNET-INVITE-1:abc", Some("Ravi server"))
+        .await;
+    assert_eq!(out, json!({ "ok": true, "id": SERVER_ID }));
+}
+
+#[tokio::test]
+async fn the_owner_prepares_and_finishes_a_device_and_gets_an_invite() {
+    let link = FakeLink::new(|request| match request {
+        Request::PrepareDevice { endpoint, request } => {
+            assert_eq!(endpoint.to_string(), SERVER_ID);
+            assert!(request.starts_with("DNET-DEVICE-REQUEST"));
+            done(json!({ "name": "Ravi laptop", "script": "#!/bin/sh\n", "valid_for_s": 21600 }))
+        }
+        Request::FinishDevice { report, .. } => {
+            assert!(report.contains("DNET-DEVICE-REPORT"));
+            done(json!({
+                "name": "Ravi laptop", "address": "10.9.0.3", "invite": "DNET-INVITE-1:abc-_1",
+            }))
+        }
+        other => panic!("unexpected {other:?}"),
+    });
+    let bridge = Bridge::new(link);
+    let prepared = bridge
+        .prepare_device(SERVER_ID, "DNET-DEVICE-REQUEST {}")
+        .await;
+    assert_eq!(
+        prepared,
+        json!({ "ok": true, "name": "Ravi laptop", "script": "#!/bin/sh\n", "validForMinutes": 360 })
+    );
+    let invited = bridge
+        .finish_device(
+            SERVER_ID,
+            "DNET-DEVICE-REQUEST {}",
+            "x\nDNET-DEVICE-REPORT {}\n",
+        )
+        .await;
+    assert_eq!(
+        invited,
+        json!({
+            "ok": true, "name": "Ravi laptop", "address": "10.9.0.3",
+            "invite": "DNET-INVITE-1:abc-_1",
+        })
+    );
+}
+
+#[tokio::test]
+async fn what_the_service_would_refuse_is_not_sent_and_not_repeated() {
+    let nothing = || FakeLink::new(|_| panic!("nothing may be sent"));
+    for out in [
+        Bridge::new(nothing()).request_join("SENTINEL'x").await,
+        Bridge::new(nothing()).request_join("").await,
+        Bridge::new(nothing())
+            .accept_invite("SENTINEL\u{0}", None)
+            .await,
+        Bridge::new(nothing()).accept_invite("   ", None).await,
+        Bridge::new(nothing())
+            .accept_invite("DNET-INVITE-1:a", Some("SENTINEL\u{202e}"))
+            .await,
+        Bridge::new(nothing())
+            .prepare_device("not-an-id", "SENTINEL")
+            .await,
+        Bridge::new(nothing()).prepare_device(SERVER_ID, "").await,
+        Bridge::new(nothing())
+            .finish_device(SERVER_ID, "t", "SENTINEL\u{7}")
+            .await,
+        Bridge::new(nothing())
+            .finish_device(SERVER_ID, "t", "")
+            .await,
+    ] {
+        assert_eq!(out["ok"], json!(false), "{out}");
+        assert!(!out.to_string().contains("SENTINEL"), "{out}");
+    }
+}
+
+/// The window shows what these replies carry and offers it for copying: one that is not what was promised is an
+/// error the person can read, not something that might be anything.
+#[tokio::test]
+async fn a_reply_that_is_not_what_was_promised_is_never_shown() {
+    for reply in [
+        json!({}),
+        json!({ "name": "x", "text": "nope", "valid_for_s": 60 }),
+        json!({ "name": "x", "script": "", "valid_for_s": 60 }),
+        json!({ "name": "x", "address": "10.9.0.3", "invite": "nope" }),
+        json!({ "name": "x\u{202e}", "address": "10.9.0.3", "invite": "DNET-INVITE-1:abc" }),
+    ] {
+        let answering = |reply: &Value| {
+            let reply = reply.clone();
+            FakeLink::new(move |_| done(reply.clone()))
+        };
+        for out in [
+            Bridge::new(answering(&reply)).request_join("x").await,
+            Bridge::new(answering(&reply))
+                .prepare_device(SERVER_ID, "t")
+                .await,
+            Bridge::new(answering(&reply))
+                .finish_device(SERVER_ID, "t", "r")
+                .await,
+        ] {
+            assert_eq!(out["ok"], json!(false), "{out}");
+            for shown in ["text", "script", "invite", "address"] {
+                assert!(out.get(shown).is_none(), "{out}");
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------- held changes (T160)
 
 #[tokio::test]
@@ -774,4 +960,253 @@ async fn the_waiting_list_refuses_what_is_not_a_list() {
         Bridge::new(link).pending().await.is_err(),
         "a change with no deadline is not one this program draws"
     );
+}
+
+// ---------------------------------------------------------------------- the live map of parts (T170)
+
+/// The wire shape is the service's own (`encode_components`), so the test builds the reply with it.
+fn written(
+    parts: &[(
+        dnet_core::registry::ComponentKind,
+        &str,
+        dnet_core::registry::ComponentState,
+        &str,
+    )],
+) -> Value {
+    use dnet_core::registry::{Evidence, Observation, Registry};
+    let mut registry = Registry::new();
+    for (kind, id, state, reason) in parts {
+        registry
+            .report(
+                *kind,
+                id,
+                Observation::new(*state, reason).with_evidence(Evidence::default()),
+                std::time::Duration::from_secs(1),
+            )
+            .unwrap();
+    }
+    serde_json::from_str(&dnet_ipc::componentview::encode_components(
+        &registry.snapshot(),
+        std::time::Duration::from_secs(5),
+        1_730_000_000_000,
+    ))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn the_parts_are_asked_for_read_only_and_shown_with_their_age_and_evidence() {
+    use dnet_core::registry::{ComponentKind::*, ComponentState::*};
+    let link = FakeLink::new(|request| match request {
+        Request::GetComponents => done(written(&[
+            (
+                NetworkPath,
+                "wi-fi",
+                Degraded,
+                "Lossy: 8% of probes were lost.",
+            ),
+            (Session, "session", Ok, "Carrying traffic."),
+        ])),
+        other => panic!("unexpected {other:?}"),
+    });
+    let seen = link.seen.clone();
+    let out = Bridge::new(link).components().await.unwrap();
+    assert!(matches!(seen.lock().unwrap()[0], Request::GetComponents));
+    assert_eq!(out["supported"], json!(true));
+    assert_eq!(out["overall"], json!("Degraded"));
+    let parts = out["parts"].as_array().unwrap();
+    assert_eq!(parts.len(), 2);
+    let wifi = parts.iter().find(|p| p["id"] == "wi-fi").unwrap();
+    assert_eq!(wifi["kind"], json!("NetworkPath"));
+    assert_eq!(wifi["state"], json!("Degraded"));
+    assert_eq!(wifi["reason"], json!("Lossy: 8% of probes were lost."));
+    assert!(wifi["ageSeconds"].is_u64());
+    assert!(
+        wifi.get("latencyMs").is_none(),
+        "a measurement that was not taken is absent, not zero"
+    );
+}
+
+/// An older service has no such request: that is "not supported", which the window shows as such, and never
+/// as "no parts" or "all fine".
+#[tokio::test]
+async fn an_older_service_is_told_apart_from_an_empty_answer() {
+    let link = FakeLink::new(|_| refusal("InvalidRequest", "unknown request"));
+    let old = Bridge::new(link).components().await.unwrap();
+    assert_eq!(old["supported"], json!(false));
+    assert_eq!(old["parts"], json!([]));
+    assert_eq!(
+        old["overall"],
+        json!("Unknown"),
+        "nothing is claimed about parts nobody reported"
+    );
+
+    let link = FakeLink::new(|_| done(written(&[])));
+    let empty = Bridge::new(link).components().await.unwrap();
+    assert_eq!(empty["supported"], json!(true));
+    assert_eq!(empty["parts"], json!([]));
+}
+
+#[tokio::test]
+async fn any_other_refusal_or_an_unreadable_answer_is_an_error_and_repeats_nothing() {
+    let link = FakeLink::new(|_| refusal("InternalError", "the pipe broke; SENTINEL"));
+    assert!(Bridge::new(link).components().await.is_err());
+
+    for broken in [
+        json!({}),
+        json!({ "as_of_unix_ms": 1, "overall": "Ok", "components": [{ "kind": "SENTINEL", "id": "x", "state": "Ok",
+                 "reason": "", "changed_ago_ms": 0 }] }),
+        json!({ "as_of_unix_ms": 1, "overall": "Ok", "components": "SENTINEL" }),
+        json!("SENTINEL"),
+    ] {
+        let link = FakeLink::new(move |_| done(broken.clone()));
+        let err = Bridge::new(link).components().await.unwrap_err();
+        assert!(!err.contains("SENTINEL"), "{err}");
+    }
+}
+
+/// What a part says about itself reaches the window whole, with nothing that could hide or reorder text.
+#[tokio::test]
+async fn a_reason_arrives_whole_and_clean() {
+    use dnet_core::registry::{ComponentKind::*, ComponentState::*};
+    let long = "x".repeat(500);
+    let link = FakeLink::new(move |_| {
+        done(written(&[(
+            Endpoint,
+            "e\u{202e}1",
+            Failed,
+            &format!("{long}\u{200b}\u{7}end"),
+        )]))
+    });
+    let out = Bridge::new(link).components().await.unwrap();
+    let part = &out["parts"][0];
+    assert_eq!(part["id"], json!("e1"));
+    let reason = part["reason"].as_str().unwrap();
+    assert!(
+        reason.ends_with("end") && reason.len() >= 500,
+        "cut or altered: {reason}"
+    );
+    assert!(!reason
+        .chars()
+        .any(|c| c.is_control() || c == '\u{200b}' || c == '\u{202e}'));
+}
+
+// ---------------------------------------------------------------------- the kill switch (T161)
+
+#[tokio::test]
+async fn the_guard_state_is_read_for_the_window() {
+    let link = echo_ok(json!({ "kill_switch": true, "guard_in": false }));
+    let seen = link.seen.clone();
+    let out = Bridge::new(link).guard().await.unwrap();
+    assert_eq!(
+        out,
+        json!({ "supported": true, "killSwitch": true, "guardIn": false })
+    );
+    assert_eq!(*seen.lock().unwrap(), vec![Request::GetGuard]);
+}
+
+#[tokio::test]
+async fn a_firewall_that_could_not_be_asked_is_unknown_not_false() {
+    let link = echo_ok(json!({ "kill_switch": false, "guard_in": null }));
+    let out = Bridge::new(link).guard().await.unwrap();
+    assert_eq!(
+        out,
+        json!({ "supported": true, "killSwitch": false, "guardIn": null })
+    );
+}
+
+#[tokio::test]
+async fn an_older_service_is_not_supported_and_nothing_else_is_claimed() {
+    let link = FakeLink::new(|_| refusal("InvalidRequest", "unknown request"));
+    let out = Bridge::new(link).guard().await.unwrap();
+    assert_eq!(
+        out,
+        json!({ "supported": false, "killSwitch": false, "guardIn": null })
+    );
+}
+
+#[tokio::test]
+async fn a_guard_reply_that_is_not_what_was_promised_is_an_error_that_repeats_nothing() {
+    for reply in [
+        json!({}),
+        json!({ "kill_switch": "yes", "guard_in": false }),
+        json!({ "kill_switch": true, "guard_in": "SENTINEL" }),
+        json!({ "kill_switch": true }),
+    ] {
+        let err = Bridge::new(echo_ok(reply)).guard().await.unwrap_err();
+        assert!(!err.contains("SENTINEL"), "{err}");
+        assert!(!err.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn turning_the_kill_switch_on_sends_the_choice_and_shows_what_the_service_says_it_does() {
+    let link = echo_ok(json!({
+        "kill_switch": true, "saved": true, "guard_in": false,
+        "effect": "The guard goes in at the next connection."
+    }));
+    let seen = link.seen.clone();
+    let out = Bridge::new(link).set_kill_switch(true).await;
+    assert_eq!(
+        out,
+        json!({ "ok": true, "effect": "The guard goes in at the next connection.", "saved": true })
+    );
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![Request::SetKillSwitch { enabled: true }]
+    );
+}
+
+#[tokio::test]
+async fn an_unsaved_choice_is_reported_unsaved() {
+    let link = echo_ok(json!({
+        "kill_switch": true, "saved": false, "guard_in": false,
+        "effect": "The guard goes in at the next connection. The choice could not be saved, so it stands only until the service stops."
+    }));
+    let out = Bridge::new(link).set_kill_switch(true).await;
+    assert_eq!(out["saved"], json!(false));
+    assert!(out["effect"]
+        .as_str()
+        .unwrap()
+        .contains("until the service stops"));
+}
+
+#[tokio::test]
+async fn an_answer_to_a_different_question_is_not_taken_as_a_yes() {
+    // The window asked for on; the service says it is off. The person is not told it worked.
+    let link = echo_ok(json!({
+        "kill_switch": false, "saved": true, "guard_in": false, "effect": "The guard is out."
+    }));
+    let out = Bridge::new(link).set_kill_switch(true).await;
+    assert_eq!(out["ok"], json!(false), "{out}");
+    // And a reply that does not say what happened.
+    let out = Bridge::new(echo_ok(json!({ "kill_switch": true, "saved": true })))
+        .set_kill_switch(true)
+        .await;
+    assert_eq!(out["ok"], json!(false), "{out}");
+}
+
+#[tokio::test]
+async fn releasing_the_guard_says_it_is_out_only_when_the_service_says_so() {
+    let link = echo_ok(json!({
+        "kill_switch": true, "guard_in": false, "effect": "The guard is out."
+    }));
+    let seen = link.seen.clone();
+    let out = Bridge::new(link).release_guard().await;
+    assert_eq!(out, json!({ "ok": true, "effect": "The guard is out." }));
+    assert_eq!(*seen.lock().unwrap(), vec![Request::ReleaseGuard]);
+
+    let still_in = echo_ok(json!({ "kill_switch": true, "guard_in": true, "effect": "x" }));
+    assert_eq!(
+        Bridge::new(still_in).release_guard().await["ok"],
+        json!(false)
+    );
+}
+
+#[tokio::test]
+async fn a_guard_that_will_not_come_out_shows_the_services_words_whole() {
+    let words = "the guard could not be taken out: access denied. Run `dnetctl guard-release` from an elevated prompt, or restart the DNet Engine service";
+    let link = FakeLink::new(move |_| refusal("InternalError", words));
+    let out = Bridge::new(link).release_guard().await;
+    assert_eq!(out["ok"], json!(false));
+    assert_eq!(out["reason"], json!(words));
 }

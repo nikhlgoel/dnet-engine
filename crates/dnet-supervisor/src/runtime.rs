@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The side-effect seam supervision drives.
 //!
 //! Startup and shutdown are sequences of privileged side effects whose *order* is
@@ -8,6 +9,18 @@
 use dnet_core::profile::CoreBinding;
 
 use crate::error::SupervisorError;
+
+/// What a runtime can say about one core right now (T170). The live map reads it; nothing here changes a core.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreHealth {
+    /// The runtime has nothing to say: the core was never started, was stopped on purpose, or the runtime
+    /// cannot tell. It is never shown as fine.
+    Unknown,
+    /// Started and, as of this reading, still running.
+    Running,
+    /// It ended without being stopped. `code` is its exit code, when the system gave one.
+    Exited { code: Option<i32> },
+}
 
 /// The privileged operations supervision performs, in the order it performs them.
 ///
@@ -39,7 +52,55 @@ pub trait CoreRuntime {
         None
     }
 
+    /// Whether a core is running now, read without waiting. The default says nothing (`Unknown`), so a runtime
+    /// that cannot tell makes the map leave the core out instead of showing it as fine.
+    async fn core_health(&self, _core: CoreBinding) -> CoreHealth {
+        CoreHealth::Unknown
+    }
+
     /// Replay every outstanding undo record, restoring routing/DNS/adapter state
     /// (SUP-04, data-model §Cross-cutting 1).
     async fn replay_undo(&self) -> Result<(), SupervisorError>;
+}
+
+#[cfg(test)]
+mod default_tests {
+    use super::*;
+
+    /// A runtime that overrides nothing optional.
+    struct Bare;
+
+    impl CoreRuntime for Bare {
+        async fn reap_orphans(&self) -> Result<(), SupervisorError> {
+            Ok(())
+        }
+        async fn spawn_core(&self, _: CoreBinding) -> Result<(), SupervisorError> {
+            Ok(())
+        }
+        async fn await_adapter(&self) -> Result<(), SupervisorError> {
+            Ok(())
+        }
+        async fn kill_core(&self, _: CoreBinding) -> Result<(), SupervisorError> {
+            Ok(())
+        }
+        async fn replay_undo(&self) -> Result<(), SupervisorError> {
+            Ok(())
+        }
+    }
+
+    /// A runtime that does not know a core's process id says so, which makes the check that needs it refuse
+    /// and not guess: a made-up id would let the wrong program receive the control secret.
+    #[tokio::test]
+    async fn a_runtime_that_does_not_know_a_process_id_gives_none_for_every_core() {
+        for core in [CoreBinding::PrimaryCore, CoreBinding::AmneziaWgCore] {
+            assert_eq!(Bare.core_pid(core).await, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_runtime_that_cannot_tell_says_unknown_and_never_fine() {
+        for core in [CoreBinding::PrimaryCore, CoreBinding::AmneziaWgCore] {
+            assert_eq!(Bare.core_health(core).await, CoreHealth::Unknown);
+        }
+    }
 }

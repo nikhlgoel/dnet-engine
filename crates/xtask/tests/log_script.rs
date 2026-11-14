@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! `testing/log.ps1` — the wrapper `LOCAL-COMMANDS.md` runs every local command through. The log is
 //! what an assistant reads instead of the screen, so whatever a command prints must reach it: cargo
 //! writes compile errors, clippy warnings and test panics to stderr, not stdout.

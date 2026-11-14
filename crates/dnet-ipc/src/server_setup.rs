@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T150 — the wire form of setting up the person's own server (contracts/ipc-protocol.md IPC-26).
 //!
 //! `PrepareServer` asks the service for the setup script and the ports to open; the person runs the script

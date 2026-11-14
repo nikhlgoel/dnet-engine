@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Generates configuration for the supervised transport cores.
 //!
 //! `dnetd` generates configuration for two supervised processes and never patches,
@@ -26,6 +27,7 @@ pub mod error;
 pub mod hysteria2;
 #[cfg(windows)]
 pub mod install_trust;
+pub mod invite;
 pub mod persist;
 pub mod primary;
 pub mod probe;

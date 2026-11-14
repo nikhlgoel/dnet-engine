@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Windows Service (SCM) lifecycle.
 //!
 //! Registers `dnetd` with the Service Control Manager, reports Running, runs the

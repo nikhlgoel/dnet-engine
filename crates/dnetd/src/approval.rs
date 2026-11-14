@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T160 — changes that redirect traffic wait for an elevated client (ADR-0008 F13;
 //! `docs/research/2026-10-31-solutions.md` section 3.2).
 //!
@@ -284,5 +285,57 @@ mod tests {
         let text = changes.list_json(1);
         assert!(!text.contains("credentials"));
         assert!(!text.contains("request"));
+    }
+}
+
+/// What the mutation run showed the approval list's own tests did not pin: the difference between a change that
+/// waited too long and one that was never held.
+#[cfg(test)]
+mod expiry_tests {
+    use dnet_core::ids::EndpointId;
+
+    use super::*;
+
+    fn change(enabled: bool) -> Request {
+        Request::SetEndpointEnabled {
+            endpoint: EndpointId::new(),
+            enabled,
+        }
+    }
+
+    #[test]
+    fn an_id_that_was_never_held_is_unknown_even_while_another_change_has_expired() {
+        let mut changes = PendingChanges::new();
+        changes
+            .hold(change(true), "old".into(), 1_000, || "aaaa".to_string())
+            .unwrap();
+        let later = 1_000 + HOLD_FOR_MS + 1;
+        assert_eq!(changes.find("zzzz", later), Err(FindError::Unknown));
+    }
+
+    #[test]
+    fn the_id_of_a_change_that_waited_too_long_is_said_to_have_expired() {
+        let mut changes = PendingChanges::new();
+        changes
+            .hold(change(true), "old".into(), 1_000, || "aaaa".to_string())
+            .unwrap();
+        let later = 1_000 + HOLD_FOR_MS + 1;
+        assert_eq!(changes.find("aaaa", later), Err(FindError::Expired));
+        // And once said, it is simply gone.
+        assert_eq!(changes.find("aaaa", later), Err(FindError::Unknown));
+    }
+
+    #[test]
+    fn a_live_change_is_still_found_beside_an_expired_one() {
+        let mut changes = PendingChanges::new();
+        changes
+            .hold(change(true), "old".into(), 1_000, || "aaaa".to_string())
+            .unwrap();
+        let fresh = 1_000 + HOLD_FOR_MS;
+        changes
+            .hold(change(false), "new".into(), fresh, || "bbbb".to_string())
+            .unwrap();
+        assert!(changes.find("bbbb", fresh + 1).is_ok());
+        assert_eq!(changes.find("aaaa", fresh + 1), Err(FindError::Unknown));
     }
 }

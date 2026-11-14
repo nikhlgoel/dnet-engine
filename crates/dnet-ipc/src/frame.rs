@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Length-prefixed framing: a 4-byte little-endian length followed by UTF-8 JSON.
 //!
 //! Every byte arriving here is hostile input (Principle V). Decoding must reject
@@ -91,4 +92,45 @@ pub fn encode(payload: &str) -> Result<Vec<u8>, FrameError> {
     out.extend_from_slice(&len.to_le_bytes());
     out.extend_from_slice(bytes);
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Mutation testing found that changing either `>` in the size checks to `>=` went unnoticed: the largest
+    /// frame allowed was never tried, only far larger ones. Both edges are pinned from both sides.
+    #[test]
+    fn a_header_declaring_exactly_the_limit_is_accepted_and_one_more_is_not() {
+        let at_limit = (MAX_FRAME_LEN as u32).to_le_bytes();
+        // Allowed, so the decoder simply waits for the payload.
+        assert_eq!(decode(&at_limit), Ok(None));
+        let over = (MAX_FRAME_LEN as u32 + 1).to_le_bytes();
+        assert_eq!(
+            decode(&over),
+            Err(FrameError::Oversized {
+                declared: MAX_FRAME_LEN + 1,
+                max: MAX_FRAME_LEN
+            })
+        );
+    }
+
+    #[test]
+    fn a_payload_of_exactly_the_limit_round_trips_and_one_more_byte_is_refused() {
+        let biggest = "a".repeat(MAX_FRAME_LEN);
+        let wire = encode(&biggest).unwrap();
+        assert_eq!(wire.len(), HEADER_LEN + MAX_FRAME_LEN);
+        let frame = decode(&wire).unwrap().unwrap();
+        assert_eq!(frame.payload.len(), MAX_FRAME_LEN);
+        assert_eq!(frame.consumed, wire.len());
+
+        let too_big = "a".repeat(MAX_FRAME_LEN + 1);
+        assert_eq!(
+            encode(&too_big),
+            Err(FrameError::Oversized {
+                declared: MAX_FRAME_LEN + 1,
+                max: MAX_FRAME_LEN
+            })
+        );
+    }
 }

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T100 — every command the window may give, and every question it may ask.
 //!
 //! The web view's capability list is the minimum (ADR-0007 R4): these are the commands, and there is no
@@ -87,6 +88,28 @@ impl<L: Link> Bridge<L> {
             Err(error) => Err(error.to_string()),
             Ok(Reply::Refused(refusal)) => Err(refusal_text(&refusal.detail)),
             Ok(Reply::Done(value)) => lists::endpoints(&value),
+        }
+    }
+
+    /// The live map of parts (T170). An older service that does not know the request is `supported: false`;
+    /// any other refusal, and anything the strict decoder refuses, is an error that repeats nothing.
+    pub async fn components(&self) -> Result<Value, String> {
+        match self.link.call(Request::GetComponents).await {
+            Err(error) => Err(error.to_string()),
+            Ok(Reply::Refused(refusal))
+                if refusal.code == "InvalidRequest"
+                    && refusal.detail.contains("unknown request") =>
+            {
+                Ok(lists::components_unsupported())
+            }
+            Ok(Reply::Refused(refusal)) => Err(refusal_text(&refusal.detail)),
+            Ok(Reply::Done(value)) => {
+                dnet_ipc::componentview::decode_components(&value.to_string())
+                    .map(|reply| lists::components(&reply))
+                    .map_err(|_| {
+                        "The service's list of parts was not what was expected.".to_owned()
+                    })
+            }
         }
     }
 
@@ -239,6 +262,88 @@ impl<L: Link> Bridge<L> {
         })
     }
 
+    // ------------------------------------------------------------------ a friend's device (T188)
+
+    /// A friend's computer asks to join: the text to send to the owner (a name and the public half of a key
+    /// made on this computer). Nothing is saved. The reply is read as untrusted input.
+    pub async fn request_join(&self, name: &str) -> Value {
+        let wire = json!({ "request": "RequestJoin", "name": name });
+        let request = match decode_request(&wire.to_string()) {
+            Ok(request) => request,
+            Err(why) => return refused(&why.to_string(), "Refused"),
+        };
+        from_reply(self.link.call(request).await, |reply| {
+            let asked = dnet_ipc::devices::decode_join_requested(&reply.to_string())
+                .map_err(|_| "The service's answer was not what was expected.".to_owned())?;
+            Ok(json!({
+                "name": asked.name,
+                "text": asked.text,
+                "validForMinutes": asked.valid_for_s / 60,
+            }))
+        })
+    }
+
+    /// The owner's invite, pasted: the server is added after an approval, with this computer's own key.
+    /// `label` names the server here (the invite's own name when `None`). Checked by the service's own grammar
+    /// before anything is sent; the reply names the new server.
+    pub async fn accept_invite(&self, invite: &str, label: Option<&str>) -> Value {
+        let mut wire = json!({ "request": "AcceptInvite", "invite": invite });
+        if let Some(label) = label {
+            wire["label"] = Value::String(label.to_owned());
+        }
+        let request = match decode_request(&wire.to_string()) {
+            Ok(request) => request,
+            Err(why) => return refused(&why.to_string(), "Refused"),
+        };
+        from_reply(self.link.call(request).await, |reply| {
+            let id = reply
+                .get("endpoint")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "The service added the server but did not say which.".to_owned())?;
+            Ok(json!({ "id": crate::text::plain(id, 64) }))
+        })
+    }
+
+    /// The owner adds a friend's device to `endpoint`: the script to run on that server. `text` is what the
+    /// friend sent. The reply is read as untrusted input.
+    pub async fn prepare_device(&self, endpoint: &str, text: &str) -> Value {
+        let wire = json!({ "request": "PrepareDevice", "endpoint": endpoint, "text": text });
+        let request = match decode_request(&wire.to_string()) {
+            Ok(request) => request,
+            Err(why) => return refused(&why.to_string(), "Refused"),
+        };
+        from_reply(self.link.call(request).await, |reply| {
+            let prepared = dnet_ipc::devices::decode_device_prepared(&reply.to_string())
+                .map_err(|_| "The service's answer was not what was expected.".to_owned())?;
+            Ok(json!({
+                "name": prepared.name,
+                "script": prepared.script,
+                "validForMinutes": prepared.valid_for_s / 60,
+            }))
+        })
+    }
+
+    /// Finish it: `report` is what the script printed, pasted back. The reply is the invite to send to the
+    /// friend, read as untrusted input.
+    pub async fn finish_device(&self, endpoint: &str, text: &str, report: &str) -> Value {
+        let wire = json!({
+            "request": "FinishDevice", "endpoint": endpoint, "text": text, "report": report,
+        });
+        let request = match decode_request(&wire.to_string()) {
+            Ok(request) => request,
+            Err(why) => return refused(&why.to_string(), "Refused"),
+        };
+        from_reply(self.link.call(request).await, |reply| {
+            let invited = dnet_ipc::devices::decode_device_invited(&reply.to_string())
+                .map_err(|_| "The service's answer was not what was expected.".to_owned())?;
+            Ok(json!({
+                "name": invited.name,
+                "address": invited.address,
+                "invite": invited.invite,
+            }))
+        })
+    }
+
     // ------------------------------------------------------------------ rules (T108)
 
     /// Add a rule: `kind` is `domain`, `domain_suffix`, `ip_cidr` or `application`; `action` is `tunnel` or
@@ -332,6 +437,89 @@ impl<L: Link> Bridge<L> {
         )
     }
 
+    // ------------------------------------------------------------------ the kill switch (T161)
+
+    /// Whether the kill switch is on and whether a guard is in the firewall now. An older service that does not
+    /// know the question is `supported: false` with nothing claimed; a firewall the service could not ask is
+    /// `guardIn: null`, which is not the same as `false`. A reply that is not exactly that is an error that
+    /// repeats nothing of it.
+    pub async fn guard(&self) -> Result<Value, String> {
+        match self.link.call(Request::GetGuard).await {
+            Err(error) => Err(error.to_string()),
+            Ok(Reply::Refused(refusal))
+                if refusal.code == "InvalidRequest"
+                    && refusal.detail.contains("unknown request") =>
+            {
+                Ok(json!({ "supported": false, "killSwitch": false, "guardIn": null }))
+            }
+            Ok(Reply::Refused(refusal)) => Err(refusal_text(&refusal.detail)),
+            Ok(Reply::Done(value)) => {
+                let kill_switch = value.get("kill_switch").and_then(Value::as_bool);
+                let guard_in = match value.get("guard_in") {
+                    Some(Value::Bool(b)) => Some(Value::Bool(*b)),
+                    Some(Value::Null) => Some(Value::Null),
+                    _ => None,
+                };
+                match (kill_switch, guard_in) {
+                    (Some(kill_switch), Some(guard_in)) => Ok(json!({
+                        "supported": true,
+                        "killSwitch": kill_switch,
+                        "guardIn": guard_in,
+                    })),
+                    _ => Err(
+                        "The service's answer about the kill switch was not what was expected."
+                            .to_owned(),
+                    ),
+                }
+            }
+        }
+    }
+
+    /// Turn the kill switch on or off. The service's own sentence about what that does is shown; an answer that
+    /// names the other choice, or says nothing about what happened, is not reported as done.
+    pub async fn set_kill_switch(&self, enabled: bool) -> Value {
+        from_reply(
+            self.link.call(Request::SetKillSwitch { enabled }).await,
+            |reply| {
+                if reply.get("kill_switch").and_then(Value::as_bool) != Some(enabled) {
+                    return Err(
+                        "The service did not report the kill switch as you asked. Open Settings to see where it stands."
+                            .to_owned(),
+                    );
+                }
+                let effect = reply
+                    .get("effect")
+                    .and_then(Value::as_str)
+                    .filter(|e| !e.is_empty());
+                let saved = reply.get("saved").and_then(Value::as_bool);
+                match (effect, saved) {
+                    (Some(effect), Some(saved)) => Ok(json!({
+                        "effect": crate::text::plain(effect, 400),
+                        "saved": saved,
+                    })),
+                    _ => Err("The service changed the setting but did not say what it did. Open Settings to see where it stands."
+                        .to_owned()),
+                }
+            },
+        )
+    }
+
+    /// Take the firewall guard out now. Said to be out only when the service says nothing is in.
+    pub async fn release_guard(&self) -> Value {
+        from_reply(self.link.call(Request::ReleaseGuard).await, |reply| {
+            let effect = reply
+                .get("effect")
+                .and_then(Value::as_str)
+                .filter(|e| !e.is_empty());
+            match (reply.get("guard_in").and_then(Value::as_bool), effect) {
+                (Some(false), Some(effect)) => {
+                    Ok(json!({ "effect": crate::text::plain(effect, 400) }))
+                }
+                _ => Err("The service did not say that the guard is out.".to_owned()),
+            }
+        })
+    }
+
     // ------------------------------------------------------------------ updates
 
     /// Check for updated connection-method definitions now, because the person asked. The reply says which
@@ -349,16 +537,23 @@ impl<L: Link> Bridge<L> {
         })
     }
 
-    /// Open the sign-in page of a captive portal. The service does not hand a client the address (the
-    /// network chooses it, and it is offered only to the person's own browser by the service), so there is
-    /// nothing to open yet; the person is told what to do instead. The honest answer, not a guess at an
-    /// address.
-    #[must_use]
-    pub fn open_login_page(&self) -> Value {
-        refused(
-            "This version cannot open the sign-in page for you. Open any web page in your browser; the network will show its sign-in page.",
-            "Refused",
-        )
+    /// Open the sign-in page of a captive portal in the person's own browser, by `open` (the shell's way of
+    /// starting the default browser; a test gives its own, so no test starts one).
+    ///
+    /// The address is always the operating system's own probe address (`portal::fallback_login_url`), which a
+    /// portal sends a browser away from, and which the built-in rules let through while fail-closed. It is never
+    /// an address the network chose: the service does not hand one to a client, and a hostile network must not be
+    /// able to pick where the person's browser goes. With no portal in the way the page just says the connection
+    /// test passed, which is also true. If the browser cannot be started, the person is told what to do instead.
+    pub fn open_login_page_with(&self, open: impl FnOnce(&str) -> std::io::Result<()>) -> Value {
+        let url = dnet_core::portal::fallback_login_url(dnet_core::portal::Probe::ConnectTest);
+        match open(&url) {
+            Ok(()) => crate::outcome::done(json!({})),
+            Err(_) => refused(
+                "The sign-in page could not be opened. Open any web page in your browser; the network will show its sign-in page.",
+                "Refused",
+            ),
+        }
     }
 }
 

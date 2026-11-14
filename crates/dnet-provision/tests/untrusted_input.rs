@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T093 — what the server prints is input from a machine this client does not control.
 //!
 //! The bootstrap report is read from the output of a script run on a remote machine; anything on

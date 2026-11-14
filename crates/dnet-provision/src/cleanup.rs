@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T092 — taking back what a job made (PR-08, PR-09, PR-11, SC-011).
 //!
 //! Cleanup runs when a person cancels, when a stage fails, and when a crashed job is picked up again. It

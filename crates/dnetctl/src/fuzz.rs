@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! What `dnetctl` reads is untrusted: the command line is the user's, but every reply is whatever
 //! owns the pipe chose to send. Printing it must not crash, and must not let it reach the terminal
 //! as anything but text.

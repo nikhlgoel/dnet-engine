@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T108 — adding and removing a person's routing rules (FR-022, FR-023, contracts/ipc-protocol.md IPC-25).
 //!
 //! | ID     | Assertion |

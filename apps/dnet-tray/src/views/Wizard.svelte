@@ -1,11 +1,14 @@
 <script lang="ts">
+  import DisconnectNote from '../components/DisconnectNote.svelte';
   import type { AppState } from '../lib/app.svelte';
   import type { PreparedServer, ServerKind } from '../lib/bridge';
+  import PendingChanges from '../components/PendingChanges.svelte';
   import { copyText } from '../lib/clipboard';
   import {
     GUIDES,
     OPTIONS,
     checkedOn,
+    isIpv4AddressText,
     isPlausibleAddress,
     keyPermissionFix,
     portRows,
@@ -41,13 +44,20 @@
   let copied = $state<string | null>(null);
   let copyFailed = $state(false);
 
+  /** How often a held server is looked for while the guide waits: it can be approved elsewhere too (`dnetctl`). */
+  const HELD_CHECK_MS = 2000;
+  /** The name of the server that waits for the person's approval (T160), while it does. */
+  let held = $state<string | null>(null);
+  /** The held server was dropped, or expired, without being added. */
+  let heldDropped = $state(false);
+
   const guide = $derived(guideId ? GUIDES[guideId] : null);
   const step = $derived<Step | null>(guide ? (guide.steps[index] ?? null) : null);
   const connected = $derived((app.look?.switch.on ?? false) === true);
   const block = $derived(prepared ? wrapForPaste(prepared.script) : '');
   const connectCommand = $derived(sshCommand(address.trim(), user.trim(), keyFile.trim()));
   const permissionFix = $derived(keyPermissionFix(keyFile.trim()));
-  const addressOk = $derived(isPlausibleAddress(address.trim()));
+  const addressOk = $derived(isIpv4AddressText(address.trim()));
 
   /** The two kinds of processor, worded for the provider the person chose. */
   const kindChoices = $derived<{ value: ServerKind; name: string }[]>(
@@ -104,16 +114,66 @@
     event.preventDefault();
     busy = true;
     error = null;
-    const outcome = await app.bridge.finishServer({ label: label.trim(), host: address.trim(), report });
+    heldDropped = false;
+    const name = label.trim();
+    const outcome = await app.bridge.finishServer({ label: name, host: address.trim(), report });
     busy = false;
     if (outcome.ok) {
       // The pasted text holds keys: it is dropped as soon as the service has it.
       report = '';
       forward();
+    } else if (outcome.code === 'ApprovalRequired') {
+      // Not refused: the service holds the server, and the text with it, until the person approves it. The
+      // window's copy is dropped all the same. The service's own words name a command; the guide says it plainly.
+      report = '';
+      held = name;
     } else {
       error = outcome.reason;
     }
   }
+
+  /** How a held change names this server: in quotes, as the service writes it (`shown` in `dnetd`). */
+  function named(name: string): string {
+    return `"${name.replace(/\p{Cc}/gu, '')}"`;
+  }
+
+  /** To the step after the one that adds the server, wherever the person is in the guide now. */
+  function afterAdding(): void {
+    const at = guide ? guide.steps.findIndex((s) => s.action === 'paste') : -1;
+    if (guide && at >= 0 && at < guide.steps.length - 1) {
+      phase = 'steps';
+      index = at + 1;
+    }
+  }
+
+  /**
+   * Where the held server is now. The waiting list is read first: the service adds an approved server before it
+   * takes the change off the list, so a server found in neither place was not added.
+   */
+  async function settle(): Promise<void> {
+    const name = held;
+    if (name === null) return;
+    try {
+      const waiting = await app.bridge.pending();
+      if (held !== name || waiting.some((c) => c.what.includes(named(name)))) return;
+      const servers = await app.bridge.endpoints();
+      if (held !== name) return;
+      held = null;
+      if (servers.some((e) => e.label === name)) afterAdding();
+      else heldDropped = true;
+    } catch {
+      // No answer now: asked again at the next check.
+    }
+  }
+
+  // While a server waits, look for it now and then; nothing is sent while the window is hidden (ADR-0007 R2).
+  $effect(() => {
+    if (held === null) return;
+    const timer = setInterval(() => {
+      if (app.visible) void settle();
+    }, HELD_CHECK_MS);
+    return () => clearInterval(timer);
+  });
 </script>
 
 <section class="view" aria-labelledby="wizard-title">
@@ -130,12 +190,20 @@
             {#if option.recommended}<span class="badge">{t.recommended}</span>{/if}
           </div>
           <p>{option.summary}</p>
+          <!-- The way to start comes before the long comparison, so nobody has to scroll to find it. -->
+          {#if option.available}
+            <button type="button" class="btn primary" onclick={() => (phase = 'provider')}>{t.useServer}</button>
+          {:else}
+            <button type="button" class="btn" disabled>{t.useWithout}</button>
+            <p class="help">{t.notYet}</p>
+          {/if}
           <h4>{t.whatYouGet}</h4>
           <ul class="features">
             {#each option.features as feature (feature.text)}
-              <li>
-                <span class={feature.included ? 'yes' : 'no'}>{feature.included ? t.included : t.notIncluded}</span>
-                {feature.text}
+              <li class="feat" class:off={!feature.included}>
+                <span class="mark" aria-hidden="true">{feature.included ? '✓' : '–'}</span>
+                <span class="sr-only">{feature.included ? t.included : t.notIncluded}</span>
+                <span>{feature.text}</span>
               </li>
             {/each}
           </ul>
@@ -143,12 +211,6 @@
           <ul>{#each option.pros as line (line)}<li>{line}</li>{/each}</ul>
           <h4>{t.otherSides}</h4>
           <ul>{#each option.cons as line (line)}<li>{line}</li>{/each}</ul>
-          {#if option.available}
-            <button type="button" class="btn primary" onclick={() => (phase = 'provider')}>{t.useServer}</button>
-          {:else}
-            <button type="button" class="btn" disabled>{t.useWithout}</button>
-            <p class="help">{t.notYet}</p>
-          {/if}
         </section>
       {/each}
     </div>
@@ -163,7 +225,10 @@
           aria-pressed={guideId === g.id}
           onclick={() => choose(g.id)}
         >
-          <strong class="disp">{g.name}</strong>
+          <span class="head">
+            <strong class="disp">{g.name}</strong>
+            {#if guideId === g.id}<span class="badge">{t.chosen}</span>{/if}
+          </span>
           <span>{g.summary}</span>
         </button>
       {/each}
@@ -243,8 +308,12 @@
       <button type="button" class="btn primary" aria-label={`${t.copy}: ${t.pasteBlock}`} onclick={() => copy('block', block)}>{t.copy}</button>
       {#if copied}<span class="help" role="status">{t.copied}</span>{/if}
       {#if copyFailed}<p class="notice" role="status">{t.copyFailed}</p>{/if}
+    {:else if step.action === 'paste' && held !== null}
+      <p class="notice" role="status">{t.held}</p>
+      <PendingChanges {app} onsettled={() => void settle()} />
     {:else if step.action === 'paste'}
-      {#if connected}<p class="notice">{t.disconnectFirst}</p>{/if}
+      {#if connected}<DisconnectNote {app} text={t.disconnectFirst} />{/if}
+      {#if heldDropped}<p class="notice" role="status">{t.heldDropped}</p>{/if}
       <form class="form" onsubmit={submit}>
         <div class="field">
           <label for="w-label">{t.nameLabel}</label>
@@ -294,7 +363,8 @@
     {/if}
   {/if}
 
-  <div class="actions">
+  <!-- Leaving the guide is set apart from moving through it. -->
+  <div class="actions leave">
     <button type="button" class="btn" onclick={() => app.go('endpoints')}>{t.close}</button>
   </div>
 </section>
@@ -318,9 +388,12 @@
     cursor: pointer;
     font: inherit;
     color: inherit;
+    /* A button brings the browser's own white border; the card's edge is the design's. */
+    border: 1px solid var(--c-line-strong);
   }
 
   .pick[aria-pressed='true'] {
+    border-color: var(--c-paper);
     outline: 2px solid var(--c-focus);
   }
 
@@ -348,13 +421,21 @@
     color: var(--c-text-2);
   }
 
-  .features .yes,
-  .features .no {
+  .feat {
+    display: flex;
+    gap: var(--s-2);
     font-size: var(--fs-sm);
-    margin-right: var(--s-2);
   }
 
-  .features .no,
+  .feat .mark {
+    flex: none;
+    width: 1.2em;
+    text-align: center;
+    color: var(--c-ok);
+  }
+
+  .feat.off,
+  .feat.off .mark,
   .help,
   .steps-of {
     color: var(--c-text-2);
@@ -425,5 +506,11 @@
     display: flex;
     gap: var(--s-3);
     flex-wrap: wrap;
+  }
+
+  .leave {
+    margin-top: var(--s-4);
+    padding-top: var(--s-4);
+    border-top: 1px solid var(--c-line);
   }
 </style>

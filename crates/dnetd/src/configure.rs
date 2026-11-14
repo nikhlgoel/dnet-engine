@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Phase 9a — configuration changes a client asks for: add, remove, enable or disable an endpoint,
 //! the encrypted-DNS choice (IPC-17 to IPC-21), and Brutal congestion control (T105, IPC-24).
 //!
@@ -57,6 +58,53 @@ fn refused(detail: &str) -> ConfigureError {
     ConfigureError::Refused(detail.to_owned())
 }
 
+/// A label already in use is refused by the store itself, which is the one place that rule lives.
+fn label_taken() -> ConfigureError {
+    refused("an endpoint with that label already exists")
+}
+
+/// The endpoint `new` would be, under a fresh id, and the key its credentials would be sealed
+/// under; refused as adding it would refuse, except for a label in use, which the store decides.
+fn endpoint_for(
+    state: &DomainState,
+    new: &NewEndpoint,
+) -> Result<(Endpoint, SecretKey), ConfigureError> {
+    if state.endpoints().len() >= MAX_ENDPOINTS {
+        return Err(ConfigureError::Refused(format!(
+            "there are already {MAX_ENDPOINTS} endpoints, the most that can be kept"
+        )));
+    }
+    let id = EndpointId::new();
+    let key = SecretKey::for_endpoint(id);
+    let endpoint = Endpoint::new(
+        id,
+        new.label(),
+        EndpointAddress::new(new.host(), display_port(new))
+            .map_err(|_| refused("`host` is not a usable address"))?,
+        EndpointOrigin::Manual,
+        key.credential_ref(),
+    )
+    .map_err(|_| refused("`label` is not a usable label"))?;
+    Ok((endpoint, key))
+}
+
+/// Refuse a person's rule as adding it would, before the store is asked.
+fn rule_allowed(state: &DomainState, matcher: &RuleMatcher) -> Result<(), ConfigureError> {
+    if matches!(matcher, RuleMatcher::Application(_)) {
+        return Err(refused(
+            "rules by program are not applied in this build: the service does not yet see which \
+             program opened a connection. Use a rule for the site or the address instead",
+        ));
+    }
+    let mine = state.rules().iter().filter(|r| !r.is_builtin()).count();
+    if mine >= MAX_USER_RULES {
+        return Err(refused(&format!(
+            "a person may add at most {MAX_USER_RULES} rules; remove one first"
+        )));
+    }
+    Ok(())
+}
+
 fn storage(error: impl std::fmt::Display) -> ConfigureError {
     ConfigureError::Storage(error.to_string())
 }
@@ -78,30 +126,29 @@ impl Configurator {
         state: &mut DomainState,
         new: &NewEndpoint,
     ) -> Result<EndpointId, ConfigureError> {
-        if state.endpoints().len() >= MAX_ENDPOINTS {
-            return Err(ConfigureError::Refused(format!(
-                "there are already {MAX_ENDPOINTS} endpoints, the most that can be kept"
-            )));
-        }
-        // A label already in use is refused by the store itself, which is the one place that rule lives.
-        let id = EndpointId::new();
-        let key = SecretKey::for_endpoint(id);
-        let endpoint = Endpoint::new(
-            id,
-            new.label(),
-            EndpointAddress::new(new.host(), display_port(new))
-                .map_err(|_| refused("`host` is not a usable address"))?,
-            EndpointOrigin::Manual,
-            key.credential_ref(),
-        )
-        .map_err(|_| refused("`label` is not a usable label"))?;
-
+        let (endpoint, key) = endpoint_for(state, new)?;
+        let id = endpoint.id();
         let before = state.clone();
         let result = self.apply_add(state, endpoint, &key, new);
         if result.is_err() {
             *state = before;
         }
         result.map(|()| id)
+    }
+
+    /// Whether `new` could be added to `state` now, with the reason adding it would give if not.
+    /// Nothing is changed, sealed or saved (T160: a change is checked before anyone is asked to
+    /// approve it; adding it checks again).
+    pub fn check_add_endpoint(
+        &self,
+        state: &DomainState,
+        new: &NewEndpoint,
+    ) -> Result<(), ConfigureError> {
+        let (endpoint, _) = endpoint_for(state, new)?;
+        state
+            .clone()
+            .add_endpoint(endpoint)
+            .map_err(|_| label_taken())
     }
 
     fn apply_add(
@@ -111,9 +158,7 @@ impl Configurator {
         key: &SecretKey,
         new: &NewEndpoint,
     ) -> Result<(), ConfigureError> {
-        state
-            .add_endpoint(endpoint)
-            .map_err(|_| refused("an endpoint with that label already exists"))?;
+        state.add_endpoint(endpoint).map_err(|_| label_taken())?;
         let bytes = state.to_config_bytes().map_err(storage)?;
         self.secrets.put(key, new.credentials()).map_err(storage)?;
         if let Err(e) = self.config.save_bytes(&bytes) {
@@ -127,6 +172,37 @@ impl Configurator {
             return Err(storage(e));
         }
         Ok(())
+    }
+
+    /// What an owner needs to invite a friend's device to the server `id` (T188): its name, its address and the
+    /// credentials sealed for it. Read-only. The credentials go to the service and no further than the invite it
+    /// makes, which holds only what is the same for every device.
+    pub fn server_for_invite(
+        &self,
+        state: &DomainState,
+        id: EndpointId,
+    ) -> Result<
+        (
+            String,
+            String,
+            dnet_config::credentials::EndpointCredentials,
+        ),
+        ConfigureError,
+    > {
+        let Some(endpoint) = state.endpoint(id) else {
+            return Err(refused("there is no endpoint with that id"));
+        };
+        let key = SecretKey::parse(endpoint.credentials()).map_err(storage)?;
+        let credentials = self
+            .secrets
+            .get(&key)
+            .map_err(storage)?
+            .ok_or_else(|| refused("this server has no credentials stored"))?;
+        Ok((
+            endpoint.label().to_owned(),
+            endpoint.address().host().to_owned(),
+            credentials,
+        ))
     }
 
     /// Remove an endpoint and forget its credentials.
@@ -249,18 +325,7 @@ impl Configurator {
         matcher: RuleMatcher,
         action: RuleAction,
     ) -> Result<RuleId, ConfigureError> {
-        if matches!(matcher, RuleMatcher::Application(_)) {
-            return Err(refused(
-                "rules by program are not applied in this build: the service does not yet see which \
-                 program opened a connection. Use a rule for the site or the address instead",
-            ));
-        }
-        let mine = state.rules().iter().filter(|r| !r.is_builtin()).count();
-        if mine >= MAX_USER_RULES {
-            return Err(refused(&format!(
-                "a person may add at most {MAX_USER_RULES} rules; remove one first"
-            )));
-        }
+        rule_allowed(state, &matcher)?;
         let before = state.clone();
         let id = match state.add_user_rule(matcher, action) {
             Ok(id) => id,
@@ -274,6 +339,22 @@ impl Configurator {
             return Err(e);
         }
         Ok(id)
+    }
+
+    /// Whether a person's rule could be added to `state` now, with the reason adding it would give
+    /// if not. Nothing is changed or saved (T160, as [`Configurator::check_add_endpoint`]).
+    pub fn check_add_rule(
+        &self,
+        state: &DomainState,
+        matcher: &RuleMatcher,
+        action: RuleAction,
+    ) -> Result<(), ConfigureError> {
+        rule_allowed(state, matcher)?;
+        state
+            .clone()
+            .add_user_rule(matcher.clone(), action)
+            .map(drop)
+            .map_err(|e| refused(&e.to_string()))
     }
 
     /// Remove a person's rule. A built-in rule cannot be removed.

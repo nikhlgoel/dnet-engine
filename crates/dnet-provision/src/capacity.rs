@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T091 — "no free capacity here" is a normal answer, not an error (PR-02 stage, US2-2).
 //!
 //! Free-tier compute is rationed per region, and the popular regions run out. When the chosen one has

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! DNet Engine build tooling.
 //!
 //! `verify-vendor` and `lint-branding` enforce the two binding licence obligations
@@ -13,6 +14,8 @@ mod import_harness;
 mod lint_branding;
 mod pins;
 mod server_cores;
+mod site_facts;
+mod spdx;
 mod stage_installer;
 mod verify_vendor;
 

@@ -1,0 +1,101 @@
+name: Advisories
+
+# A security tool that carries a known vulnerability cannot be trusted to protect anyone. New advisories appear for code
+# that has not changed, so this runs every week as well as whenever a dependency file changes, and says what it found.
+# It reads two lock files and the public advisory databases; it needs no secret and may write nothing.
+
+on:
+  schedule:
+    - cron: "17 5 * * 1"
+  push:
+    branches: [master]
+    paths:
+      - "Cargo.lock"
+      - "apps/dnet-tray/src-tauri/Cargo.lock"
+      - "apps/dnet-tray/pnpm-lock.yaml"
+      - "apps/dnet-tray/pnpm-workspace.yaml"
+      - "crates/xtask/src/fetch_vendor.rs"
+      - "deny.toml"
+  pull_request:
+    paths:
+      - "Cargo.lock"
+      - "apps/dnet-tray/src-tauri/Cargo.lock"
+      - "apps/dnet-tray/pnpm-lock.yaml"
+      - "apps/dnet-tray/pnpm-workspace.yaml"
+      - "crates/xtask/src/fetch_vendor.rs"
+      - "deny.toml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: taiki-e/install-action@67339d17681acb16df9555b4ce5c56459b4266d4 # cargo-audit
+        with:
+          tool: cargo-audit,cargo-deny
+      # A vulnerability fails the job. A warning (unmaintained, unsound) does not, but is printed: the ones accepted so
+      # far are listed in docs/security/dependencies-and-advisories.md with the reason, and a new one shows here.
+      - name: The workspace
+        run: cargo audit
+      - name: The window shell (its own lock file)
+        run: cargo audit --file apps/dnet-tray/src-tauri/Cargo.lock
+      # Every dependency's licence is one this GPL-3.0-or-later project may combine with, and every dependency
+      # comes from crates.io (deny.toml). A new licence or a git dependency fails here.
+      - name: Licences and sources, the workspace
+        run: cargo deny check licenses sources
+      - name: Licences and sources, the window shell
+        run: cargo deny --manifest-path apps/dnet-tray/src-tauri/Cargo.toml check licenses sources
+
+  window:
+    name: Window dependencies
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/dnet-tray
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5
+        with:
+          version: 12.4.2
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/dnet-tray/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      # What ships: nothing may be known-vulnerable.
+      - name: Production dependencies
+        run: pnpm audit --prod
+      # The test tooling never ships, so it does not fail the job, but it runs on developers' machines: it is printed.
+      - name: All dependencies (informational)
+        run: pnpm audit || true
+
+  cores:
+    name: Bundled network programs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      # The two programs are built from pinned commits. The pins do not move by themselves, so say when upstream has
+      # moved on: a newer release may carry a fix, and the notes are worth reading before the next release.
+      - name: Is a pin behind its upstream?
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          pin=$(grep -A3 'dest: "primary-core"' crates/xtask/src/fetch_vendor.rs | grep -o 'version: "[^"]*"' | cut -d'"' -f2)
+          latest=$(gh api repos/SagerNet/sing-box/releases/latest --jq .tag_name)
+          echo "primary core: pinned $pin, latest stable $latest"
+          if [ "$pin" != "$latest" ]; then
+            echo "::warning title=The primary core pin is behind::pinned $pin, latest stable $latest. Read the release notes and move the pin (docs/security/dependencies-and-advisories.md)."
+          fi
+          pin=$(grep -A3 'dest: "amneziawg-go"' crates/xtask/src/fetch_vendor.rs | grep -o 'commit: "[^"]*"' | cut -d'"' -f2)
+          behind=$(gh api "repos/amnezia-vpn/amneziawg-go/compare/$pin...master" --jq .total_commits)
+          echo "AmneziaWG: $behind commits after the pinned one"
+          if [ "$behind" != "0" ]; then
+            echo "::warning title=The AmneziaWG pin is behind::$behind commits after the pinned one. Read them and move the pin."
+          fi

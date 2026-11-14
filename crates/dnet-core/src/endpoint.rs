@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T024 — the `Endpoint` entity (data-model §1).
 //!
 //! A destination the user owns, through which their traffic exits.

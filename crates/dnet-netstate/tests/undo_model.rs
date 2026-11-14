@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Model-based check of the undo registry (SC-016, CC-05, the "network is restored exactly" promise).
 //!
 //! A pretend machine holds a set of host routes. Random sequences of the things that really happen to the

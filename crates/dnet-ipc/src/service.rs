@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The seam between the IPC boundary and the privileged service logic.
 //!
 //! The connection loop authorizes every request against the captured client identity

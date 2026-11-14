@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T043 (OS half) — real child spawning with captured stdio and readiness (SUP-01, SUP-06).
 //!
 //! A core is spawned with stdin closed and stdout/stderr piped. Output is forwarded to
@@ -113,6 +114,21 @@ where
     }
 }
 
+/// Only one process is started at a time, by anything in this crate (the service, and the tests that start stand-ins).
+///
+/// On Windows a new process inherits every inheritable handle its parent holds at that moment, and the write end of
+/// another child's output pipe is one for a short while after it is made. Two spawns at once can therefore hand the
+/// second child the first's pipe: the first child's output then never ends while the second lives, and whatever reads
+/// it (a task on the runtime's blocking pool) cannot finish. Seen as a test run that hung for as long as a
+/// sixty-second stand-in lived (T190, found with gdb: both blocking readers parked in a pipe read, no child left).
+/// Starting one at a time closes that window.
+pub(crate) fn spawning() -> std::sync::MutexGuard<'static, ()> {
+    static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+    ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Spawn a core. Readiness is awaited separately with [`RunningCore::wait_ready`].
 pub fn spawn(command: &CoreCommand) -> Result<RunningCore, SupervisorError> {
     let mut cmd = Command::new(&command.program);
@@ -128,7 +144,11 @@ pub fn spawn(command: &CoreCommand) -> Result<RunningCore, SupervisorError> {
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
 
-    let mut child = cmd.spawn().map_err(|e| SupervisorError::Spawn {
+    let started = {
+        let _one_at_a_time = spawning();
+        cmd.spawn()
+    };
+    let mut child = started.map_err(|e| SupervisorError::Spawn {
         core: command.core,
         detail: e.to_string(),
     })?;
@@ -478,5 +498,32 @@ mod unix_tests {
         .unwrap();
         core.wait_ready(Duration::from_secs(20)).await.unwrap();
         core.kill(Duration::from_secs(5)).await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+
+    /// The cap is a documented number, not whatever its arithmetic happens to give.
+    #[test]
+    fn a_line_is_cut_at_eight_kilobytes() {
+        assert_eq!(MAX_LINE_BYTES, 8192);
+    }
+
+    #[tokio::test]
+    async fn a_line_of_exactly_the_limit_is_kept_whole_and_one_more_byte_is_dropped() {
+        for (length, kept) in [
+            (8191usize, 8191usize),
+            (8192, 8192),
+            (8193, 8192),
+            (20_000, 8192),
+        ] {
+            let mut input = vec![b'z'; length];
+            input.push(b'\n');
+            let mut lines = Vec::new();
+            for_each_line(&input[..], |l| lines.push(l.len())).await;
+            assert_eq!(lines, [kept], "a line of {length} bytes");
+        }
     }
 }

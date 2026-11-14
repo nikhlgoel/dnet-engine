@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Authorization policy for requests crossing the privilege boundary.
 //!
 //! The OS half — impersonating the pipe client and capturing its token — is T035, and

@@ -1,10 +1,12 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T100 — the result of something the person asked for, as the window reads it.
 //!
 //! Success is `{ "ok": true, ..extra }`. Anything else is `{ "ok": false, "reason": <text>, "code": <one of
-//! four> }`. The reason is the service's own `detail` (cleaned and bounded) so the person reads what the
+//! five> }`. The reason is the service's own `detail` (cleaned and bounded) so the person reads what the
 //! service said; it is never a sentence composed here to hide one. The code is the little the window needs to
-//! decide what to do next: ask for a consent, say the service is busy, say nothing is connected, or just show
-//! the reason.
+//! decide what to do next: ask for a consent, say the service is busy, say nothing is connected, say the change
+//! is waiting for the person's approval (T160: nothing was refused and nothing was applied), or just show the
+//! reason.
 
 use dnet_ipc::client::{ClientError, Reply};
 use serde_json::{json, Value};
@@ -24,7 +26,7 @@ pub fn done(extra: Value) -> Value {
     out
 }
 
-/// A refusal in the window's four codes.
+/// A refusal in the window's five codes.
 #[must_use]
 pub fn refused(reason: &str, code: &str) -> Value {
     json!({ "ok": false, "reason": plain(reason, REASON_MAX), "code": code })
@@ -37,6 +39,7 @@ pub fn code_for(wire: &str) -> &'static str {
         "TierDowngradeRequiresConsent" => "TierConsentRequired",
         "ServiceBusy" => "ServiceBusy",
         "NotConnected" => "NotConnected",
+        "ApprovalRequired" => "ApprovalRequired",
         _ => "Refused",
     }
 }

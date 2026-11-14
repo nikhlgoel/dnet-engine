@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T125 — IPC payloads for connect, disconnect, status and the event stream.
 //!
 //! Contract: `specs/001-network-resilience-client/contracts/ipc-protocol.md`. Written before the
@@ -152,6 +153,7 @@ fn ipc10_every_request_round_trips() {
         Request::GetPaths,
         Request::GetStats,
         Request::GetComponents,
+        Request::GetGuard,
         Request::ListEndpoints,
         Request::ListProfiles,
         Request::ListRules,
@@ -198,6 +200,9 @@ fn ipc10_every_request_round_trips() {
         },
         Request::SetEncryptedDnsHandling { block: true },
         Request::SetEncryptedDnsHandling { block: false },
+        Request::SetKillSwitch { enabled: true },
+        Request::SetKillSwitch { enabled: false },
+        Request::ReleaseGuard,
         Request::StartProvisioning,
         Request::CancelProvisioning,
         Request::Subscribe,

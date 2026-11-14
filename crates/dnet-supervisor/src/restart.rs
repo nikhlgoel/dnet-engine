@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T044 — bounded, jittered restart backoff (SUP-02, SUP-03).
 //!
 //! Restart-on-exit must not loop forever: the backoff has a ceiling and an attempt

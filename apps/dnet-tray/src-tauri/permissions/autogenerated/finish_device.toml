@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-finish-device"
+description = "Enables the finish_device command without any pre-configured scope."
+commands.allow = ["finish_device"]
+
+[[permission]]
+identifier = "deny-finish-device"
+description = "Denies the finish_device command without any pre-configured scope."
+commands.deny = ["finish_device"]

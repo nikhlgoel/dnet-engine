@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T029 — routing rules (data-model §4).
 //!
 //! The load-bearing invariant here is made structural: **an application rule is always

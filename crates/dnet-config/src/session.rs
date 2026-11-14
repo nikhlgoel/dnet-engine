@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! ADR-0008 — the session: one endpoint of the primary core that stays put while the carrier under it is
 //! replaced.
 //!
@@ -78,9 +79,12 @@ pub const SESSION_PORT: u16 = 25182;
 pub const MAX_DEVICES: usize = 8;
 
 /// The address device number `index` (from 0) has inside the session.
+///
+/// Total: an index past the range gives the last address of the session's range (10.9.0.255), never a panic and
+/// never a wrap back to a real device's address. Callers keep to `0..MAX_DEVICES`.
 pub fn session_device_address(index: usize) -> Ipv4Addr {
-    let host = 2 + u8::try_from(index).unwrap_or(u8::MAX - 2);
-    Ipv4Addr::new(10, 9, 0, host)
+    let offset = u8::try_from(index).map_or(u8::MAX - 2, |i| i.min(u8::MAX - 2));
+    Ipv4Addr::new(10, 9, 0, 2 + offset)
 }
 
 /// Whether `address` is one a device can have: between the first and the last of [`MAX_DEVICES`].
@@ -1010,5 +1014,127 @@ mod tests {
         })
         .unwrap();
         assert!(!crate::probe::to_json(&config).contains("endpoints"));
+    }
+}
+
+#[cfg(test)]
+mod pinned_tests {
+    use super::*;
+
+    #[test]
+    fn the_first_device_is_dot_two_and_each_next_one_is_one_higher() {
+        assert_eq!(session_device_address(0), Ipv4Addr::new(10, 9, 0, 2));
+        for i in 0..MAX_DEVICES {
+            assert_eq!(
+                session_device_address(i),
+                Ipv4Addr::new(10, 9, 0, 2 + i as u8),
+                "device {i}"
+            );
+        }
+    }
+
+    /// The server and the measurement origin are never a device's address.
+    #[test]
+    fn no_device_has_the_servers_address_or_the_origins() {
+        for i in 0..MAX_DEVICES {
+            let address = session_device_address(i);
+            assert_ne!(address, SESSION_SERVER);
+            assert_ne!(address, SESSION_ORIGIN);
+        }
+    }
+
+    /// Whatever number is asked for, the answer is an address inside the session's range and never a panic.
+    #[test]
+    fn any_index_gives_an_address_in_the_session_and_never_panics() {
+        for index in (0..=600usize).chain([usize::MAX, usize::MAX - 1, 1 << 40, 253, 254, 255, 256])
+        {
+            let address = session_device_address(index);
+            assert_eq!(&address.octets()[..3], &[10, 9, 0], "index {index}");
+            assert!(address.octets()[3] >= 2, "index {index}");
+        }
+    }
+
+    #[test]
+    fn indexes_past_the_range_all_give_the_last_address_and_do_not_wrap_back_to_a_real_device() {
+        let last = Ipv4Addr::new(10, 9, 0, 255);
+        for index in [253usize, 254, 255, 256, 1000, usize::MAX] {
+            assert_eq!(session_device_address(index), last, "index {index}");
+        }
+        assert_eq!(session_device_address(252), Ipv4Addr::new(10, 9, 0, 254));
+    }
+
+    #[test]
+    fn addresses_rise_with_the_index_until_the_range_ends() {
+        let mut previous = session_device_address(0);
+        for index in 1..=253usize {
+            let now = session_device_address(index);
+            assert!(now > previous, "index {index}");
+            previous = now;
+        }
+    }
+
+    #[test]
+    fn exactly_the_addresses_of_the_eight_devices_are_device_addresses() {
+        for host in 0..=255u8 {
+            let address = Ipv4Addr::new(10, 9, 0, host);
+            assert_eq!(
+                is_device_address(address),
+                (2..=9).contains(&host),
+                "{address}"
+            );
+        }
+        for other in [
+            Ipv4Addr::new(10, 8, 0, 2),
+            Ipv4Addr::new(10, 9, 1, 2),
+            Ipv4Addr::new(11, 9, 0, 2),
+            Ipv4Addr::new(192, 168, 1, 2),
+            Ipv4Addr::UNSPECIFIED,
+        ] {
+            assert!(!is_device_address(other), "{other}");
+        }
+    }
+
+    #[test]
+    fn a_cidr_is_an_address_and_a_prefix_no_longer_than_the_family_allows() {
+        for good in [
+            "0.0.0.0/0",
+            "10.9.0.2/32",
+            "10.0.0.0/8",
+            "192.168.1.0/24",
+            "::/0",
+            "fd00::/8",
+            "fd00::2/128",
+            "2001:db8::/32",
+        ] {
+            assert!(is_cidr(good), "{good}");
+        }
+        for bad in [
+            "10.9.0.2/33",
+            "10.9.0.2/255",
+            "fd00::2/129",
+            "fd00::/200",
+            "10.9.0.2",
+            "10.9.0.2/",
+            "/32",
+            "/",
+            "10.9.0.2/-1",
+            "10.9.0.2/ 8",
+            "10.9.0.2/8/8",
+            "10.9.0/24",
+            "not-an-address/8",
+            "",
+            "10.9.0.2/256",
+            "10.9.0.2/1e1",
+        ] {
+            assert!(!is_cidr(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_prefix_limits_are_exact_on_both_sides_for_both_families() {
+        assert!(is_cidr("10.0.0.1/32"));
+        assert!(!is_cidr("10.0.0.1/33"));
+        assert!(is_cidr("fd00::1/128"));
+        assert!(!is_cidr("fd00::1/129"));
     }
 }

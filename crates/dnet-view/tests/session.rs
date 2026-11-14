@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The shell's rules, without a window: what the window catches up on, when the web view is let go, and how
 //! often the service is asked.
 

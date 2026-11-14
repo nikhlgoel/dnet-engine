@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Test fixtures shared by the IPC test files. Every value is a test value of the right shape; none is, or
 //! may become, a real credential.
 

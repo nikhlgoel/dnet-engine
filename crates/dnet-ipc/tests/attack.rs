@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T039 — the attack gate (SC-019).
 //!
 //! Proves, against a **real** Windows named pipe with **real** client-identity capture
@@ -33,7 +34,7 @@ use std::time::Duration;
 use dnet_ipc::authz::ConsoleSession;
 use dnet_ipc::frame;
 use dnet_ipc::protocol::{IpcError, Request};
-use dnet_ipc::server::{accept_one, PIPE_NAME};
+use dnet_ipc::server::accept_one_on;
 use dnet_ipc::service::Service;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::windows::named_pipe::ClientOptions;
@@ -95,11 +96,17 @@ async fn read_frame(client: &mut tokio::net::windows::named_pipe::NamedPipeClien
     }
 }
 
-/// Connect a client to the control pipe, retrying briefly while the server instance
+/// A pipe name of this test's own. The real name belongs to the service when one is installed on this computer, and
+/// a security test that only runs when none is installed does not reliably run.
+fn pipe_name() -> String {
+    format!(r"\\.\pipe\DNetEngine\test-attack-{}", std::process::id())
+}
+
+/// Connect a client to the pipe, retrying briefly while the server instance
 /// is being created (ERROR_PIPE_BUSY / not-yet-created races).
-async fn connect_client() -> tokio::net::windows::named_pipe::NamedPipeClient {
+async fn connect_client(name: &str) -> tokio::net::windows::named_pipe::NamedPipeClient {
     for _ in 0..50 {
-        match ClientOptions::new().open(PIPE_NAME) {
+        match ClientOptions::new().open(name) {
             Ok(client) => return client,
             Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
         }
@@ -110,9 +117,12 @@ async fn connect_client() -> tokio::net::windows::named_pipe::NamedPipeClient {
 #[tokio::test]
 async fn t039_unprivileged_client_cannot_alter_routing() {
     let target = AttackTarget::new();
-    let server = tokio::spawn(accept_one(Arc::clone(&target) as Arc<dyn Service>));
+    let name = pipe_name();
+    let served = name.clone();
+    let service = Arc::clone(&target) as Arc<dyn Service>;
+    let server = tokio::spawn(async move { accept_one_on(&served, service).await });
 
-    let mut client = connect_client().await;
+    let mut client = connect_client(&name).await;
 
     // --- The attack: a mutating request from a non-console identity. ---
     let connect = frame::encode(r#"{"request":"Connect","acknowledge_tier2":false}"#)

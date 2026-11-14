@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The event stream as the Activity view reads it: every line has a reason, and what cannot be read is skipped.
 
 mod support;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T097 — adding a server the person already runs, with no cloud account involved (FR-010, US2-5).
 //!
 //! Provisioning is for people who need a server made. Plenty of people already have one, or a friend who
@@ -30,10 +31,7 @@ pub enum ManualError {
 /// Whether `host` is an address or a name a server could have.
 fn plausible_host(host: &str) -> bool {
     if let Ok(ip) = host.parse::<IpAddr>() {
-        return match ip {
-            IpAddr::V4(v4) => !(v4.is_unspecified() || v4.is_multicast() || v4.is_broadcast()),
-            IpAddr::V6(v6) => !(v6.is_unspecified() || v6.is_multicast()),
-        };
+        return dnet_config::persist::address_could_be_a_server(ip);
     }
     dnet_core::rule_eval::normalize_domain(host).is_some_and(|name| name.contains('.'))
 }
@@ -106,6 +104,9 @@ mod tests {
             "224.0.0.1",
             "::",
             "ff02::1",
+            "::ffff:0.0.0.0",
+            "::ffff:224.0.0.1",
+            "::ffff:255.255.255.255",
             "localhost",
             "no spaces.example",
             "a..b",

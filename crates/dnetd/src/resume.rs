@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T162 — "the machine woke up", from the system's own power messages.
 //!
 //! The service control handler runs on a thread of the system's, not in the async world, and the
@@ -120,6 +121,15 @@ mod tests {
         let hub = Hub::new();
         let mut resumes = hub.subscribe();
         hub.announce();
+        assert!(woke(&mut resumes, Duration::from_secs(1)).await);
+    }
+
+    /// The process's own hub, which the service control handler and every network watch use: what one announces,
+    /// the other hears.
+    #[tokio::test(start_paused = true)]
+    async fn the_process_wide_announcement_reaches_the_process_wide_subscriber() {
+        let mut resumes = subscribe();
+        announce();
         assert!(woke(&mut resumes, Duration::from_secs(1)).await);
     }
 

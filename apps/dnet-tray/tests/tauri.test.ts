@@ -86,6 +86,11 @@ describe('commands', () => {
     expect(await b.stabilize(true)).toEqual({ ok: false, reason: 'a method that drops connections needs your consent', code: 'TierConsentRequired' });
   });
 
+  it('a change held for approval keeps its own code, so the window does not show it as a refusal', async () => {
+    const { b } = await bridge(() => ({ ok: false, reason: 'Adding the server "home" waits for approval (change c1)', code: 'ApprovalRequired' }));
+    expect(await b.stabilize(true)).toEqual({ ok: false, reason: 'Adding the server "home" waits for approval (change c1)', code: 'ApprovalRequired' });
+  });
+
   it('a code it does not know is dropped, and the reason stays', async () => {
     const { b } = await bridge(() => ({ ok: false, reason: 'because', code: 'Mystery' }));
     expect(await b.stabilize(true)).toEqual({ ok: false, reason: 'because' });
@@ -133,6 +138,30 @@ describe('commands', () => {
   it('opting out of the encrypted-name block carries the consequence, and only the service’s', async () => {
     const { b } = await bridge((c) => (c === 'set_encrypted_dns' ? { ok: true, consequence: 'Rules for sites will not apply.' } : answers[c]));
     expect(await b.setEncryptedDns(false)).toEqual({ ok: true, consequence: 'Rules for sites will not apply.' });
+  });
+
+  it('the kill switch is read strictly, and a state that is not one is refused rather than guessed at', async () => {
+    const { b } = await bridge((c) => (c === 'get_guard' ? { supported: true, killSwitch: true, guardIn: null } : answers[c]));
+    expect(await b.guard()).toEqual({ supported: true, killSwitch: true, guardIn: null });
+    for (const odd of [null, {}, { supported: true }, { supported: true, killSwitch: 'yes', guardIn: false }, { supported: true, killSwitch: true, guardIn: 'no' }, { supported: false, killSwitch: true, guardIn: false }]) {
+      const { b: bad } = await bridge((c) => (c === 'get_guard' ? odd : answers[c]));
+      await expect(bad.guard(), JSON.stringify(odd)).rejects.toThrow();
+    }
+  });
+
+  it('turning the kill switch on or off, and releasing the guard, carry the service’s own sentence', async () => {
+    const { b, calls } = await bridge((c) => {
+      if (c === 'set_kill_switch') return { ok: true, effect: 'The guard goes in at the next connection.', saved: true };
+      if (c === 'release_guard') return { ok: true, effect: 'The guard is out.' };
+      return answers[c];
+    });
+    expect(await b.setKillSwitch(true)).toEqual({ ok: true, effect: 'The guard goes in at the next connection.', saved: true });
+    expect(calls.list.find(([c]) => c === 'set_kill_switch')?.[1]).toEqual({ enabled: true });
+    expect(await b.releaseGuard()).toEqual({ ok: true, effect: 'The guard is out.' });
+    // An answer that says ok but not what happened is not reported as done.
+    const { b: vague } = await bridge((c) => (c === 'set_kill_switch' || c === 'release_guard' ? { ok: true } : answers[c]));
+    expect((await vague.setKillSwitch(true)).ok).toBe(false);
+    expect((await vague.releaseGuard()).ok).toBe(false);
   });
 
   it('a check for updates says which network it uses, and defaults to the safer reading', async () => {
@@ -334,5 +363,70 @@ describe('changes waiting for approval (T160)', () => {
       c === 'approve_change' ? { ok: false, reason: 'Not approved. Nothing was changed.', code: 'Refused' } : answers[c],
     );
     expect(await b.approveChange('a1')).toEqual({ ok: false, reason: 'Not approved. Nothing was changed.', code: 'Refused' });
+  });
+});
+
+describe('a friend’s device (T188)', () => {
+  const KEY = 'BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=';
+  const REQUEST = `DNET-DEVICE-REQUEST {"version":1,"name":"Ravi","public_key":"${KEY}"}`;
+
+  it('asks each command with exactly its own arguments and reads each answer', async () => {
+    const { b, calls } = await bridge((c) => {
+      if (c === 'request_join') return { ok: true, name: 'Ravi', text: REQUEST, validForMinutes: 360 };
+      if (c === 'accept_invite') return { ok: true, id: 'e2' };
+      if (c === 'prepare_device') return { ok: true, name: 'Ravi', script: '#!/bin/sh\n', validForMinutes: 360 };
+      if (c === 'finish_device') return { ok: true, name: 'Ravi', address: '10.9.0.3', invite: 'DNET-INVITE-1:abc-_1' };
+      return answers[c];
+    });
+    expect(await b.requestJoin('Ravi')).toEqual({ ok: true, request: { name: 'Ravi', text: REQUEST, validForMinutes: 360 } });
+    expect(await b.acceptInvite('DNET-INVITE-1:abc', 'Mine')).toEqual({ ok: true, id: 'e2' });
+    expect(await b.acceptInvite('DNET-INVITE-1:abc')).toEqual({ ok: true, id: 'e2' });
+    expect(await b.prepareDevice('e1', REQUEST)).toEqual({
+      ok: true,
+      prepared: { name: 'Ravi', script: '#!/bin/sh\n', validForMinutes: 360 },
+    });
+    expect(await b.finishDevice('e1', REQUEST, 'DNET-DEVICE-REPORT {}')).toEqual({
+      ok: true,
+      invited: { name: 'Ravi', address: '10.9.0.3', invite: 'DNET-INVITE-1:abc-_1' },
+    });
+    expect(calls.list.filter(([c]) => /join|invite|device/.test(c))).toEqual([
+      ['request_join', { name: 'Ravi' }],
+      ['accept_invite', { invite: 'DNET-INVITE-1:abc', label: 'Mine' }],
+      ['accept_invite', { invite: 'DNET-INVITE-1:abc', label: null }],
+      ['prepare_device', { endpoint: 'e1', text: REQUEST }],
+      ['finish_device', { endpoint: 'e1', text: REQUEST, report: 'DNET-DEVICE-REPORT {}' }],
+    ]);
+  });
+
+  it('refuses an answer that is not what the contract says, and shows none of it', async () => {
+    const wrong: Array<[string, Record<string, unknown>]> = [
+      ['request_join', { ok: true, name: 'Ravi', text: 'nope', validForMinutes: 1 }],
+      ['request_join', { ok: true, name: "Rav'i", text: REQUEST, validForMinutes: 1 }],
+      ['request_join', { ok: true, name: 'Ravi', text: REQUEST }],
+      ['prepare_device', { ok: true, name: 'Ravi', script: '', validForMinutes: 1 }],
+      ['prepare_device', { ok: true, name: 'Ravi', script: 'x'.repeat(70000), validForMinutes: 1 }],
+      ['finish_device', { ok: true, name: 'Ravi', address: 'x', invite: 'DNET-INVITE-1:abc' }],
+      ['finish_device', { ok: true, name: 'Ravi', address: '10.9.0.3', invite: 'DNET-INVITE-1:a b' }],
+      ['finish_device', { ok: true, name: 'Ravi', address: '10.9.0.3', invite: 'hello' }],
+    ];
+    for (const [command, reply] of wrong) {
+      const { b } = await bridge((c) => (c === command ? reply : answers[c]));
+      const out =
+        command === 'request_join'
+          ? await b.requestJoin('Ravi')
+          : command === 'prepare_device'
+            ? await b.prepareDevice('e1', REQUEST)
+            : await b.finishDevice('e1', REQUEST, 'r');
+      expect(out.ok, `${command} ${JSON.stringify(reply)}`).toBe(false);
+      expect(JSON.stringify(out)).not.toMatch(/DNET-INVITE|DNET-DEVICE-REQUEST|#!\/bin\/sh/);
+      clearMocks();
+    }
+  });
+
+  it('passes a refusal through with the service’s reason and code', async () => {
+    const refusal = { ok: false, reason: 'Not now.', code: 'ApprovalRequired' };
+    const { b } = await bridge((c) => (c === 'accept_invite' || c === 'finish_device' ? refusal : answers[c]));
+    expect(await b.acceptInvite('DNET-INVITE-1:abc')).toEqual(refusal);
+    expect(await b.finishDevice('e1', REQUEST, 'r')).toEqual(refusal);
   });
 });

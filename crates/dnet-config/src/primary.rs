@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T047 — primary-core configuration generation (CC-01, CC-02, CC-05..CC-09).
 //!
 //! Turns the active profile, endpoint, and routing rules into the primary core's JSON
@@ -492,4 +493,199 @@ pub(crate) fn dns_rules(rules: &[RoutingRule], tunnel_resolver: Option<&str>) ->
 /// instead, which redacts them.
 pub fn to_json(config: &PrimaryCoreConfig) -> String {
     serde_json::to_string_pretty(config).expect("PrimaryCoreConfig always serializes")
+}
+
+/// The DNS rule chain, written out rule by rule. It decides which names are answered locally, which are
+/// refused, which get a stand-in address and which go through the tunnel, so a rule that loses its action or
+/// its match is a name resolved the wrong way.
+#[cfg(test)]
+mod dns_chain_tests {
+    use dnet_core::rule::{RoutingRule, RuleAction, RuleMatcher};
+    use serde_json::{json, Value};
+
+    use super::*;
+
+    fn rule(matcher: RuleMatcher, action: RuleAction, precedence: u32) -> RoutingRule {
+        RoutingRule::user(matcher, action, precedence).unwrap()
+    }
+
+    fn chain(rules: &[RoutingRule], resolver: Option<&str>) -> Vec<Value> {
+        dns_rules(rules, resolver)
+            .iter()
+            .map(|r| serde_json::to_value(r).unwrap())
+            .collect()
+    }
+
+    fn fakeip() -> Value {
+        json!({ "query_type": ["A", "AAAA"], "action": "route", "server": "fakeip" })
+    }
+
+    fn through_tunnel(server: &str) -> Value {
+        json!({ "query_type": ["A", "AAAA"], "invert": true, "action": "route", "server": server })
+    }
+
+    fn refused_others() -> Value {
+        json!({ "query_type": ["A", "AAAA"], "invert": true, "action": "reject" })
+    }
+
+    #[test]
+    fn with_no_rules_every_name_gets_a_stand_in_and_every_other_query_goes_through_the_tunnel() {
+        assert_eq!(
+            chain(&[], Some("1.1.1.1")),
+            [fakeip(), through_tunnel("1.1.1.1")]
+        );
+    }
+
+    #[test]
+    fn without_a_tunnel_resolver_every_other_query_is_refused_and_never_sent_to_the_local_network()
+    {
+        assert_eq!(chain(&[], None), [fakeip(), refused_others()]);
+    }
+
+    #[test]
+    fn a_bypassed_site_is_answered_by_the_local_resolver_with_its_own_name() {
+        let rules = [rule(
+            RuleMatcher::Domain("printer.lan".into()),
+            RuleAction::Bypass,
+            200,
+        )];
+        assert_eq!(
+            chain(&rules, None)[0],
+            json!({ "domain": ["printer.lan"], "action": "route", "server": "local" })
+        );
+    }
+
+    #[test]
+    fn a_bypassed_site_and_its_subdomains_is_matched_as_a_suffix() {
+        let rules = [rule(
+            RuleMatcher::DomainSuffix("corp.example".into()),
+            RuleAction::Bypass,
+            200,
+        )];
+        assert_eq!(
+            chain(&rules, None)[0],
+            json!({ "domain_suffix": ["corp.example"], "action": "route", "server": "local" })
+        );
+    }
+
+    /// Today nothing can refuse a *name*: a person's rule cannot reject (that is for the built-in set), and the
+    /// built-in set refuses a port, not names. So the chain has no name-refusing rule, and the branch of
+    /// `dns_rules` that would write one is not reached by any rule set that can exist. If a built-in rule
+    /// ever refuses names, this fails, and the chain's refusal (no answer, no server) must then be tested.
+    #[test]
+    fn no_rule_that_can_exist_today_refuses_a_name() {
+        for matcher in [
+            RuleMatcher::Domain("blocked.example".into()),
+            RuleMatcher::DomainSuffix("blocked.example".into()),
+        ] {
+            assert!(
+                RoutingRule::user(matcher, RuleAction::Reject, 200).is_err(),
+                "a person's rule must not reject"
+            );
+        }
+        let builtin = dnet_core::builtin_rules::builtin_rules(None);
+        assert!(
+            builtin
+                .iter()
+                .filter(|r| r.action() == RuleAction::Reject)
+                .all(|r| matches!(r.matcher(), RuleMatcher::EncryptedDnsPort)),
+            "the built-in set refuses only the encrypted-name port"
+        );
+        let got = chain(&builtin, None);
+        let refusals: Vec<_> = got.iter().filter(|e| e["action"] == "reject").collect();
+        assert_eq!(
+            refusals.len(),
+            1,
+            "only the closing rule, which refuses other query types"
+        );
+        assert!(refusals[0].get("domain").is_none() && refusals[0].get("domain_suffix").is_none());
+    }
+
+    #[test]
+    fn rules_that_are_not_about_names_or_that_tunnel_add_nothing_to_the_chain() {
+        let rules = [
+            rule(
+                RuleMatcher::Domain("through.example".into()),
+                RuleAction::Tunnel,
+                200,
+            ),
+            rule(
+                RuleMatcher::DomainSuffix("through.example".into()),
+                RuleAction::Tunnel,
+                201,
+            ),
+            rule(
+                RuleMatcher::IpCidr(dnet_core::rule::IpCidr::parse("198.51.100.0/24").unwrap()),
+                RuleAction::Bypass,
+                202,
+            ),
+            rule(
+                RuleMatcher::Application(r"C:\Apps\a.exe".into()),
+                RuleAction::Bypass,
+                203,
+            ),
+        ];
+        assert_eq!(chain(&rules, None), [fakeip(), refused_others()]);
+    }
+
+    #[test]
+    fn the_chain_follows_precedence_and_the_stand_in_rules_always_come_last() {
+        let rules = [
+            rule(
+                RuleMatcher::Domain("late.example".into()),
+                RuleAction::Bypass,
+                300,
+            ),
+            rule(
+                RuleMatcher::Domain("early.example".into()),
+                RuleAction::Bypass,
+                100,
+            ),
+            rule(
+                RuleMatcher::DomainSuffix("mid.example".into()),
+                RuleAction::Bypass,
+                200,
+            ),
+        ];
+        let got = chain(&rules, Some("9.9.9.9"));
+        assert_eq!(got.len(), 5);
+        assert_eq!(got[0]["domain"], json!(["early.example"]));
+        assert_eq!(got[1]["domain_suffix"], json!(["mid.example"]));
+        assert_eq!(got[2]["domain"], json!(["late.example"]));
+        assert_eq!(got[3], fakeip());
+        assert_eq!(got[4], through_tunnel("9.9.9.9"));
+    }
+
+    #[test]
+    fn every_rule_in_the_chain_has_an_action_and_only_two_kinds_exist() {
+        let mut rules = dnet_core::builtin_rules::builtin_rules(None);
+        rules.push(rule(
+            RuleMatcher::Domain("a.example".into()),
+            RuleAction::Bypass,
+            900,
+        ));
+        for resolver in [None, Some("1.1.1.1")] {
+            for entry in chain(&rules, resolver) {
+                let action = entry["action"].as_str().expect("an action");
+                assert!(["route", "reject"].contains(&action), "{entry}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_tunnel_resolver_given_is_the_one_used() {
+        for server in ["1.1.1.1", "9.9.9.9", "tunnel-dns"] {
+            assert_eq!(chain(&[], Some(server))[1], through_tunnel(server));
+        }
+    }
+
+    #[test]
+    fn a_domain_is_written_in_its_normal_form() {
+        let rules = [rule(
+            RuleMatcher::Domain("Example.COM".into()),
+            RuleAction::Bypass,
+            200,
+        )];
+        assert_eq!(chain(&rules, None)[0]["domain"], json!(["example.com"]));
+    }
 }

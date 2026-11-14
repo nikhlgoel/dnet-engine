@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The daemon's in-memory domain store.
 //!
 //! Holds the endpoints, profiles, and rules the daemon knows about, and projects them
@@ -1089,5 +1090,80 @@ mod tests {
             .unwrap()
             .iter()
             .all(|r| r["id"].is_string()));
+    }
+}
+
+/// `GetSession` has no session to show until a connect has made one, and a client reads that as exactly "none".
+#[cfg(test)]
+mod session_reply_tests {
+    use super::*;
+
+    #[test]
+    fn with_no_session_the_reply_is_an_object_with_a_null_session_and_nothing_else() {
+        let reply: serde_json::Value =
+            serde_json::from_str(&DomainState::seeded().session_json()).expect("it is JSON");
+        let object = reply.as_object().expect("an object");
+        assert_eq!(object.len(), 1, "{reply}");
+        assert!(object["session"].is_null(), "{reply}");
+    }
+}
+
+/// What a client is told about each profile: its kind, tier and carrier, spelled the way the contract spells them.
+#[cfg(test)]
+mod profile_reply_tests {
+    use super::*;
+
+    fn listed() -> Vec<serde_json::Value> {
+        let reply: serde_json::Value =
+            serde_json::from_str(&DomainState::seeded().profiles_json()).expect("JSON");
+        reply["profiles"].as_array().expect("a list").clone()
+    }
+
+    fn profile(id: &str) -> serde_json::Value {
+        listed()
+            .into_iter()
+            .find(|p| p["id"] == id)
+            .unwrap_or_else(|| panic!("no profile {id}"))
+    }
+
+    #[test]
+    fn each_profile_is_listed_with_its_kind_and_carrier_as_the_contract_spells_them() {
+        let hy2 = profile("hy2-default");
+        assert_eq!(hy2["kind"], "Hysteria2");
+        assert_eq!(hy2["carrier"], "Udp");
+        let reality = profile("reality-default");
+        assert_eq!(reality["kind"], "VlessReality");
+        assert_eq!(reality["carrier"], "Tcp");
+        let awg = profile("awg-default");
+        assert_eq!(awg["kind"], "AmneziaWg");
+        assert_eq!(awg["carrier"], "Udp");
+    }
+
+    /// Tier comes from measurement, never from the kind of profile: nothing has been measured, so every profile is
+    /// Tier 2 and a client is never told otherwise.
+    #[test]
+    fn every_profile_is_tier_two_until_a_survival_result_is_recorded() {
+        let profiles = listed();
+        assert_eq!(profiles.len(), 3);
+        for p in &profiles {
+            assert_eq!(p["tier"], "Tier2", "{p}");
+        }
+    }
+
+    #[test]
+    fn the_names_are_plain_words_a_client_can_match_on() {
+        for name in ["AmneziaWg", "Hysteria2", "VlessReality"] {
+            assert!(listed().iter().any(|p| p["kind"] == name), "{name}");
+        }
+        for p in listed() {
+            for field in ["kind", "tier", "carrier"] {
+                let text = p[field].as_str().expect("a string");
+                assert!(!text.is_empty() && text != "xyzzy", "{field}: {p}");
+                assert!(
+                    text.chars().all(|c| c.is_ascii_alphanumeric()),
+                    "{field}: {text}"
+                );
+            }
+        }
     }
 }

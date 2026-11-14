@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The window may give these commands and no others (ADR-0007 R4). Declaring them here makes each one a
 //! permission the capability file must grant by name, so a command added to `main.rs` and forgotten here is
 //! refused by the framework instead of being quietly available to the web view.
@@ -12,8 +13,13 @@ const COMMANDS: &[&str] = &[
     "remove_endpoint",
     "prepare_server",
     "finish_server",
+    "request_join",
+    "accept_invite",
+    "prepare_device",
+    "finish_device",
     "set_endpoint_enabled",
     "list_profiles",
+    "list_components",
     "set_brutal",
     "list_rules",
     "add_rule",
@@ -22,8 +28,16 @@ const COMMANDS: &[&str] = &[
     "reject_change",
     "approve_change",
     "set_encrypted_dns",
+    "get_guard",
+    "set_kill_switch",
+    "release_guard",
     "check_updates",
     "open_login_page",
+    "window_minimize",
+    "window_toggle_maximize",
+    "window_start_drag",
+    "window_close",
+    "window_ready",
 ];
 
 fn main() {

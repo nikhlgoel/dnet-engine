@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Tests of the configuration transactions, against a state file and a secret store that can be made
 //! to fail. What each one pins is that a failure at any step leaves the store, the file and the
 //! sealed credentials exactly as they were.
@@ -667,6 +668,40 @@ fn removing_a_built_in_or_an_unknown_rule_is_refused() {
     assert!(rig.file_bytes().is_none());
 }
 
+/// Every built-in rule is refused with the reason that is about built-in rules (what they keep working), not with
+/// whatever a deeper check says, and none is touched.
+#[test]
+fn every_built_in_rule_is_refused_with_its_own_reason_and_stays_where_it_is() {
+    let mut rig = Rig::new();
+    let before: Vec<_> = rig.state.rules().iter().map(|r| r.id()).collect();
+    let builtin: Vec<_> = rig
+        .state
+        .rules()
+        .iter()
+        .filter(|r| r.is_builtin())
+        .map(|r| r.id())
+        .collect();
+    assert!(
+        builtin.len() >= 4,
+        "the default set has several built-in rules"
+    );
+    for id in builtin {
+        let error = rig
+            .configurator
+            .remove_rule(&mut rig.state, id)
+            .unwrap_err();
+        let reason = refused(&error);
+        assert!(
+            reason.contains("built-in rule cannot be removed"),
+            "{reason}"
+        );
+        assert!(reason.contains("keeps name lookups"), "{reason}");
+    }
+    let after: Vec<_> = rig.state.rules().iter().map(|r| r.id()).collect();
+    assert_eq!(after, before, "no rule was touched");
+    assert!(rig.file_bytes().is_none(), "nothing was saved");
+}
+
 #[test]
 fn a_rule_that_cannot_be_saved_is_not_kept() {
     let mut rig = Rig::new();
@@ -700,6 +735,97 @@ fn there_is_a_limit_to_how_many_rules_a_person_adds() {
             &mut rig.state,
             RuleMatcher::Domain("one-more.example.com".into()),
             RuleAction::Tunnel,
+        )
+        .unwrap_err();
+    assert!(refused(&error).contains("at most"), "{error:?}");
+}
+
+// ------------------------------------------------------------------ checked before it is held (T160)
+
+/// A change that redirects traffic is checked before anyone is asked to approve it: the check says
+/// exactly what adding would say, and keeps nothing.
+#[test]
+fn checking_an_endpoint_says_what_adding_it_would_say_and_keeps_nothing() {
+    let mut rig = Rig::new();
+    rig.add("first");
+    let (count, bytes, secrets) = (
+        rig.state.endpoints().len(),
+        rig.file_bytes(),
+        rig.secrets.inner.len(),
+    );
+
+    rig.configurator
+        .check_add_endpoint(&rig.state, &new_endpoint("second"))
+        .unwrap();
+    let checked = rig
+        .configurator
+        .check_add_endpoint(&rig.state, &new_endpoint("first"))
+        .unwrap_err();
+    let added = rig
+        .configurator
+        .add_endpoint(&mut rig.state.clone(), &new_endpoint("first"))
+        .unwrap_err();
+    assert_eq!(refused(&checked), refused(&added));
+    assert_eq!(rig.state.endpoints().len(), count);
+    assert_eq!(rig.file_bytes(), bytes);
+    assert_eq!(rig.secrets.inner.len(), secrets);
+}
+
+#[test]
+fn checking_an_endpoint_past_the_most_that_can_be_kept_is_refused() {
+    let mut rig = Rig::new();
+    for n in 0..MAX_ENDPOINTS {
+        rig.add(&format!("e{n}"));
+    }
+    let error = rig
+        .configurator
+        .check_add_endpoint(&rig.state, &new_endpoint("one-too-many"))
+        .unwrap_err();
+    assert!(refused(&error).contains("64"), "{error:?}");
+}
+
+#[test]
+fn checking_a_rule_says_what_adding_it_would_say_and_keeps_nothing() {
+    let rig = Rig::new();
+    let before = rig.state.rules().len();
+    rig.configurator
+        .check_add_rule(
+            &rig.state,
+            &RuleMatcher::Domain("example.com".into()),
+            RuleAction::Bypass,
+        )
+        .unwrap();
+    let program = rig
+        .configurator
+        .check_add_rule(
+            &rig.state,
+            &RuleMatcher::Application(r"C:pp.exe".into()),
+            RuleAction::Bypass,
+        )
+        .unwrap_err();
+    assert!(refused(&program).contains("program"), "{program:?}");
+    assert_eq!(rig.state.rules().len(), before);
+    assert!(rig.file_bytes().is_none());
+}
+
+#[test]
+fn checking_a_rule_past_the_limit_is_refused() {
+    let mut rig = Rig::new();
+    for i in 0..dnet_config::persist::MAX_USER_RULES {
+        rig.configurator
+            .add_rule(
+                &mut rig.state,
+                RuleMatcher::Domain(format!("host{i}.example.com")),
+                RuleAction::Tunnel,
+            )
+            .unwrap();
+    }
+    let error = rig
+        .configurator
+        .check_add_rule(
+            &rig.state,
+            &RuleMatcher::Domain("one-more.example.com".into()),
+            RuleAction::Bypass,
         )
         .unwrap_err();
     assert!(refused(&error).contains("at most"), "{error:?}");

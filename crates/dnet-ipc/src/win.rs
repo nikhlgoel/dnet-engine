@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Windows-specific IPC: building the pipe's security descriptor from SDDL, and
 //! capturing the connecting client's real identity via impersonation.
 //!

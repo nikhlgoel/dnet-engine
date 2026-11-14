@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! `dnetctl` — control the DNet Engine service from a terminal (T127).
 //!
 //! The command-line client for the control pipe: connect, disconnect, status, events. It exists so

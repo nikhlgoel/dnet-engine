@@ -6,6 +6,7 @@ import {
   portRows,
   sshCommand,
   wrapForPaste,
+  isIpv4AddressText,
   isPlausibleAddress,
   type GuideId,
 } from '../src/lib/guide';
@@ -120,6 +121,27 @@ describe('what the window builds for the person to paste', () => {
   it('refuses a script that could end the paste early', () => {
     expect(() => wrapForPaste('echo 1\nDNET_SETUP_EOF\nrm -rf x\n')).toThrow();
     expect(() => wrapForPaste('echo DNET_SETUP_EOF # inside a line is fine')).not.toThrow();
+  });
+
+  it('saves a server only under an IPv4 address, never a name or an IPv6 address', () => {
+    for (const ok of ['203.0.113.10', '10.0.0.5', '255.255.255.255', '0.0.0.0']) {
+      expect(isIpv4AddressText(ok), ok).toBe(true);
+    }
+    for (const bad of [
+      '',
+      'server.example.com',
+      '203.0.113',
+      '203.0.113.256',
+      '2001:db8::7',
+      '::1',
+      'a b',
+      '203.0.113.10:22',
+      '1.2.3.4.5',
+      ' 1.2.3.4',
+      'x;id',
+    ]) {
+      expect(isIpv4AddressText(bad), bad).toBe(false);
+    }
   });
 
   it('builds the connection command only from an address that could be a server', () => {

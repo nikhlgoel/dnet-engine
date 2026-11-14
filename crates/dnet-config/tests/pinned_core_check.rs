@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The generated configuration must be accepted by the **pinned primary-core binary**, not
 //! merely match our reading of its documentation.
 //!

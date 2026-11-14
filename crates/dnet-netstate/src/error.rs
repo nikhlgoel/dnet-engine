@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Network-state errors.
 
 /// A failure while mutating routes, DNS, or adapters.

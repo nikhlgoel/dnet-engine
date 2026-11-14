@@ -2,6 +2,7 @@
   import { onMount, tick } from 'svelte';
   import { AppState } from './lib/app.svelte';
   import type { Bridge } from './lib/bridge';
+  import type { WindowChrome } from './lib/chrome';
   import { chips as chipsOf, freshness, strip as cellsOf } from './lib/describe';
   import { en } from './lib/messages';
   import About from './lib/About.svelte';
@@ -12,15 +13,19 @@
   import Scene from './components/Scene.svelte';
   import Strip from './components/Strip.svelte';
   import Switcher from './components/Switcher.svelte';
+  import TitleBar from './components/TitleBar.svelte';
   import Wordmark from './components/Wordmark.svelte';
   import Activity from './views/Activity.svelte';
   import Endpoints from './views/Endpoints.svelte';
   import FirstRun from './views/FirstRun.svelte';
+  import Invite from './views/Invite.svelte';
+  import Join from './views/Join.svelte';
   import Rules from './views/Rules.svelte';
   import Settings from './views/Settings.svelte';
   import Wizard from './views/Wizard.svelte';
 
-  let { bridge }: { bridge: Bridge } = $props();
+  /** The window's own frame, when there is a window to draw it for; null in a browser tab. */
+  let { bridge, chrome = null }: { bridge: Bridge; chrome?: WindowChrome | null } = $props();
 
   // The bridge is chosen once, before the window exists; it does not change for the life of the page.
   // svelte-ignore state_referenced_locally
@@ -114,7 +119,10 @@
 
 <svelte:window onkeydown={onWindowKey} />
 
-<div class="frame">
+<div class="frame" class:framed={chrome !== null}>
+  {#if chrome}
+    <TitleBar {chrome} />
+  {/if}
   <div class="app" data-lamp={lampKey}>
     <header class="top">
       <button type="button" class="plate" aria-label={t.nav.about} onclick={() => app.go('about')}>
@@ -160,6 +168,10 @@
         <FirstRun {app} />
       {:else if app.view === 'wizard'}
         <Wizard {app} />
+      {:else if app.view === 'join'}
+        <Join {app} />
+      {:else if app.view === 'invite'}
+        <Invite {app} />
       {/if}
     </main>
 
@@ -172,7 +184,11 @@
       <div></div>
     {/if}
 
-    <Dock current={app.view} onnavigate={(view) => app.go(view)} />
+    <!-- The pages that belong to Servers keep it lit, so a person always knows where they are. -->
+    <Dock
+      current={app.view === 'wizard' || app.view === 'join' || app.view === 'invite' ? 'endpoints' : app.view}
+      onnavigate={(view) => app.go(view)}
+    />
   </div>
 </div>
 
@@ -197,8 +213,15 @@
 <style>
   .frame {
     container-type: inline-size;
+    display: flex;
+    flex-direction: column;
     height: 100vh;
     min-width: 560px;
+  }
+
+  /* With no system frame, the page draws the window's edge: one line, like the system's own. */
+  .frame.framed {
+    border: 1px solid var(--c-line);
   }
 
   .app {
@@ -206,7 +229,7 @@
     isolation: isolate;
     display: grid;
     grid-template-rows: auto 1fr auto auto;
-    height: 100%;
+    flex: 1;
     min-height: 0;
     overflow: hidden;
     --ambient: var(--c-text-3);

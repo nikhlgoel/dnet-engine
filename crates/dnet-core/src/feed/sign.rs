@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T066c — signing: the publisher's half of the feed (ADR-0002 §3).
 //!
 //! The client half (`envelope`, `state`) verifies; this builds what it verifies. Both live in the same

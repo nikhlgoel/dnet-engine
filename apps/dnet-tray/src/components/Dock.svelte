@@ -14,13 +14,15 @@
   ];
 </script>
 
-<!-- A real <nav> of links: tab order is left to right, the current page is aria-current, Ctrl+K duplicates it. -->
+<!-- A real <nav> of links: tab order is left to right, the current page is aria-current, Ctrl+K duplicates it.
+     Each link carries its own name: in a narrow window its words are hidden and only the icon shows. -->
 <div class="dock">
   <nav aria-label={en.nav.sections}>
     {#each stations as station, i (station.view)}
       {#if i > 0}<i class="sep"></i>{/if}
       <a
         href={`#${station.view}`}
+        aria-label={station.label}
         aria-current={current === station.view ? 'page' : undefined}
         onclick={(event) => {
           event.preventDefault();

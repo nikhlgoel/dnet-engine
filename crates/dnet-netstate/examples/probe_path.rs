@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T134, T136 — measure each usable network path: the first hop, and optionally your own endpoint.
 //!
 //! Read-only. For every usable physical adapter it sends one echo to that adapter's gateway, and,

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T135 — choosing how to measure a path, and what a probe's silence means.
 //!
 //! There is no probe that works against every endpoint on every network, and measuring wrongly is

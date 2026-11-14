@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The seam between a provisioning job and a cloud provider.
 //!
 //! Everything the job asks of a provider is a method here, so the whole stage machine, the ledger and the

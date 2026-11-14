@@ -1,9 +1,10 @@
 <script lang="ts">
+  import DisconnectNote from '../components/DisconnectNote.svelte';
   import { onMount } from 'svelte';
   import type { AppState } from '../lib/app.svelte';
   import Consent from '../components/Consent.svelte';
   import { brutalWarning, disclosure, en } from '../lib/messages';
-  import type { ProfileView } from '../lib/model';
+  import type { GuardView, ProfileView } from '../lib/model';
 
   let { app }: { app: AppState } = $props();
 
@@ -16,6 +17,11 @@
   let error = $state<string | null>(null);
   let checking = $state(false);
   let result = $state<string | null>(null);
+
+  let guard = $state<GuardView | null>(null);
+  let guardNote = $state<string | null>(null);
+  let guardError = $state<string | null>(null);
+  let releasing = $state(false);
 
   const brutal = en.consent.brutal;
   let hy2 = $state<ProfileView | null>(null);
@@ -34,6 +40,12 @@
     } catch (e) {
       // Not knowing the setting is not the same as it being on: say so, and do not offer to change it.
       error = app.reason(e);
+    }
+    try {
+      guard = await app.bridge.guard();
+    } catch (e) {
+      // Not knowing is not the same as it being off: nothing about the kill switch is shown or offered.
+      guardError = app.reason(e);
     }
     try {
       hy2 = (await app.bridge.profiles()).find((p) => p.kind === 'Hysteria2') ?? null;
@@ -110,6 +122,36 @@
     }
   }
 
+  /** The switch stays where it was until the service has answered, and then shows what the service says it is. */
+  async function onKillSwitch(event: Event): Promise<void> {
+    const box = event.currentTarget as HTMLInputElement;
+    const wants = box.checked;
+    box.checked = !wants;
+    const outcome = await app.bridge.setKillSwitch(wants);
+    guardError = outcome.ok ? null : outcome.reason;
+    if (!outcome.ok) return;
+    guardNote = outcome.effect ?? null;
+    await refreshGuard();
+  }
+
+  async function releaseGuard(): Promise<void> {
+    releasing = true;
+    const outcome = await app.bridge.releaseGuard();
+    releasing = false;
+    guardError = outcome.ok ? null : outcome.reason;
+    if (!outcome.ok) return;
+    guardNote = outcome.effect ?? null;
+    await refreshGuard();
+  }
+
+  async function refreshGuard(): Promise<void> {
+    try {
+      guard = await app.bridge.guard();
+    } catch (e) {
+      guardError = app.reason(e);
+    }
+  }
+
   async function checkNow(): Promise<void> {
     checking = true;
     result = null;
@@ -122,32 +164,46 @@
 <section class="view" aria-labelledby="settings-title">
   <h1 id="settings-title">{t.title}</h1>
 
-  <h2 class="cat">{t.catLook}</h2>
-  <fieldset class="card">
-    <legend>{t.theme}</legend>
-    <label><input type="radio" name="theme" checked={app.theme === 'system'} onchange={() => app.setTheme('system')} /> {t.themeSystem}</label>
-    <label><input type="radio" name="theme" checked={app.theme === 'dark'} onchange={() => app.setTheme('dark')} /> {t.themeDark}</label>
-    <label><input type="radio" name="theme" checked={app.theme === 'light'} onchange={() => app.setTheme('light')} /> {t.themeLight}</label>
-  </fieldset>
+  <!-- Said once, at the top, instead of inside every group that cannot be changed while connected. -->
+  {#if connected}
+    <DisconnectNote {app} />
+  {/if}
 
-  <div class="card">
-    <label>
-      <input type="checkbox" checked={app.reduceMotion} onchange={(e) => app.setReduceMotion(e.currentTarget.checked)} />
-      {t.motion}
-    </label>
-    <p class="help">{t.motionHelp}</p>
+  <h2 class="cat">{t.catLook}</h2>
+  <div class="panel">
+    <div class="row" role="radiogroup" aria-labelledby="theme-title">
+      <div class="text"><span class="title" id="theme-title">{t.theme}</span></div>
+      <div class="segmented control">
+        <label><input type="radio" name="theme" checked={app.theme === 'system'} onchange={() => app.setTheme('system')} /> {t.themeSystem}</label>
+        <label><input type="radio" name="theme" checked={app.theme === 'dark'} onchange={() => app.setTheme('dark')} /> {t.themeDark}</label>
+        <label><input type="radio" name="theme" checked={app.theme === 'light'} onchange={() => app.setTheme('light')} /> {t.themeLight}</label>
+      </div>
+    </div>
+    <div class="row">
+      <div class="text">
+        <label class="title" for="motion">{t.motion}</label>
+        <p class="desc" id="motion-help">{t.motionHelp}</p>
+      </div>
+      <input
+        id="motion"
+        class="toggle"
+        type="checkbox"
+        aria-describedby="motion-help"
+        checked={app.reduceMotion}
+        onchange={(e) => app.setReduceMotion(e.currentTarget.checked)}
+      />
+    </div>
   </div>
 
   <h2 class="cat">{t.catPrivacy}</h2>
-  <div class="card">
-    <label>
-      <input type="checkbox" role="switch" checked={block} disabled={locked} {onchange} />
-      {dns.on}
-    </label>
-    <p class="help">{block ? dns.onHelp : dns.offHelp}</p>
-    {#if connected}
-      <p class="help">{en.errors.disconnectFirst}</p>
-    {/if}
+  <div class="panel">
+    <div class="row">
+      <div class="text">
+        <label class="title" for="dns-block">{dns.on}</label>
+        <p class="desc" id="dns-help">{block ? dns.onHelp : dns.offHelp}</p>
+      </div>
+      <input id="dns-block" type="checkbox" role="switch" aria-describedby="dns-help" checked={block} disabled={locked} {onchange} />
+    </div>
     {#if consequence}
       <p class="notice">{consequence}</p>
     {/if}
@@ -156,27 +212,60 @@
     {/if}
   </div>
 
+  {#if guard?.supported}
+    <h2 class="cat">{t.catGuard}</h2>
+    <div class="panel">
+      <div class="row">
+        <div class="text">
+          <label class="title" for="kill-switch">{t.killSwitch}</label>
+          <p class="desc" id="kill-help">{guard.killSwitch ? t.killSwitchOnHelp : t.killSwitchOffHelp}</p>
+        </div>
+        <input id="kill-switch" type="checkbox" role="switch" aria-describedby="kill-help" checked={guard.killSwitch} onchange={onKillSwitch} />
+      </div>
+      <!-- The way out is offered whenever a guard is in or cannot be ruled out: not knowing is no reason to hide it. -->
+      {#if guard.guardIn !== false}
+        <div class="row">
+          <div class="text"><p class="desc">{guard.guardIn === true ? t.guardIn : t.guardUnknown}</p></div>
+          <button type="button" class="btn control" disabled={releasing} onclick={releaseGuard}>{t.releaseGuard}</button>
+        </div>
+      {/if}
+      {#if guardNote}
+        <p class="desc result" role="status">{guardNote}</p>
+      {/if}
+      {#if guardError}
+        <p class="notice" role="alert">{guardError}</p>
+      {/if}
+    </div>
+  {/if}
+
   {#if hy2 || brutalError}
     <h2 class="cat">{t.speedMode}</h2>
-    <div class="card">
+    <div class="panel">
       {#if hy2}
-        <label>
-          <input type="checkbox" role="switch" checked={hy2.brutal} disabled={connected} onchange={onBrutalChange} />
-          {t.speedMode}
-        </label>
-        <p class="help">{hy2.brutal ? t.speedModeOnHelp : t.speedModeHelp}</p>
+        <div class="row">
+          <div class="text">
+            <label class="title" for="speed-mode">{t.speedMode}</label>
+            <p class="desc" id="speed-help">{hy2.brutal ? t.speedModeOnHelp : t.speedModeHelp}</p>
+          </div>
+          <input
+            id="speed-mode"
+            type="checkbox"
+            role="switch"
+            aria-describedby="speed-help"
+            checked={hy2.brutal}
+            disabled={connected}
+            onchange={onBrutalChange}
+          />
+        </div>
         {#if !hy2.brutal}
-          <label>
-            {t.up}
-            <input type="text" inputmode="numeric" autocomplete="off" bind:value={up} disabled={connected} />
-          </label>
-          <label>
-            {t.down}
-            <input type="text" inputmode="numeric" autocomplete="off" bind:value={down} disabled={connected} />
-          </label>
-        {/if}
-        {#if connected}
-          <p class="help">{en.errors.disconnectFirst}</p>
+          <div class="row">
+            <label class="title" for="speed-up">{t.up}</label>
+            <input id="speed-up" class="input short" type="text" inputmode="numeric" autocomplete="off" bind:value={up} disabled={connected} />
+          </div>
+          <div class="row">
+            <label class="title" for="speed-down">{t.down}</label>
+            <input id="speed-down" class="input short" type="text" inputmode="numeric" autocomplete="off" bind:value={down} disabled={connected} />
+          </div>
         {/if}
       {/if}
       {#if brutalError}
@@ -187,13 +276,13 @@
 
   {#if app.bridge.capabilities.updates}
     <h2 class="cat">{t.updates}</h2>
-    <div class="card">
-      <p class="help">{t.updatesHelp}</p>
-      <div>
-        <button type="button" class="btn" disabled={checking} onclick={checkNow}>{checking ? t.checking : t.checkNow}</button>
+    <div class="panel">
+      <div class="row">
+        <div class="text"><p class="desc">{t.updatesHelp}</p></div>
+        <button type="button" class="btn control" disabled={checking} onclick={checkNow}>{checking ? t.checking : t.checkNow}</button>
       </div>
       {#if result === 'tunnel' || result === 'physical'}
-        <p class="help" role="status">
+        <p class="desc result" role="status">
           {result === 'physical' ? t.checkedPhysical : t.checkedTunnel}
         </p>
       {:else if result}
@@ -230,30 +319,7 @@
 />
 
 <style>
-  fieldset {
-    border: 0;
-    margin: 0;
-  }
-
-  legend {
-    font-weight: 600;
-    margin-bottom: var(--s-2);
-  }
-
-  label {
-    display: flex;
-    gap: var(--s-3);
-    align-items: center;
-    min-height: var(--hit);
-  }
-
-  h2 {
-    font-size: var(--fs-lg);
-    font-weight: 600;
-  }
-
-  .help {
-    color: var(--c-text-2);
-    font-size: var(--fs-sm);
+  .result {
+    padding: var(--s-3) var(--s-4);
   }
 </style>

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T132 — the version of the control protocol, and the rule for when two ends can talk.
 //!
 //! The service and the programs that drive it (`dnetctl` now, the tray app later, anything else

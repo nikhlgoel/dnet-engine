@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Prints the setup script for a given pins file and processor, for checking it by hand on a Linux machine.
 //! `cargo run -p dnet-provision --example dump_script -- <server-pins.json> amd64|arm64`
 use dnet_config::amneziawg::ObfuscationParams;
