@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The daemon's in-memory domain store.
 //!
 //! Holds the endpoints, profiles, and rules the daemon knows about, and projects them

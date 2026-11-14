@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T144 — what the interface needs to show about the networks and the session, and nothing it would
 //! have to invent.
 //!

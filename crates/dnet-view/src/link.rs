@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T100 — the way a request reaches the service.
 //!
 //! [`Link`] is one request, one reply. The commands (`bridge`) are written against it, so they are tested with

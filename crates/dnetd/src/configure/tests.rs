@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Tests of the configuration transactions, against a state file and a secret store that can be made
 //! to fail. What each one pins is that a failure at any step leaves the store, the file and the
 //! sealed credentials exactly as they were.

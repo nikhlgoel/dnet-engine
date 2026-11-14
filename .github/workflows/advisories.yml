@@ -15,6 +15,7 @@ on:
       - "apps/dnet-tray/pnpm-lock.yaml"
       - "apps/dnet-tray/pnpm-workspace.yaml"
       - "crates/xtask/src/fetch_vendor.rs"
+      - "deny.toml"
   pull_request:
     paths:
       - "Cargo.lock"
@@ -22,6 +23,7 @@ on:
       - "apps/dnet-tray/pnpm-lock.yaml"
       - "apps/dnet-tray/pnpm-workspace.yaml"
       - "crates/xtask/src/fetch_vendor.rs"
+      - "deny.toml"
   workflow_dispatch:
 
 permissions:
@@ -35,13 +37,19 @@ jobs:
       - uses: actions/checkout@v6
       - uses: taiki-e/install-action@67339d17681acb16df9555b4ce5c56459b4266d4 # cargo-audit
         with:
-          tool: cargo-audit
+          tool: cargo-audit,cargo-deny
       # A vulnerability fails the job. A warning (unmaintained, unsound) does not, but is printed: the ones accepted so
       # far are listed in docs/security/dependencies-and-advisories.md with the reason, and a new one shows here.
       - name: The workspace
         run: cargo audit
       - name: The window shell (its own lock file)
         run: cargo audit --file apps/dnet-tray/src-tauri/Cargo.lock
+      # Every dependency's licence is one this GPL-3.0-or-later project may combine with, and every dependency
+      # comes from crates.io (deny.toml). A new licence or a git dependency fails here.
+      - name: Licences and sources, the workspace
+        run: cargo deny check licenses sources
+      - name: Licences and sources, the window shell
+        run: cargo deny --manifest-path apps/dnet-tray/src-tauri/Cargo.toml check licenses sources
 
   window:
     name: Window dependencies

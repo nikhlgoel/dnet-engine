@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T027 — `FailoverTier`: whether established connections survive a change of network
 //! interface (data-model §2.1, research.md R9, FR-016a).
 //!

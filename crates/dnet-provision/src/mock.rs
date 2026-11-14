@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! A provider that creates nothing real, for the contract tests (PRV-01…PRV-09) and the unit tests.
 //!
 //! "No test creates real cloud resources" (T086) is kept by construction: this is the only provider the

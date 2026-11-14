@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! `EndpointHealth` state machine (data-model §1.1).
 //!
 //! Pure logic: callers pass in the probe outcome and the time, and this module does

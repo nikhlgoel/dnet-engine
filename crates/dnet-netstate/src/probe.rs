@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T134 — measuring one path: how long a connection to the user's own endpoint takes through it.
 //!
 //! The failover logic (T082) decides on smoothed quality (T081), and quality needs samples. A path

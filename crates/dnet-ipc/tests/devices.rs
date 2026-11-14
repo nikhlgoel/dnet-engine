@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T188 — adding a friend's device to the person's own server (contracts/ipc-protocol.md IPC-27).
 //!
 //! | ID     | Assertion |

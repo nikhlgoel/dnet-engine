@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T071 — the first-run disclosure and the single-action opt-out for the encrypted-DNS override
 //! (FR-025a).
 //!

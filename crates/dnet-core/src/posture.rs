@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Fail-closed routing posture — the kill switch (data-model §3, Cross-cutting §5).
 //!
 //! The system is **never** permitted to send would-be-tunnelled traffic to the raw

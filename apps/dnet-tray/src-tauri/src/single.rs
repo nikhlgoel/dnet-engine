@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T101 — one tray per person, and a window when the person starts the program (the "no single-instance guard" gap).
 //!
 //! **Why.** The program has no window at login (R2), which is right for the copy the login starts, but it meant that

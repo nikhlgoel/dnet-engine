@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Named-pipe protocol, framing, and the authorization boundary.
 //!
 //! This crate is the privilege boundary between the unprivileged tray and the

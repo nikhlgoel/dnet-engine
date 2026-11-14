@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! ADR-0008 — the session: one endpoint of the primary core that stays put while the carrier under it is
 //! replaced.
 //!

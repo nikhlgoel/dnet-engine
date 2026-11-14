@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T124 — a state file that only SYSTEM and Administrators control.
 //!
 //! The undo journal (T037), the persisted configuration and the protected secrets (T124) all live

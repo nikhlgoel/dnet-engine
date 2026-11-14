@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T125 — an event subscription over the real control pipe.
 //!
 //! The in-memory tests in `payloads.rs` prove the stream logic; this proves the real listener

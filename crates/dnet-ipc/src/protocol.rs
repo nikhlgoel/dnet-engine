@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Request and response types, the error model, and wire-level validators.
 //!
 //! Contract: `specs/001-network-resilience-client/contracts/ipc-protocol.md`.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T144 — print the Wi-Fi network each wireless adapter is connected to, as the service would.
 //!
 //! Read-only and local: it asks the system's WLAN service and prints the answer, one adapter per

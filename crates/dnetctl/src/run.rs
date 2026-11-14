@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T127 — doing what was asked, and saying what happened.
 //!
 //! Generic over how the daemon is reached ([`Connector`]) and where output goes ([`Sink`]), so

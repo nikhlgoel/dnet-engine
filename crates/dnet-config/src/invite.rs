@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T188 — an invite: what the owner of a server sends a friend, so the friend's computer can use that server
 //! with a key of its own.
 //!
@@ -30,6 +31,15 @@ pub const PREFIX: &str = "DNET-INVITE-1:";
 
 /// The most an invite may be, as text: the largest credentials, grown by base64, with room for the envelope.
 pub const MAX_INVITE_LEN: usize = 32 * 1024;
+
+/// The most lines a wrapped invite is followed over. Every line gives one more reading and every reading is decoded,
+/// so without a limit a paste of tens of thousands of one-letter lines costs the square of its size. The largest
+/// invite, wrapped as narrowly as 32 characters a line, is exactly this many lines; nothing real is narrower.
+const MAX_TOKEN_LINES: usize = MAX_INVITE_LEN / 32;
+const _: () = assert!(
+    MAX_TOKEN_LINES * 32 >= MAX_INVITE_LEN,
+    "the cap must admit the largest invite wrapped at 32 characters"
+);
 
 /// The most pasted text that is looked at for an invite at all (an invite and some words around it).
 pub const MAX_PASTE_LEN: usize = 64 * 1024;
@@ -331,8 +341,8 @@ impl Invite {
 /// runs over the base64url characters to the end of that line; the lines straight after it that hold nothing but
 /// those characters may be more of it (a message app may wrap a long token), and a blank line, or a line with
 /// anything else in it, ends it. Each further line gives a longer reading. Nothing is taken past
-/// `MAX_INVITE_LEN`: a longer token is not an invite, and a hostile paste of thousands of one-letter lines must not
-/// cost more than that.
+/// `MAX_INVITE_LEN` or over more than `MAX_TOKEN_LINES` lines: a longer token is not an invite, and a hostile paste
+/// of thousands of one-letter lines must not cost more than that.
 fn tokens_in(pasted: &str) -> Option<(String, Vec<usize>)> {
     let at = pasted.find(PREFIX)?;
     let is_token_char = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
@@ -352,7 +362,7 @@ fn tokens_in(pasted: &str) -> Option<(String, Vec<usize>)> {
             if line.is_empty() || !line.chars().all(is_token_char) {
                 break;
             }
-            if text.len() + line.len() > MAX_INVITE_LEN {
+            if text.len() + line.len() > MAX_INVITE_LEN || ends.len() >= MAX_TOKEN_LINES {
                 break;
             }
             text.push_str(line);
@@ -585,6 +595,35 @@ mod tests {
         let (text, ends) = tokens_in(&hostile).unwrap();
         assert!(text.len() <= MAX_INVITE_LEN);
         assert!(ends.windows(2).all(|w| w[0] < w[1]));
+        // The bound that matters is the work, not the clock: every reading is decoded, so the number of readings
+        // is capped. Without the cap this paste gave 30,000 readings of up to 32 KiB each (seconds of work in the
+        // service, found when a slow CI machine crossed the five seconds above).
+        assert!(ends.len() <= MAX_TOKEN_LINES, "{} readings", ends.len());
+    }
+
+    /// The cap on wrapped lines is far above what a real invite needs: the largest invite there can be, wrapped as
+    /// narrowly as a message app would, still fits, and is read.
+    #[test]
+    fn a_real_invite_wrapped_into_short_lines_is_still_read() {
+        let invite = invite().encode().unwrap();
+        let body = invite.strip_prefix(PREFIX).unwrap();
+        let wrapped: Vec<&str> = body
+            .as_bytes()
+            .chunks(20)
+            .map(|c| std::str::from_utf8(c).unwrap())
+            .collect();
+        let pasted = format!(
+            "Here it is:
+{PREFIX}{}
+
+thanks",
+            wrapped.join(
+                "
+"
+            )
+        );
+        assert!(wrapped.len() > 4, "the invite spans several lines");
+        assert!(Invite::decode(&pasted).is_ok());
     }
 
     #[test]

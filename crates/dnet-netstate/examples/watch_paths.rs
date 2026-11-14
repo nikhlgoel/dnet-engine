@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T080 — print the machine's paths now, and again after each change to the network.
 //!
 //! Read-only: it changes nothing. Run it, then switch Wi-Fi off and on, plug in a cable, or

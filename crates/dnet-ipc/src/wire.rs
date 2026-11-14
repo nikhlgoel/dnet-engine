@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The event stream's wire form and its fan-out (T125).
 //!
 //! Contract: `specs/001-network-resilience-client/contracts/ipc-protocol.md` §Subscribe. Every

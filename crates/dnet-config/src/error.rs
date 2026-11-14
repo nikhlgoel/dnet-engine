@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Configuration-generation errors.
 
 /// A failure while generating supervised-core configuration.

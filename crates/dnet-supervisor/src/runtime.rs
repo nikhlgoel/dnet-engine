@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The side-effect seam supervision drives.
 //!
 //! Startup and shutdown are sequences of privileged side effects whose *order* is

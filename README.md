@@ -14,12 +14,17 @@ the network under it changes.
 > A one-page summary of what it does and does not do is at
 > [nikhlgoel.github.io/dnet-engine](https://nikhlgoel.github.io/dnet-engine/) (source in [`site/`](site/)).
 
+![The window's Status page: Connected, carried over one network with another on standby, with latency, jitter, loss and stability](docs/images/window-status-simulated.jpg)
+
+*The window's Status page, running against the program's built-in **simulated** service. The networks and every
+number are made up; it shows what the window looks like, not a real connection.*
+
 ## What it is, and what it is not
 
 It is a **tunnel client and a resilience layer**. It does not provide a server, a pool of servers, or
 any account. There is no shared infrastructure and nothing in it is operated by this project: you
-bring an endpoint (or, in a later version, let the program set one up in your own cloud account), and
-the connection goes there.
+bring a server of your own (the window has a step-by-step guide that makes one in your own cloud
+account, without asking for a cloud password or key), and the connection goes there.
 
 It is **not** a firewall bypass, and it is not positioned as one. See [Using it responsibly](#using-it-responsibly).
 
@@ -101,6 +106,21 @@ authoritative, dated delivery status.
 - **Every automatic change says why.** Each change of state carries a plain-language reason, shown to
   the user, so "why did it do that?" never needs a log.
 
+## What it runs on, and getting it
+
+- **Windows 10 version 1809 or later, or Windows 11, 64-bit (x64).** That is what the installer
+  accepts (`installer/winget/`). There is no ARM64 build.
+- **The window uses Microsoft's WebView2**, which Windows 11 includes. On a Windows 10 computer that
+  does not have it, the installer's behaviour has not been tested.
+- **A server of your own.** None is provided; see above.
+- **Administrator rights to install.** The service runs as the system account. Day-to-day use needs none.
+
+**There is no download yet.** No release has been published: the installer builds and has been
+installed and removed on a clean Windows machine, but the checks that need a real network have not
+been run ([Status](#status)). Until a release exists, the only way to run it is to build it, below.
+When one does, it will be on the repository's Releases page with its SHA-256 and a build attestation
+([`docs/release-signing.md`](docs/release-signing.md)).
+
 ## Building and testing
 
 You need Rust (the minimum version is in `Cargo.toml`) and, to run the service, Windows.
@@ -140,6 +160,8 @@ The crates are small and each has one job:
 | `dnet-config` | Writes the configuration each transport process needs |
 | `dnet-netstate` | Interfaces, routes, change notification, undo records |
 | `dnet-probe` | Measures how well each method works on the current network |
+| `dnet-provision` | Setting up the person's own server: the setup scripts, the invite for a friend's device, the list of devices a server keeps |
+| `dnet-etw` | Names the program behind a connection, for rules by program (built and tested; the service does not call it yet) |
 | `dnetctl` | The command-line client |
 | `dnet-view` | What the window is told: replies turned into small checked view-models, and the commands it may give |
 | `apps/dnet-tray` | The tray icon and the window: a native tray, and a Svelte page in a Tauri shell (not part of the Cargo workspace) |

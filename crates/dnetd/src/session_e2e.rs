@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T158 — the whole session, composed, on loopback (ADR-0008).
 //!
 //! Nothing here is a stand-in for the product's own code. The **server** is the configuration the bootstrap

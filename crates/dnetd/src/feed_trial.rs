@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T066a — feed step 8: a trial configuration for every profile, with the proposed values (ADR-0002
 //! §4).
 //!

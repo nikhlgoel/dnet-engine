@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Pinned digests of third-party binary images, shared by `fetch-vendor` and
 //! `verify-vendor`.
 //!

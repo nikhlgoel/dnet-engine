@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T100 — the result of something the person asked for, as the window reads it.
 //!
 //! Success is `{ "ok": true, ..extra }`. Anything else is `{ "ok": false, "reason": <text>, "code": <one of

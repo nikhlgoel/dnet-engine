@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T161 — the lab tool for the guard (ADR-0006 §5a condition 5: nothing goes onto a real machine before a virtual one
 //! has run it). Not part of the product: it applies the guard, reads it back and takes it out, on a machine made to be
 //! broken, and says what it found.

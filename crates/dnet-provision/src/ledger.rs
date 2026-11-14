@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T090 — the ledger of what a job has created, written **before** each create call (PR-07, PR-04 of the
 //! plan's cleanup contract, SC-011).
 //!

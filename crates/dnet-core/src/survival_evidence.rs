@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T175 — HV-07 results as data, not as an edit to code (shrinks the "switching networks drops open
 //! connections" limit without a lab, an admin right or the owner).
 //!

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Resolving the interactive console user, against which mutating IPC requests are
 //! authorized.
 //!

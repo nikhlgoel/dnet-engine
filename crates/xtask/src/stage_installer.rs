@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T114 — `cargo xtask stage-installer`: put everything the installer ships, and nothing else, in
 //! `target/payload`, from which `installer/hooks.nsh` takes it.
 //!

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T070 — encrypted-DNS endpoints are blocked so applications fall back to the system resolver (FR-025).
 //!
 //! Domain rules only work if the product sees the name a program asks for. A browser using DNS over

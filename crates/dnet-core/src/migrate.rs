@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T063 — moving to another endpoint when the active one stops answering (FR-012, SC-008).
 //!
 //! The active endpoint is only abandoned when it is *unusable* (disabled or `Unreachable`). A

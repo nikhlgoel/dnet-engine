@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T100, T101 — the rules the shell lives by, written as plain values so they can be tested without a window.
 //!
 //! The shell is thin glue around the operating system's windows; what it decides is here:

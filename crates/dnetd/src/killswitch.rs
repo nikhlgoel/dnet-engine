@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T161 — the person's choice about the kill switch (ADR-0006 §5a), remembered across restarts.
 //!
 //! Whether the service keeps a firewall guard in while a connection is up is the person's decision, and

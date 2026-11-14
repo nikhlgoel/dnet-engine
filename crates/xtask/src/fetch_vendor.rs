@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T005 — `cargo xtask fetch-vendor`
 //!
 //! Produces the three bundled third-party artifacts under `vendor/`:

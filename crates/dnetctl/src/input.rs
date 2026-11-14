@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Reading the credentials for `add-endpoint`.
 //!
 //! They come from a file the person prepared or from standard input, never from an argument (see

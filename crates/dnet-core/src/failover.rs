@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T082 — which path carries traffic, and when that changes (FR-016, FR-017, FR-018, SC-007).
 //!
 //! Pure logic, like `health.rs`: the caller passes in the paths (with their smoothed quality, see

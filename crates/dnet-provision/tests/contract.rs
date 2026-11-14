@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Contract tests PRV-01 … PRV-09 (contracts/provisioning.md §5), and the guarantees around them.
 //!
 //! Every test runs a whole job through the public API against [`MockProvider`]. **No test creates a real

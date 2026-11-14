@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T006 — `cargo xtask verify-vendor`
 //!
 //! Enforces Constitution licence obligation 2: **Wintun MUST be bundled as the

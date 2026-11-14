@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T150 — setting up the person's own server from the window (contracts/ipc-protocol.md IPC-26).
 //!
 //! | ID     | Assertion |

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T188 — who may use a server: the server's own list of devices, and the scripts that add or take away one.
 //!
 //! A device is a key. The server holds only the public half; the private half is made on the device and never

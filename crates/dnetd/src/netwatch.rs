@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T138 — watching the network while a tunnel is up, and moving it when it should move.
 //!
 //! This is the daemon half of failover. The decisions are made by pure code in `dnet-core`

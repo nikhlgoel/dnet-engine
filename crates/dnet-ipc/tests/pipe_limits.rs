@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The real control pipe under a crowd of clients that say nothing.
 //!
 //! The pipe is open to every signed-in user, and the service stops when its listener ends, so a

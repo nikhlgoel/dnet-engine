@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T060 — noticing that the active profile has been blocked, and what to try next
 //! (FR-005, SC-004).
 //!

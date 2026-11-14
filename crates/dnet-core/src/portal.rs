@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T077 — is a captive portal in the way, and where does its login page live? (FR-026, US6.)
 //!
 //! A captive portal is a network that answers every request with its own page until the person signs

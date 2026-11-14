@@ -1,3 +1,9 @@
+> **ARCHIVED. Do not rely on this document.** It is the original, unverified blueprint. Its citation list does not
+> support its technical claims (finding C13 in [`../Research-Critique.md`](../Research-Critique.md): the references
+> include annual reports, a health blog, and a link to a GitHub issue that appears not to exist). Where it disagrees
+> with the constitution, the Research-Critique or the ADRs, **they** are right. It is kept only so that the review
+> that corrected it can be read against it.
+
 # **Architecture and Systems Engineering Blueprint for a Cross-Platform Network Optimization and Resilience Platform**
 
 ## **The Paradigm of Constrained Networks and Deep Packet Inspection Evasion**

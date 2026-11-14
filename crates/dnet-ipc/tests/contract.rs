@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T022 — IPC contract tests IPC-01 to IPC-09.
 //!
 //! Contract: `specs/001-network-resilience-client/contracts/ipc-protocol.md`.

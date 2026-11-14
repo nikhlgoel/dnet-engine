@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T049 — writing generated configuration with a restricted ACL (CC-08, FR-035).
 //!
 //! The generated primary-core configuration lives under

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T162 — "the machine woke up", from the system's own power messages.
 //!
 //! The service control handler runs on a thread of the system's, not in the async world, and the

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T188 — a friend's device joins someone's server, and the owner invites it (ADR-0008 "Share a server").
 //!
 //! Two halves, both held in memory only:

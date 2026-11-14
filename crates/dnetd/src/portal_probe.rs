@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T077/T078 wiring — asking the network whether a captive portal is in the way.
 //!
 //! `dnet_core::portal` decides what a response means; this makes the request. It fetches the two small

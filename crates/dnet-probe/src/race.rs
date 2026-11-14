@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Racing profiles: one probe per profile, all at once, until the winner rule decides.
 //!
 //! The rule itself is `dnet_core::probe::ProbeRace` (usable throughput, Tier 1 preference with a

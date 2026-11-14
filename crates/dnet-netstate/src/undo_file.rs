@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T037 (OS half) — the durable undo journal on disk.
 //!
 //! `%PROGRAMDATA%\DNet Engine\state\undo.json`, restricted to SYSTEM and Administrators.

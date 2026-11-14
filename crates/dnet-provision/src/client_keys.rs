@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Key material and parameters the *client* makes for a new endpoint (PR-13).
 //!
 //! Each side of a tunnel should hold its own private key and tell the other only the public half. For

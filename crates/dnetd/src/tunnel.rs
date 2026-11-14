@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T126 step 2 — bringing one tunnel up and taking it down, with nothing left half-done.
 //!
 //! The ordered sequences already exist and are tested where they live: `start_cores` (reap, then

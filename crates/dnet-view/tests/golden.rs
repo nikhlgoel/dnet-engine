@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The view-models, pinned by files.
 //!
 //! Each file in `tests/fixtures` is what the window is sent for one situation. The window's own tests

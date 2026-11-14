@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T189 — keeping a shared server's speed fair between the devices that use it (ADR-0008 "Share a server").
 //!
 //! A server has one connection to the internet, and every friend's device uses it at once. When one of them

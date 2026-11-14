@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T021 / SPIKE-O6 — measure ETW attribution cost and coverage. **Instrument v2.**
 //!
 //! **This decides whether per-process routing (FR-023) ships in v1.**

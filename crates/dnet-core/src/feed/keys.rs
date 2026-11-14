@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The keys document (ADR-0002 §5.2): root-signed, and delegates the short-lived keys that
 //! sign the feed.
 

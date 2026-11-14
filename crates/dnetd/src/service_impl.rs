@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! `DnetService` — the daemon's implementation of the IPC `Service` seam.
 //!
 //! Bridges authorized IPC requests to the in-memory domain store. Reached only after

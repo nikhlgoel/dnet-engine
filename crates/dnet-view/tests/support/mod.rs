@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! A link to a service that is not there: it records what was asked and answers from a closure, and the
 //! replies are written the way the service writes them (contract `ipc-protocol.md`), not through this
 //! crate's own code, so a test that passes has agreed with the contract and not only with itself.

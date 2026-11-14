@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Credential material that reaches a supervised core's configuration and nowhere else.
 //!
 //! The primary core reads its credentials (the Hysteria 2 passwords, the VLESS user id, the

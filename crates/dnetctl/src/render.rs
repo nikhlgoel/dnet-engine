@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T127 — what the user is shown.
 //!
 //! Everything the daemon sends is treated as untrusted text on its way to a terminal: a label the

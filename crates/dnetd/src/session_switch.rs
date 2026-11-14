@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T157 — move the session to another carrier and make sure it follows (ADR-0008;
 //! `docs/research/2026-10-31-solutions.md` §1.3 to 1.5).
 //!

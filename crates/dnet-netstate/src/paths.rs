@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T080 — the machine's real ways out, as the failover logic sees them (data-model §3).
 //!
 //! `notify` says that something changed; this says what the machine looks like now, as a list of

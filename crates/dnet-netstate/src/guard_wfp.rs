@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T161 step 2 — the guard in the firewall engine's own terms (ADR-0006 §5a, conditions 2 to 4).
 //!
 //! `dnet_core::guard` says what the guard is: ordered rules, a few narrow permits above a block of everything. This

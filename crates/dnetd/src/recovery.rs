@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T038 — restoration-on-start recovery (data-model §Cross-cutting 1, FR-029, SC-016).
 //!
 //! A crash leaves nobody to run the shutdown path, so at every service start `dnetd`
@@ -444,6 +445,10 @@ pub mod windows_ops {
         #[ignore = "changes the firewall: elevated, in the lab VM only, never on a real computer"]
         fn a_guard_left_by_a_crashed_run_is_kept_at_the_next_start_when_the_switch_is_on_and_removed_when_off(
         ) {
+            if !crate::guard_control::in_lab_vm() {
+                eprintln!("skipped: this changes the firewall and runs only where DNET_LAB_VM=1 (the lab VM)");
+                return;
+            }
             use std::path::Path;
             use std::sync::Arc;
 

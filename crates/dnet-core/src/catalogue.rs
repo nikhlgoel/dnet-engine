@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The bundled profile catalogue: the profile ids and kinds this build defines.
 //!
 //! Profile ids are stable across updates (data-model §2). The profile feed may only propose

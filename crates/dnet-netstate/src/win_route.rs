@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T052 (OS half) — real endpoint host routes via `CreateIpForwardEntry2`.
 //!
 //! Installs a `/32` (or `/128`) route to each resolved endpoint address through the

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The tray menu's words, for every state the window can be in, read from the same fixtures the window is tested
 //! with: what the tray says is what the window says (ADR-0007 R1).
 

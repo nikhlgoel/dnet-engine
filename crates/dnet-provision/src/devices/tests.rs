@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T188 — the device list, run for real: the program the scripts install is run with Python against files, the
 //! scripts are checked by the shell's own parser, and the requests and reports are read hostile.
 

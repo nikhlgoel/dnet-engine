@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T050 (OS half) — the real UAPI named-pipe client.
 //!
 //! Connects to the AmneziaWG core's UAPI pipe, writes one framed `set` operation, and

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T040 — primary-core configuration contract tests (CFG-01…CFG-07).
 //!
 //! See `specs/001-network-resilience-client/contracts/core-config.md` §1.2.

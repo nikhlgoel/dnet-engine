@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The fetch rules against a fake transport that records every URL it is asked for, so what is asserted
 //! is what the service would have *requested*, not only what it ended up with.
 

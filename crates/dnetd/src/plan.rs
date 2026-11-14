@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T126 step 2 — what one connection needs, worked out as plain data.
 //!
 //! The real effects start cores, install routes and open pipes. Everything that decides *what* to

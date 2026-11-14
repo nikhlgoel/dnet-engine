@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T097 — adding a server the person already runs, with no cloud account involved (FR-010, US2-5).
 //!
 //! Provisioning is for people who need a server made. Plenty of people already have one, or a friend who

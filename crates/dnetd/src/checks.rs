@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T126 step 2 — the three questions the orchestrator asks the network, and how each is answered.
 //!
 //! - **Reach** (before connecting, outside any profile): does the endpoint's host answer at all?

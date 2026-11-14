@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T087 — is this credential one the wizard may use? (PR-01, PR-06)
 //!
 //! The wizard accepts only a scoped, least-privilege key belonging to a dedicated user it walked the

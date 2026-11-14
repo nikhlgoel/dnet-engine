@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T007 — `cargo xtask lint-branding`
 //!
 //! Enforces Constitution licence obligation 1: the primary transport core is

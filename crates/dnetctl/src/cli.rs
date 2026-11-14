@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T127 — what the user typed.
 //!
 //! Parsing is by hand: five commands and a handful of options do not justify a dependency, and a

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! A known origin a probe fetches from: scheme, host and port, and nothing else.
 //!
 //! Here, and not in the prober, because it is configuration: an endpoint's stored credentials name

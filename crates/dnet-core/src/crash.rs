@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T182 — a transport process that exits on its own is started again, a few times, before anyone calls a profile
 //! blocked.
 //!

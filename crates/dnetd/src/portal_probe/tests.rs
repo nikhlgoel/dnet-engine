@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The probe against a local listener standing in for whatever the network does. No real network.
 
 use std::net::SocketAddr;

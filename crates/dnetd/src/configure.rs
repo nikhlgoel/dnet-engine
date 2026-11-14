@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Phase 9a — configuration changes a client asks for: add, remove, enable or disable an endpoint,
 //! the encrypted-DNS choice (IPC-17 to IPC-21), and Brutal congestion control (T105, IPC-24).
 //!

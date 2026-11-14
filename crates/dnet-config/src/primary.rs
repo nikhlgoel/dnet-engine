@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T047 — primary-core configuration generation (CC-01, CC-02, CC-05..CC-09).
 //!
 //! Turns the active profile, endpoint, and routing rules into the primary core's JSON

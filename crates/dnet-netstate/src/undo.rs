@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T037 — the undo-record registry (data-model §Cross-cutting 1, FR-029, SC-016).
 //!
 //! Restoration is owed unconditionally: on disconnect, exit, crash, and uninstall. A crash

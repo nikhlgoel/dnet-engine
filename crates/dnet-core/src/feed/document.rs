@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The v1 feed document (ADR-0002 §5.3, §5.4): proposals for bundled profiles' parameters,
 //! nothing else.
 //!

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T170 — the wire form of `GetComponents`: every part of the connection, as the interface shows it.
 //!
 //! The service writes a reply with [`encode_components`]; a client reads it with [`decode_components`]. Like every

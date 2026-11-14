@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! One measured transfer through a probe's SOCKS proxy (FR-004, HV-12).
 //!
 //! The outcome is expressed in `dnet_core::probe::ProfileProbe` terms, and the mapping is the

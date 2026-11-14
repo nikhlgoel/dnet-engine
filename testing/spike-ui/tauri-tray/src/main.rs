@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Measurement spike (not product code): the mandated UI stack as a tray-resident app.
 //!
 //! The question it answers is what the stack costs in the state the product spends nearly all of its

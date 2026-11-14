@@ -1,0 +1,17 @@
+# The workflows pin every action by commit (T177), and a pin that nobody moves goes stale without a sound.
+# This asks for one grouped pull request a month that moves them. Rust and window dependencies are not
+# updated here on purpose: they are watched by the Advisories workflow, the window's are held back 14 days
+# by pnpm, and a version bump in either is a deliberate act (see CONTRIBUTING.md).
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 1
+    commit-message:
+      prefix: "ci"
+    groups:
+      actions:
+        patterns:
+          - "*"

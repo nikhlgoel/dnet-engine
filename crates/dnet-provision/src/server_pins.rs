@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T149 — the server-side cores a release carries, by processor, with their checksums (T093 gap).
 //!
 //! The setup script downloads each core by address and refuses it unless its SHA-256 matches. Those values

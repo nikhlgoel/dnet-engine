@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T057: the Brutal opt-in gate at generation time (CC-04, FR-006, research.md §R2).
 //!
 //! Brutal is on when, and only when, the Hysteria 2 outbound carries `up_mbps` and `down_mbps`.

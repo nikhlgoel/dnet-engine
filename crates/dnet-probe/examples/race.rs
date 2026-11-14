@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Race the real profiles against the running Docker harness (T059, T068 groundwork).
 //!
 //! Needs `docker compose up` in `testing/harness` (the endpoint then writes

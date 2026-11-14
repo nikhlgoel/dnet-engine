@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T127 — the client half of the control pipe: what `dnetctl` and, later, the tray speak.
 //!
 //! It is the mirror of `server`: the same framing ([`crate::frame`]), requests written by

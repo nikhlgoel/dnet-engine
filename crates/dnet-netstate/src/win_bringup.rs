@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The real `TunnelBringup`: routes via the IP Helper API, tunnel control via UAPI.
 //!
 //! - **host route** — `WindowsRouteInstaller` (`CreateIpForwardEntry2`, owned rows only,

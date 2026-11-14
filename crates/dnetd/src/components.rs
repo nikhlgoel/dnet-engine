@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T170 — what the Registry is told (ADR-0008 section 3.6; step 2 of T170).
 //!
 //! The service already holds the facts: how the connection is doing (`StateSnapshot`) and how each network is

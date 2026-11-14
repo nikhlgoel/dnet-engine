@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T066d (the owner's part) — the trust anchor compiled into this build (ADR-0002 §2, D3).
 //!
 //! The three root public keys, two of which must sign every keys document, and the lowest keys version

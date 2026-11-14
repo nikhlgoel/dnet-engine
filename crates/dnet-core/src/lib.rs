@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Pure domain logic: endpoints, profiles, paths, rules, health, sessions.
 //!
 //! No I/O and no Windows API, so every invariant is unit-testable without a machine,

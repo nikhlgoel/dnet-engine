@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T114 — `dnetd install`, `dnetd uninstall` and `dnetd stop`: the service registers and removes itself,
 //! so any installer (or a person, by hand) needs only to copy the files and call these.
 //!

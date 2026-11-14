@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T028 — network paths (data-model §3).
 //!
 //! One `NetworkPath` is one physical way the machine reaches the internet. Owned by

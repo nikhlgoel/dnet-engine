@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Random sequences of events against the connection engine, with what must hold after every one of them.
 //!
 //! The engine's own tests are scenarios somebody thought of. This is for the ones nobody did: thousands of sequences

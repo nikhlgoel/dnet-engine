@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! What each command sends to the service, and what the window is told of the answer.
 
 mod support;

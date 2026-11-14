@@ -47,6 +47,24 @@ jobs:
       - name: Unit and contract tests
         run: cargo test --workspace
 
+  # The tests marked `#[ignore]` need administrator rights: they install and remove real routes, use real named
+  # pipes and the machine's sealed store, and stop real processes. Until 2026-11-13 they ran only on the owner's
+  # computer and in the lab VM. GitHub's Windows runner is a throwaway machine with those rights, so they run here
+  # on every push. The two tests that put a blocking guard into the firewall skip themselves unless DNET_LAB_VM=1
+  # (they would cut this runner off from GitHub); the lab VM runs those. The ETW tests need a trace session set
+  # up first and stay with the owner's script.
+  elevated:
+    name: Elevated tests (real routes, pipes, sealed store)
+    needs: build-and-test
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: Tests that need administrator rights
+        run: cargo test -p dnet-supervisor -p dnet-netstate -p dnet-config -p dnetd --no-fail-fast -- --ignored
+
   # The declared minimum Rust version (Cargo.toml `rust-version`). Until 2026-10-21 nothing checked it and
   # the lockfile had drifted above it (T143); this keeps it true. Raise both together, deliberately.
   msrv:

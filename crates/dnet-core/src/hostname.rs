@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! DNS hostname validation for names that reach a TLS handshake (`server_name`), shared by
 //! the configuration generators and the profile feed so the two can never disagree.
 //!

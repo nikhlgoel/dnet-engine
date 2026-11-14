@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T144 — the name of the Wi-Fi network each wireless adapter is connected to.
 //!
 //! The rest of `dnet-netstate` knows adapters (by LUID), not networks: an adapter is a way out, and

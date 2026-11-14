@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T056: the Hysteria 2 outbound for the primary core (CC-03, CC-04, CC-10; research.md §R2).
 //!
 //! Schema from the pinned core (`option/hysteria2.go`, `protocol/hysteria2/outbound.go` at

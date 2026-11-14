@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T124 — the secret material of one endpoint, and its stored form.
 //!
 //! An endpoint is reached through up to three profiles, and what each needs from the endpoint is

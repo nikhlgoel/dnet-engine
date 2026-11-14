@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T147 — the connection stays the way the person left it (FR-036).
 //!
 //! A connect the person asked for is remembered, and a disconnect they asked for forgets it. When the

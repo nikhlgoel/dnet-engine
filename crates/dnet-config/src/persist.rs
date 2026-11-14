@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T124 — the persisted configuration: endpoints and per-profile settings.
 //!
 //! `%PROGRAMDATA%\DNet Engine\state\config.json`, readable and writable only by SYSTEM and

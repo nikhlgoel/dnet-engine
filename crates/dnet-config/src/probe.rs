@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Probe configuration: one profile's transport behind a loopback SOCKS proxy, and nothing else.
 //!
 //! The daemon cannot bring up a TUN for each profile it wants to try: only one TUN can own the

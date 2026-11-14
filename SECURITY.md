@@ -7,16 +7,23 @@ Please report a security problem **privately**, not in a public issue or pull re
 Use GitHub's private report form: open the repository's **Security** tab and choose **Report a
 vulnerability**. That opens a private conversation with the maintainer.
 
-If the button is not there, open a public issue that says only "I have a security report and need a
-private way to send it". Do not put details in it; the maintainer will reply with a private channel.
+Private reporting is switched on for this repository, so the button is there. If it ever is not, open a
+public issue that says only "I have a security report and need a private way to send it". Do not put
+details in it; the maintainer will reply with a private channel.
 
 Please include what you found, the version or commit, and the smallest steps that show it. Do not test
 against networks or machines you do not own.
 
 ## What to expect
 
-This is a one-person project. You can expect an acknowledgement within a week and a plain answer on
-whether it is accepted as a problem. A fix is credited to you if you want that.
+This is a one-person project, so these are targets, not a contract:
+
+- an acknowledgement within **7 days**;
+- a plain answer on whether it is accepted as a problem within **30 days**;
+- a fix, or a written reason there is none yet, within **90 days**, after which you are free to publish
+  your findings (earlier by agreement, for example once a fix is released).
+
+A fix is credited to you if you want that.
 
 ## What is in scope
 

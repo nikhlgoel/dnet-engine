@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T064 — telling the user *why* a connection failed (FR-039, SC-020).
 //!
 //! [`classify`] picks exactly one of the seven [`FailureCause`]s from what the daemon can see;

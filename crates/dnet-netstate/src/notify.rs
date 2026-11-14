@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T080 — learning that the network changed, without polling (research.md §R9).
 //!
 //! Windows tells a program when interfaces, addresses or routes change; asking every few seconds

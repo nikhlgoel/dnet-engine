@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T026 — connection profiles (data-model §2).
 //!
 //! A profile is a named way of reaching an endpoint, with the parameters that shape

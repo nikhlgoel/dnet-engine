@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T069 — FakeIP, as the product sees it (FR-020, FR-021).
 //!
 //! The primary core answers a lookup for a name with a **placeholder address** from a private pool,

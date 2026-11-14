@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Contract tests FEED-01 … FEED-15 (ADR-0002 §11).
 //!
 //! Every key here is derived from a fixed test-only seed. None is, or may become, a real root

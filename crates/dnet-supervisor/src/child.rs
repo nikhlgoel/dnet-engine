@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T043 — child spawn with captured stdio and readiness detection (SUP-01, SUP-06).
 //!
 //! A core is spawned as a child with its stdio captured (parsed for health, never

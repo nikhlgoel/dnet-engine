@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T066a — the profile feed inside the service: keep what was accepted, offer what arrives, apply what
 //! may be applied (ADR-0002 §4 to §6).
 //!

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T089 — the provisioning job: its stages, in order, and what each one does when it goes wrong
 //! (contracts/provisioning.md §2).
 //!

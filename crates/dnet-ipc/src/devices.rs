@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T188 — the wire form of adding a friend's device to the person's own server (ADR-0008 "Share a server").
 //!
 //! A friend's computer makes its own key and answers `RequestJoin` with a short text (a name and the public half

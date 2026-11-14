@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Transport parameter values and bounds shared by the configuration generators
 //! (`dnet-config`) and the profile feed ([`crate::feed`]).
 //!

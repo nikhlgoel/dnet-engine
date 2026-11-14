@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The control pipe: its identity and security descriptor, the framing loop, the
 //! request-dispatch core, and (on Windows) the real named-pipe listener that captures
 //! each client's identity and gates every request through `authz`.

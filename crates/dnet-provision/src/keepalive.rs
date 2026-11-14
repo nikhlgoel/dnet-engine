@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T094 — keep the provider from reclaiming an idle machine (FR-013, PR-15's stage, PRV-09, research R10).
 //!
 //! Free cloud compute is lent on condition that it is used. A machine that does nothing for long enough is

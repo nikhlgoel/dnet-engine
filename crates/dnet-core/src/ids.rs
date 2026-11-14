@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Typed identifiers for domain entities (newtype pattern, per Rust patterns).
 //!
 //! Distinct wrapper types prevent mixing an endpoint id with a rule id at a call

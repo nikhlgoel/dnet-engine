@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T075 — what one connect event says: which program asked to connect, from which port, to whom
 //! (data-model §7, ADR-0001, research R7).
 //!

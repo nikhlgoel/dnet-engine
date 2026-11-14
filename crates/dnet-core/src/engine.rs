@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The connection engine: one deterministic policy that joins the decision modules.
 //!
 //! `probe`, `selection`, `reprobe`, `endpoint_health`, `migrate` and `failure` each decide one

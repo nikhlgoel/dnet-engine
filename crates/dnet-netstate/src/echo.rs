@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T136 — the first hop: an echo to a path's gateway.
 //!
 //! The one measurement that needs no cooperation from the endpoint, the tunnel or the far network:

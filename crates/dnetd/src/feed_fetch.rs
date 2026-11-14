@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T066b — fetching the signed profile feed (ADR-0002 §7).
 //!
 //! `dnet_core::feed::fetch` fixes the decisions: where the two files live, which hosts may be reached,

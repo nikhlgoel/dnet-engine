@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! `installer/Sign-Files.ps1` and `installer/Test-Signature.ps1`: signing a release with the project's own
 //! key (not a purchased certificate; `docs/release-signing.md`), and checking that what was signed is still
 //! what was signed and was signed by that key.

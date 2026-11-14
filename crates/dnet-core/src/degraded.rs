@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T084 — honest degradation reporting (FR-019, US3-5, SC-007).
 //!
 //! The failover machine (`failover.rs`) moves the connection when a better path exists. This module

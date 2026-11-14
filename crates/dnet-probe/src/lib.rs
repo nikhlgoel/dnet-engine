@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Probing connection profiles (T059, FR-004, HV-12).
 //!
 //! `dnet-core::probe` decides what a measurement means and which profile wins. This crate makes

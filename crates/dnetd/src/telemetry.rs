@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T144 — what the service knows about the networks and the session, held for the control pipe to
 //! answer `GetPaths` and `GetStats` with.
 //!

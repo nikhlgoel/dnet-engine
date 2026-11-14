@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T046 — ordered teardown (SUP-04).
 //!
 //! Whenever `dnetd` stops for any reason, both cores are terminated and every

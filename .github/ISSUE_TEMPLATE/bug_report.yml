@@ -1,0 +1,45 @@
+name: Bug report
+description: Something does not work, or does not match what the documentation says
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. **Do not use this form for a security problem**; see SECURITY.md.
+        Please do not post server addresses, keys or network names.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you saw instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The smallest steps that show it. Say whether it was the simulated harness or a real network.
+    validations:
+      required: false
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: The output of `dnetctl version`, or of `git rev-parse --short HEAD` if you built it.
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Windows version
+      description: For example Windows 11 23H2, 64-bit.
+    validations:
+      required: false
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: The output of `dnetctl status` and `dnetctl components`, with addresses and names removed.
+      render: text
+    validations:
+      required: false

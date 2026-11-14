@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T139 — are the programs the service launches as SYSTEM out of reach of ordinary users?
 //!
 //! `dnetd` runs as LocalSystem and starts two cores and loads a driver DLL from the folder it was

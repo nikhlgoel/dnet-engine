@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T051 — AmneziaWG peer + obfuscation configuration (AW-04, AW-05, AWG-05, AWG-06).
 //!
 //! A WG-family peer configured **without** its AmneziaWG obfuscation parameters produces

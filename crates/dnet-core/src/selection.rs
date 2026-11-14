@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T061 — choosing a profile, Tier 1 preference and Tier 2 consent (FR-016b).
 //!
 //! - With no request, the best viable profile wins: Tier 1 before Tier 2, ties by the order the

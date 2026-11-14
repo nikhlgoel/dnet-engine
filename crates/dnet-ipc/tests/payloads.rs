@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T125 — IPC payloads for connect, disconnect, status and the event stream.
 //!
 //! Contract: `specs/001-network-resilience-client/contracts/ipc-protocol.md`. Written before the

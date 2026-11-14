@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T189 — what the fairness scripts say and do. The helper is run for real, against stand-ins for `ip` and `tc`
 //! that record what they were asked, so what reaches the server's queue is exactly what is asserted here.
 

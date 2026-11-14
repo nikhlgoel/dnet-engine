@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The smallest SOCKS5 client that can run a probe: no authentication, `CONNECT` only.
 //!
 //! A probe asks its loopback proxy to open a connection to the origin. If the proxy replies

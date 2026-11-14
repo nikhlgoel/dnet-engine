@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Tests for the bootstrap script and its report (PR-12…PR-16, T093).
 
 use super::*;

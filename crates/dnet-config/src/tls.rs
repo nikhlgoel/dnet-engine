@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Outbound TLS options for the primary core's Hysteria 2 and VLESS+REALITY outbounds.
 //!
 //! Schema from the pinned core (`option/tls.go` at `0b89958`). Two rules hold for every

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T072 — which rule applies to a connection, and which rules can never apply (FR-021, FR-022, FR-023).
 //!
 //! The primary core does the routing at run time, from a configuration generated out of the rule set

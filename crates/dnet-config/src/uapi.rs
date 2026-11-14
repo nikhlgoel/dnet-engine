@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T050 — the AmneziaWG UAPI client wire format (research.md §R5).
 //!
 //! AmneziaWG is configured at runtime over its UAPI named pipe (under

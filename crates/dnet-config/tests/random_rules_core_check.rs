@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Any rule a person can add must produce a configuration the **pinned primary-core binary** accepts.
 //!
 //! `pinned_core_check.rs` runs the real core over a matrix of profiles with the built-in rules. The rules a person

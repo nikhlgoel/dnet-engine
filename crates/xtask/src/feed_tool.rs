@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T066c — `cargo xtask feed-keygen` and `cargo xtask feed-sign` (ADR-0002 §8, "Custody").
 //!
 //! The publisher's two chores: making a key, and signing a document with it.

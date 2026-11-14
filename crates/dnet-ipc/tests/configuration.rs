@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Configuration requests carry payloads (Phase 9; FR-010, FR-025, FR-025a, contracts/ipc-protocol.md).
 //!
 //! | ID     | Assertion |

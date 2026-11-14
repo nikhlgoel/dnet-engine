@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Length-prefixed framing: a 4-byte little-endian length followed by UTF-8 JSON.
 //!
 //! Every byte arriving here is hostile input (Principle V). Decoding must reject

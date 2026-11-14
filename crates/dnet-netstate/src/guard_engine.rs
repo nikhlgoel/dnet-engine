@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T161 step 3 — the guard in the Windows Filtering Platform (ADR-0006 §5a; `docs/research/2026-10-31-solutions.md` §4).
 //!
 //! This is the only place that calls the firewall engine. It takes rules already translated by [`crate::guard_wfp`]

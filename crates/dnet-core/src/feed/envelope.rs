@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! DSSE v1 envelopes (ADR-0002 §3; secure-systems-lab/dsse `protocol.md`, `envelope.md`).
 //!
 //! Everything here handles bytes that are **not yet authenticated**, so every error names a

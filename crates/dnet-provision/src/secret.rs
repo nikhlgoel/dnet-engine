@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T088 — where the cloud credential lives, and the one type that carries it (PR-03, PR-04, FR-009a).
 //!
 //! The wizard needs a credential that can create billable cloud resources. That is the most valuable

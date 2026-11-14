@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Where the feed files live (D1) and which network a fetch may use (D2), ADR-0002 §7.
 //!
 //! `dnetd` does the HTTP. This module fixes the decisions so they are testable and cannot

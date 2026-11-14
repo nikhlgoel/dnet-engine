@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T058: the VLESS+REALITY outbound for the primary core (CC-11; Research-Critique §4.3).
 //!
 //! REALITY borrows the TLS handshake of a real third-party site, the **target domain**. The

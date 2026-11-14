@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Interfaces, routes, DNS, change notification, and restoration guarantees.
 //!
 //! See `specs/001-network-resilience-client/` for the governing specification.

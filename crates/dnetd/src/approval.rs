@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T160 — changes that redirect traffic wait for an elevated client (ADR-0008 F13;
 //! `docs/research/2026-10-31-solutions.md` section 3.2).
 //!

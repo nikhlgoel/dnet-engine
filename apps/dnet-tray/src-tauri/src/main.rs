@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T100, T101 — the tray icon and the window (ADR-0007).
 //!
 //! This is glue, and it is kept thin: what it decides is in `dnet-view` where it is tested without a window

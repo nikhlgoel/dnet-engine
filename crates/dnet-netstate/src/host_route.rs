@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T052 — endpoint host route via the physical gateway (AW-02, AW-03, research.md §R4).
 //!
 //! The endpoint must be reachable **outside** the tunnel, via a host route through the

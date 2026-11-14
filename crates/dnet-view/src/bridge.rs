@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T100 — every command the window may give, and every question it may ask.
 //!
 //! The web view's capability list is the minimum (ADR-0007 R4): these are the commands, and there is no

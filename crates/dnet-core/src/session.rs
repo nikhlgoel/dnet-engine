@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Connection sessions and how they end (data-model §5).
 //!
 //! A `ConnectionSession` is one period of being connected, recorded append-only: state

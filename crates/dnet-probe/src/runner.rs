@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The real prober: one core process per probe, raced.
 //!
 //! [`Prober::probe_one`] writes a probe configuration (`dnet_config::probe`), spawns the primary

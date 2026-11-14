@@ -32,7 +32,12 @@ You need Rust 1.88 or newer (the minimum supported version, checked in CI). The 
 Windows-only at run time, but most crates build and test on Linux and macOS too, and a change must not
 break that.
 
-The window (`apps/dnet-tray`) also needs Node 22 or newer and pnpm.
+The window (`apps/dnet-tray`) also needs Node 22 or newer and pnpm. Its shell is a Tauri application: it needs
+Rust 1.90 (Tauri's own minimum) and, to run, Microsoft's WebView2, which Windows 11 includes.
+
+The two transport programs are not committed. `cargo run -p xtask -- fetch-vendor` builds them from pinned source
+and needs **Go**; without them `verify-vendor` and anything that starts a real tunnel cannot run, and everything
+else can.
 
 ## Before you open a pull request
 
@@ -53,8 +58,10 @@ cd apps/dnet-tray
 pnpm install --frozen-lockfile && pnpm check && pnpm test && pnpm build
 ```
 
-Tests marked `#[ignore]` touch the real routing table or named pipes and need an elevated shell. They
-are not run in CI; say in your pull request if you ran them.
+Tests marked `#[ignore]` touch the real routing table or named pipes and need an elevated shell
+(`cargo test --workspace -- --ignored` from a prompt started as administrator). Say in your pull request if you
+ran them. **Do not run the ones that change the firewall on a computer you use**: they are marked as such, and they
+are for a throwaway virtual machine (`testing/vm/README.md`).
 
 ## Rules that are easy to break
 

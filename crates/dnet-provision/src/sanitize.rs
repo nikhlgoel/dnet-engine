@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Everything a provider says on its own account passes through here before a person or a log sees it
 //! (PR-04: the credential never appears in logs, diagnostics, IPC messages, error text or telemetry).
 //!

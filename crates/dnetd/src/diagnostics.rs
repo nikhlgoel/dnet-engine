@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T112 — the diagnostic bundle (FR-035, IPC-07).
 //!
 //! When something goes wrong, a person needs to be able to hand someone enough to explain it. FR-035 says

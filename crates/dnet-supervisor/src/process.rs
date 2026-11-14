@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T043 (OS half) — real child spawning with captured stdio and readiness (SUP-01, SUP-06).
 //!
 //! A core is spawned with stdin closed and stdout/stderr piped. Output is forwarded to

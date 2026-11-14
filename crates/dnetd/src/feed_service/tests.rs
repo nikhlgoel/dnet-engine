@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The feed inside the service, against real signed documents and files that can be made to fail.
 //! The decisions themselves are `dnet-core`'s and tested there; these pin what the service does
 //! around them: that it remembers, restores, refuses whole, and changes nothing when it cannot save.

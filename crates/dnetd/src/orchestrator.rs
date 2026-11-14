@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T126 — the Connect orchestrator: the layer that runs the connection engine.
 //!
 //! `dnet_core::engine::Engine` decides (it is pure: no I/O, no clock). Nothing before this module

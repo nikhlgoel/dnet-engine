@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T138 — the Windows machine behind the network watch.
 //!
 //! `netwatch` is the loop; this is what it stands on. Everything here is a thin step over a piece

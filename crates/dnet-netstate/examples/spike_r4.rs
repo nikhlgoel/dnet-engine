@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! SPIKE-R4 runner (T055): one profile end-to-end on the **real** OS seams.
 //!
 //! Profiles (`--profile`):

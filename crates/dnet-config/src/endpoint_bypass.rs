@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T048 — the always-present active-endpoint bypass (CC-05, data-model §Cross-cutting 2).
 //!
 //! The endpoint's own address must reach the physical network directly, or the tunnel's

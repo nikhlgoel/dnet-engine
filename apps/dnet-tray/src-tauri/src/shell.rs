@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T100, T101 — the tray, the window's life, and the commands (ADR-0007 R1, R2, R4).
 //!
 //! Everything that decides something is in `dnet-view`; this is the part that touches the operating system.

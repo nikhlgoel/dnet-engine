@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T054 — Profile A start guard (AWG-01, research.md §R4).
 //!
 //! This is the **primary routing-loop prevention**. AmneziaWG (Profile A) installs a

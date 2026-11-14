@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T041 — AmneziaWG configuration contract tests (AWG-01…AWG-06).
 //!
 //! AWG-01 (no gateway -> NoUsablePath) is the primary loop prevention and lives in

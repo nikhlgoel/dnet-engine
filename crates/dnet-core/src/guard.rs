@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T161 — what the guard lets through, as data (ADR-0006 P3 and section 5a; `docs/research/2026-10-31-solutions.md` section 4).
 //!
 //! The guard is the operating system's own half of the kill switch: a set of ordered rules in which a few narrow

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Finds executable images embedded inside another executable's bytes.
 //!
 //! A Go program that compiles a DLL or driver into itself (`//go:embed`) carries the file

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T150 — setting up the person's own server from the window (IPC-26).
 //!
 //! `prepare` makes the keys that stay on this computer, keeps them for an hour, and returns the script to

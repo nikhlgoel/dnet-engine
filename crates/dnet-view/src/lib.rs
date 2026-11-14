@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T100 — what the window is told, and what it may ask for (ADR-0007 R4).
 //!
 //! The window is a web view, and a web view is a place where text from the outside world is drawn. It never

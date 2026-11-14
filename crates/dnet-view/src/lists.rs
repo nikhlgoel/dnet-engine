@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T100 — the endpoint and rule lists, reduced to what the window shows.
 //!
 //! Only the fields the window draws are copied out of the service's reply, each cleaned and bounded, so an

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T059 — judging a profile probe and racing profiles (FR-004, FR-016b, HV-12).
 //!
 //! A profile counts as working only if it **carries usable traffic**, not merely if a handshake

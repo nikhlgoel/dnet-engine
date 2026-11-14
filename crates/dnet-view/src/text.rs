@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T100 — text from the service, made safe to hand to a web view (design-system §14, §17 rule 2).
 //!
 //! The window cleans every string again on its side (`sanitize.ts`); this is the same rule applied here, so a

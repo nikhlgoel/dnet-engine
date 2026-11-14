@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T039 — the attack gate (SC-019).
 //!
 //! Proves, against a **real** Windows named pipe with **real** client-identity capture

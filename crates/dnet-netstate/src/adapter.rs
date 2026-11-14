@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! AmneziaWG adapter address and route setup.
 //!
 //! The pinned AmneziaWG core creates its adapter but does not assign it an address or

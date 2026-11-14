@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T093 — setting up the server (PR-12, PR-13, PR-14, PR-15, PR-16).
 //!
 //! A new machine is turned into an endpoint by one script, run once on it (`Provider::bootstrap`) and safe

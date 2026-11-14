@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T062 — ranking endpoints by observed health (FR-011, FR-012).
 //!
 //! `health.rs` turns probes into a state and a smoothed RTT. This ranks the result: which

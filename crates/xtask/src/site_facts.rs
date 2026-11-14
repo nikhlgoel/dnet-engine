@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T174 — the website's claims, checked against the repository (`cargo test -p xtask site_facts`).
 //!
 //! The page says what the program is, what it does not do and where it stands. Each sentence that states a
@@ -320,6 +321,50 @@ mod tests {
         assert!(
             text_of(&page).contains(&format!("{total} parts")),
             "the summary line must state {total} parts"
+        );
+    }
+
+    // ------------------------------------------------------------------ the task list's own table
+
+    /// The "Where it stands" table at the top of the task list is counted from the checkboxes below it. It is
+    /// written by hand and a count that is not true is worse than none, so this fails when they drift.
+    #[test]
+    fn the_task_lists_status_table_matches_its_checkboxes() {
+        let tasks = read("specs/001-network-resilience-client/tasks.md");
+        let (mut done, mut partly, mut open) = (0usize, 0usize, 0usize);
+        for line in tasks.lines() {
+            let rest = line.trim_start();
+            let Some(rest) = rest.strip_prefix("- [") else {
+                continue;
+            };
+            let mut chars = rest.chars();
+            let (Some(mark), Some(']')) = (chars.next(), chars.next()) else {
+                continue;
+            };
+            let after = chars.as_str().trim_start().trim_start_matches('*');
+            if !after.starts_with('T') || !after[1..].starts_with(|c: char| c.is_ascii_digit()) {
+                continue;
+            }
+            match mark {
+                'x' => done += 1,
+                '~' => partly += 1,
+                ' ' => open += 1,
+                _ => {}
+            }
+        }
+        let row = tasks
+            .lines()
+            .find(|l| l.starts_with("| **All phases**"))
+            .expect("the table has its total row");
+        let numbers: Vec<usize> = row
+            .split('|')
+            .filter_map(|c| c.trim().trim_matches('*').parse().ok())
+            .collect();
+        assert_eq!(
+            numbers,
+            [done, partly, open],
+            "the status table says {numbers:?}; the checkboxes say {:?}",
+            [done, partly, open]
         );
     }
 

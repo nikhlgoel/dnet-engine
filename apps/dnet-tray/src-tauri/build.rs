@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The window may give these commands and no others (ADR-0007 R4). Declaring them here makes each one a
 //! permission the capability file must grant by name, so a command added to `main.rs` and forgotten here is
 //! refused by the framework instead of being quietly available to the web view.

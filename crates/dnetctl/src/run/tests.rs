@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Every command, against the real server dispatch over an in-memory stream, with the clock paused.
 
 use std::collections::VecDeque;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T126 step 2 — the real effects (Windows).
 //!
 //! The orchestrator decides when; this does. It is deliberately thin: what to start is decided by

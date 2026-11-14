@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T042 — supervision contract tests (SUP-T1…SUP-T4).
 //!
 //! Ordering is asserted with a recording fake `CoreRuntime`, exactly as the contract

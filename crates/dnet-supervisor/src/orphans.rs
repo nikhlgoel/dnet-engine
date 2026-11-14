@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T045 (OS half) — orphaned-core discovery and termination (SUP-05).
 //!
 //! Enumerates processes with a Toolhelp snapshot and matches each candidate's **full

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! DNet Engine privileged background service (`dnetd`).
 //!
 //! Runs as LocalSystem. It is the only component permitted to alter routing, DNS, or

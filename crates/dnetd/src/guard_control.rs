@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T161 — the one door between the service and the firewall guard (ADR-0006 §5a).
 //!
 //! The service decides *when* the guard is in (the person's choice, a tunnel that is up); the operating system
@@ -345,6 +346,70 @@ mod tests {
     }
 }
 
+/// Whether a test that changes the firewall may run: only where `DNET_LAB_VM` is exactly `1`. `--ignored` alone is
+/// how a person runs the elevated tests on their own computer (the routes, the pipes), and it must never be enough to
+/// put a blocking guard into that computer's firewall (ADR-0006 §5a condition 5). The lab sets the variable.
+#[cfg(test)]
+pub fn lab_vm(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
+#[cfg(test)]
+pub fn in_lab_vm() -> bool {
+    lab_vm(std::env::var("DNET_LAB_VM").ok().as_deref())
+}
+
+#[cfg(test)]
+mod lab_gate {
+    #[test]
+    fn only_an_explicit_one_opens_the_lab_gate() {
+        assert!(super::lab_vm(Some("1")));
+        for no in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("true"),
+            Some("yes"),
+            Some(" 1"),
+            Some("11"),
+        ] {
+            assert!(!super::lab_vm(no), "{no:?}");
+        }
+    }
+
+    /// Every test that says it changes the firewall asks the gate first. The words are put together here so that
+    /// this test does not count itself.
+    #[test]
+    fn every_test_that_changes_the_firewall_is_behind_the_gate() {
+        let marker = ["#[ignore = \"changes", " the firewall"].concat();
+        let gate = ["in_lab", "_vm()"].concat();
+        for (name, source) in [
+            ("guard_control.rs", include_str!("guard_control.rs")),
+            ("recovery.rs", include_str!("recovery.rs")),
+        ] {
+            let mut rest = source;
+            let mut found = 0;
+            while let Some(at) = rest.find(&marker) {
+                found += 1;
+                let after = &rest[at..];
+                // The gate is the first thing in the test's body: within a few lines of the attribute.
+                let body = after.split('{').nth(1).unwrap_or("");
+                let head: String = body.lines().take(3).collect::<Vec<_>>().join(
+                    "
+",
+                );
+                assert!(
+                    head.contains(&gate),
+                    "{name}: a firewall test does not ask the gate first:
+{head}"
+                );
+                rest = &after[marker.len()..];
+            }
+            assert!(found > 0, "{name} has no firewall test; update this list");
+        }
+    }
+}
+
 /// The real guard against the real firewall. **It changes the firewall**, so it never runs by default and never on a
 /// person's own computer: only in the lab VM (`testing/vm`), as an elevated run of the ignored tests (ADR-0006 §5a
 /// condition 5). It exists because the unit tests above use a fake, and the mutation run showed that nothing else would
@@ -369,6 +434,12 @@ mod real_firewall {
     #[test]
     #[ignore = "changes the firewall: elevated, in the lab VM only, never on a real computer"]
     fn the_real_guard_goes_in_reads_as_in_and_comes_out() {
+        if !crate::guard_control::in_lab_vm() {
+            eprintln!(
+                "skipped: this changes the firewall and runs only where DNET_LAB_VM=1 (the lab VM)"
+            );
+            return;
+        }
         let undo = Arc::new(UndoRegistry::open(Box::new(MemoryStore::new())).unwrap());
         let guard = Cleanup(WindowsGuard::new(undo));
         guard.0.release().unwrap();

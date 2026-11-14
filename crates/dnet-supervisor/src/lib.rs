@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Child process lifecycle for the supervised transport cores.
 //!
 //! Both cores (primary and AmneziaWG) are spawned as children, restarted with a

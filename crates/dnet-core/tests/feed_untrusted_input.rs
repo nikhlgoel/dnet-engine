@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T066 — feed and keys envelopes are attacker-controlled until verified (ADR-0002 §3).
 //!
 //! They arrive from release hosts, mirrors or a file a person imports. Whatever the bytes, offering

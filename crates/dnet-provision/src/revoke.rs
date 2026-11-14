@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! T096 — what happens to the cloud credential when provisioning is over (PR-05, research R10).
 //!
 //! The credential was only ever needed to create the endpoint. Keeping it afterwards keeps a key that can
