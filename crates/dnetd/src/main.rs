@@ -79,6 +79,7 @@ mod feed_trial;
 // Asks the network whether a captive portal is in the way (T077); used by the real effects.
 #[cfg_attr(not(windows), allow(dead_code))]
 mod listener;
+mod logfile;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod portal_probe;
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -104,12 +105,44 @@ mod svc;
 mod winwatch;
 
 fn main() -> anyhow::Result<()> {
+    // Only the running service keeps a log file (T198): it has no console to say anything to. The command line
+    // tools (`install`, `release-guard`, ...) and the console mode for development print as they always did.
+    #[cfg(windows)]
+    let is_service = {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        install::admin_command(&args).is_none() && !args.iter().any(|a| a == "--console")
+    };
+    #[cfg(not(windows))]
+    let is_service = false;
+
+    #[cfg(windows)]
+    let (sink, log_note) = if is_service {
+        logfile::service_sink()
+    } else {
+        (logfile::Sink::new(None), None)
+    };
+    #[cfg(not(windows))]
+    let (sink, log_note): (logfile::Sink, Option<String>) = (logfile::Sink::new(None), None);
+
+    let mut filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    if is_service {
+        // What a transport process prints includes the places the person connects to, which is why the supervisor
+        // logs it at `trace` only. The log file is for sending to someone, so even `RUST_LOG=trace` does not put
+        // that in it (FR-035, T198).
+        if let Ok(directive) = "dnet_supervisor::process=info".parse() {
+            filter = filter.add_directive(directive);
+        }
+    }
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
+        .with_env_filter(filter)
+        // A file is not a terminal: no colour codes in it.
+        .with_ansi(!is_service)
+        .with_writer(sink)
         .init();
+    if let Some(note) = log_note {
+        tracing::warn!("{note}");
+    }
 
     #[cfg(windows)]
     {

@@ -97,6 +97,8 @@ logs/
 
 # ---------- Test harness runtime state (Phase 2) ----------
 testing/harness/.state/
+# The lab server's keys and credentials (a throwaway server's test keys; testing/server-lab).
+testing/server-lab/.state/
 testing/harness/**/*.pcap
 testing/harness/**/captures/
 

@@ -808,6 +808,12 @@ ThreadingHTTPServer((sys.argv[1], int(sys.argv[2])), H).serve_forever()
     let mut thief = client.clone();
     thief["inbounds"][0]["listen_port"] = json!(thief_port);
     thief["endpoints"] = json!([]);
+    // The session's own resolver reaches through the endpoint that was just taken away.
+    let dns_servers = thief["dns"]["servers"].as_array().unwrap().clone();
+    thief["dns"]["servers"] = json!(dns_servers
+        .into_iter()
+        .filter(|server| server["detour"].is_null())
+        .collect::<Vec<_>>());
     thief["route"] = json!({ "rules": [], "final": "hy2" });
     thief.as_object_mut().unwrap().remove("experimental");
     std::fs::write(dir.path().join("thief.json"), thief.to_string()).unwrap();

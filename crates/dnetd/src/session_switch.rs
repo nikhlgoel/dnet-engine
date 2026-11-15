@@ -613,10 +613,15 @@ mod tests {
 
     #[test]
     fn a_control_port_is_a_free_loopback_port() {
-        let port = pick_control_port().unwrap();
-        assert_ne!(port, 0);
-        // Nothing listens there now.
-        assert!(std::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port)).is_err());
+        // Nothing listens on a port just picked. Another test running at the same moment can be handed the same
+        // port by the system and listen on it before this looks, so one such pick is not a failure: it takes a run of
+        // picks that all find a listener to fail this (found on the Linux check, T200).
+        let refused = (0..20).any(|_| {
+            let port = pick_control_port().unwrap();
+            assert_ne!(port, 0);
+            std::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port)).is_err()
+        });
+        assert!(refused, "every port picked had something listening on it");
     }
 
     // ------------------------------------------------------------------ the nudge

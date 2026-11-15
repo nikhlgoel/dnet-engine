@@ -113,6 +113,11 @@ function Start-Qemu([bool]$WithInstall) {
         '-display', 'none', '-vnc', '127.0.0.1:1',
         '-monitor', "tcp:127.0.0.1:$MonitorPort,server,nowait"
     )
+    if ($env:DNET_VM_NICS -eq '2') {
+        # A second network card on its own private network (10.0.3.0/24), for tests of moving a connection from one
+        # network to another (T199). Both cards reach the host's real addresses through the same host.
+        $qargs += @('-netdev', 'user,id=n1,net=10.0.3.0/24,host=10.0.3.2,dhcpstart=10.0.3.15', '-device', 'e1000e,netdev=n1')
+    }
     if ($WithInstall) {
         $iso = Get-ChildItem (Join-Path $Dir 'iso') -Filter 'win11*.iso' | Select-Object -First 1
         if (-not $iso) { throw "no Windows ISO in $Dir\iso" }

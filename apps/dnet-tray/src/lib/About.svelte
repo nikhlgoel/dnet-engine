@@ -4,6 +4,7 @@
    * obligation 1; `cargo xtask lint-branding` allows exactly this path). The wording follows
    * THIRD-PARTY-NOTICES.md, which is the authority; nothing here endorses or promotes by the vendors' names.
    */
+  import Mark from '../components/Mark.svelte';
   import { en } from './messages';
 
   let { onclose }: { onclose: () => void } = $props();
@@ -12,6 +13,7 @@
 </script>
 
 <section class="view" aria-labelledby="about-title">
+  <Mark lamp="off" size={56} draw />
   <h1 id="about-title">{t.title}</h1>
   <p class="lede">{t.body}</p>
   <h2>{t.limitsTitle}</h2>

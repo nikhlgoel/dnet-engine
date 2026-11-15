@@ -514,3 +514,30 @@ The owner delegated these on 2026-10-21 ("I will leave the decisions to you"); t
   forced-colours and reduced-motion screenshots; no colour literal outside `tokens.css`; `lint-branding`.
 - **T116:** memory in both states, and the scene's CPU, with the real cores running.
 - **T111:** an unfamiliar person reaches a working endpoint unaided (SC-009); Narrator and NVDA pass.
+
+---
+
+## 23. The mark and the window's life (T206)
+
+**The mark** is the tunnel: arches receding to a doorway (`docs/design/icon/`). It is the application icon, the website's
+icon, the logo in the window's plate, and the tray icon. In the window and the tray the doorway is the state, by shape
+first: empty (not connected), filling and draining (finding a way through), lit (connected), half lit (slow), lit with a
+gap through it (failed), crossed (the service did not answer, tray only). So the logo is never decoration that could
+disagree with the words.
+
+**Motion, and the one rule behind all of it:** nothing moves unless something is really happening (principle 11), and
+everything rests when the person asks for no motion (`data-motion="reduce"` on the root, from the system setting or
+Settings). What moves, and why it may:
+
+| Where | Motion | Why it is honest |
+|---|---|---|
+| Opening (`Intro.svelte`) | The tunnel draws in, the doorway lights, the picture opens outward; `--dur-intro` (1.5 s) | It is the logo, not a status: it claims nothing about the connection and ends before the state shows. Waits until the window is on screen; any key or click ends it; not made at all under reduced motion |
+| Plate mark | The doorway breathes (`--probe-period`) while probing | Only while the service is finding a way through; every other state is still |
+| Tray icon | The same breath, 12 frames at about 7 a second | Only while probing, started and stopped by the state; costs nothing otherwise |
+| Core | A ring leaves it when the state changes | Only on a real state change, never on a repeat of the same state |
+| Words | The headline and the reason rise into place when they change | A new state is seen to land, not swapped |
+| Pages | A short rise and fade (`--dur-2`) when a page is entered | Plays when the page's elements are made, never for a state update |
+| About and first run | The mark draws itself in once | It is the logo |
+
+Durations are tokens (`--dur-4`, `--dur-intro`, `--ping`); nothing else in the window names a duration. Every animation
+is a transform or an opacity, so none costs layout.

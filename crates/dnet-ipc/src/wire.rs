@@ -84,15 +84,19 @@ pub(crate) fn staying_name(staying: NoMove) -> &'static str {
     }
 }
 
-fn path_change_because(tier: FailoverTier) -> &'static str {
+fn path_change_because(tier: FailoverTier, first_path: bool) -> &'static str {
+    // The first path the connection is seen on is not a move, and saying "changed ... the move" about it told a
+    // person who had just connected that their network had changed. It happens at every connect, and again each time a
+    // transport process is started again.
+    if first_path {
+        return "the connection is now carried by this network";
+    }
     match tier {
         FailoverTier::Tier1 => {
-            "the network connection carrying your traffic changed; this profile is Tier 1, so \
-             established connections should survive the move"
+            "the network connection carrying your traffic changed; this profile is Tier 1, so              established connections should survive the move"
         }
         FailoverTier::Tier2 => {
-            "the network connection carrying your traffic changed; this profile is Tier 2, so \
-             established connections will not survive the move"
+            "the network connection carrying your traffic changed; this profile is Tier 2, so              established connections will not survive the move"
         }
     }
 }
@@ -141,7 +145,7 @@ fn event_value(event: &ConnectionEvent) -> Result<Value, IpcError> {
                 "to": interface_str(*to),
                 "tier_at_time": tier_str(*tier_at_time),
             }),
-            path_change_because(*tier_at_time).to_string(),
+            path_change_because(*tier_at_time, from.is_none()).to_string(),
         ),
         ConnectionEvent::Degraded {
             path,

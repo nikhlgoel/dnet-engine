@@ -9,6 +9,8 @@
   import Caption from './components/Caption.svelte';
   import Consent from './components/Consent.svelte';
   import Dock from './components/Dock.svelte';
+  import Intro from './components/Intro.svelte';
+  import Mark from './components/Mark.svelte';
   import Drawer from './components/Drawer.svelte';
   import Scene from './components/Scene.svelte';
   import Strip from './components/Strip.svelte';
@@ -32,7 +34,11 @@
   const app = new AppState(bridge);
 
   const t = en;
-  let osReducesMotion = $state(false);
+  // Read before the first paint, so the opening is not made for a person who asked for none.
+  let osReducesMotion = $state(
+    typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true,
+  );
+  let introOver = $state(false);
   let chevron = $state<HTMLButtonElement | null>(null);
   let polite = $state('');
   let assertive = $state('');
@@ -126,6 +132,7 @@
   <div class="app" data-lamp={lampKey}>
     <header class="top">
       <button type="button" class="plate" aria-label={t.nav.about} onclick={() => app.go('about')}>
+        <Mark lamp={lampKey} size={30} />
         <Wordmark />
         <span class="engine">engine</span>
       </button>
@@ -191,6 +198,10 @@
     />
   </div>
 </div>
+
+{#if !introOver && !still}
+  <Intro running={app.visible} ondone={() => (introOver = true)} />
+{/if}
 
 <Consent
   open={app.tier2Prompt}
@@ -342,6 +353,23 @@
 
   .stage > :global(.view) {
     flex: 1;
+  }
+
+  /* A page is entered with a short rise and fade (design-system §4). It plays when its elements are made, that is,
+     when the view changes, and never for a state update, which only changes text in place. */
+  .stage > :global(*) {
+    animation: enter var(--dur-2) var(--ease) backwards;
+  }
+
+  @keyframes enter {
+    from {
+      opacity: 0;
+      transform: translateY(var(--s-2));
+    }
+  }
+
+  :global([data-motion='reduce']) .stage > :global(*) {
+    animation: none;
   }
 
   .waiting {

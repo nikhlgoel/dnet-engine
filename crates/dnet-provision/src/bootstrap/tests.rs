@@ -466,6 +466,17 @@ fn the_account_the_core_runs_as_is_kept_from_this_machine_the_private_network_an
             "iptables -A DNET-OUT -m conntrack --ctstate NEW -j DNET-CAP-OUT".to_owned(),
         ],
     );
+    // The resolvers the machine uses are read from where a systemd machine keeps its REAL upstream list as well as
+    // from `/etc/resolv.conf`, which holds only the local stub there: the core asks the upstream resolver directly
+    // (on Oracle's machines 169.254.169.254, a range the rules below refuse), and with only the stub allowed it
+    // could resolve no name at all, so REALITY could not reach its cover site and the session's exit could not
+    // resolve for a device. Found on the first real server (T200).
+    let read = "/etc/resolv.conf /run/systemd/resolve/resolv.conf";
+    assert_eq!(
+        net.matches(read).count(),
+        2,
+        "both the IPv4 and the IPv6 resolver lists must be read from: {read}"
+    );
     // No blanket exemption of port 53 to anywhere (it would skip the caps and the refusals), and none for the
     // whole loopback range.
     assert!(!net.contains("iptables -A DNET-OUT -p udp --dport 53"));
@@ -1821,7 +1832,8 @@ fn the_core_that_faces_the_internet_runs_as_an_account_with_no_privilege() {
         "PrivateDevices=yes",
         "CapabilityBoundingSet=\n",
         "AmbientCapabilities=\n",
-        "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX",
+        // AF_NETLINK: the session in the core watches routes through it; without it the core does not start (T200).
+        "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK",
         "RestrictNamespaces=yes",
         "UMask=0077",
     ] {

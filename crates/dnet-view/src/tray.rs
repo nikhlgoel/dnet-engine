@@ -41,9 +41,30 @@ pub enum Control {
     None,
 }
 
+/// Which picture the tray icon shows. Each is a different *shape* (an outline, a slash, a filling door, a full
+/// one, half of one, a split one), so the state reads in greyscale and at 16 pixels; colour only confirms it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lamp {
+    /// Not connected: an empty doorway.
+    Off,
+    /// Finding a way through: the doorway fills and drains. The only state that moves, because it is the only one in
+    /// which something is being tried.
+    Probe,
+    /// Carrying traffic: a lit doorway.
+    Ok,
+    /// Carrying it slowly: half lit.
+    Warn,
+    /// Failed: a lit doorway with a gap through it.
+    Fail,
+    /// The background service did not answer: a crossed doorway.
+    Down,
+}
+
 /// The menu's text for one state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrayText {
+    /// The picture of the tray icon.
+    pub lamp: Lamp,
     /// The disabled first line: the state, and for a failure its title.
     pub state: String,
     /// The control's label.
@@ -53,8 +74,9 @@ pub struct TrayText {
     pub quit: String,
 }
 
-fn fixed(state: String, control: String, action: Control) -> TrayText {
+fn fixed(lamp: Lamp, state: String, control: String, action: Control) -> TrayText {
     TrayText {
+        lamp,
         state,
         control,
         action,
@@ -67,7 +89,12 @@ fn fixed(state: String, control: String, action: Control) -> TrayText {
 #[must_use]
 pub fn text(view: Option<&Value>) -> TrayText {
     let Some(view) = view else {
-        return fixed(word("serviceDown"), word("stabilize"), Control::None);
+        return fixed(
+            Lamp::Down,
+            word("serviceDown"),
+            word("stabilize"),
+            Control::None,
+        );
     };
     match view.get("status").and_then(Value::as_str) {
         Some("Connected") => {
@@ -75,21 +102,27 @@ pub fn text(view: Option<&Value>) -> TrayText {
                 .pointer("/paths/degraded")
                 .is_some_and(|d| !d.is_null());
             fixed(
+                if slow { Lamp::Warn } else { Lamp::Ok },
                 word(if slow { "warn" } else { "ok" }),
                 word("turnOff"),
                 Control::Disconnect,
             )
         }
-        Some("Probing") => fixed(word("probe"), word("working"), Control::None),
+        Some("Probing") => fixed(Lamp::Probe, word("probe"), word("working"), Control::None),
         Some("Failed") => {
             let title = view
                 .pointer("/failure/title")
                 .and_then(Value::as_str)
                 .map_or_else(|| word("off"), |t| plain(t, 80));
-            fixed(title, word("stabilize"), Control::Connect)
+            fixed(Lamp::Fail, title, word("stabilize"), Control::Connect)
         }
-        Some("Disconnected") => fixed(word("off"), word("stabilize"), Control::Connect),
+        Some("Disconnected") => fixed(Lamp::Off, word("off"), word("stabilize"), Control::Connect),
         // A status this program does not know is not "not connected": it is a reply it cannot read.
-        _ => fixed(word("serviceDown"), word("stabilize"), Control::None),
+        _ => fixed(
+            Lamp::Down,
+            word("serviceDown"),
+            word("stabilize"),
+            Control::None,
+        ),
     }
 }

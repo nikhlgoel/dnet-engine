@@ -571,6 +571,9 @@ impl<E: Effects> Actor<E> {
         for action in actions {
             match action {
                 Action::Emit(event) => {
+                    // The same record `dnetctl events` shows, kept in the log file too (T198): the list in memory
+                    // starts empty each time the service does, so after a crash it was the log that had nothing.
+                    tracing::info!(?event, "connection event");
                     self.telemetry.record(&event, now());
                     if let Err(e) = self.bus.publish(&event) {
                         // A producer without a real `because` is a defect; say so, keep going.

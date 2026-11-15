@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { AppState } from '../lib/app.svelte';
   import Consent from '../components/Consent.svelte';
+  import Mark from '../components/Mark.svelte';
   import { disclosure, en } from '../lib/messages';
 
   let { app }: { app: AppState } = $props();
@@ -21,6 +22,7 @@
 </script>
 
 <section class="view" aria-labelledby="first-title">
+  <Mark lamp="off" size={56} draw />
   <h1 id="first-title">{t.welcome}</h1>
   <p class="lede">{t.intro}</p>
 

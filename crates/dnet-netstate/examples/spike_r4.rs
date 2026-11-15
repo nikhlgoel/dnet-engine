@@ -590,6 +590,7 @@ mod win {
             ],
             working_dir: Some(run_dir.join("primary")),
             ready_marker: Some("started".into()),
+            ready_port: None,
             ready_timeout: Duration::from_secs(30),
         }
     }
@@ -653,6 +654,7 @@ mod win {
                 args: Vec::new(),
                 working_dir: None,
                 ready_marker: None,
+                ready_port: None,
                 ready_timeout: Duration::from_secs(5),
             },
             ADAPTER,
@@ -748,6 +750,7 @@ mod win {
                 args: vec![OsString::from(ADAPTER)],
                 working_dir: awg_exe.parent().map(Path::to_path_buf),
                 ready_marker: None, // readiness = the UAPI pipe appearing
+                ready_port: None,
                 ready_timeout: Duration::from_secs(5),
             },
             ADAPTER,

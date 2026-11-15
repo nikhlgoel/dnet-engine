@@ -7,6 +7,7 @@ pub mod adapter;
 pub mod cost;
 pub mod echo;
 pub mod error;
+pub mod flow_end;
 #[cfg(windows)]
 pub mod guard_engine;
 pub mod guard_wfp;

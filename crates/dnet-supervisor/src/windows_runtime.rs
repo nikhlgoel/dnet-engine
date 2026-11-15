@@ -163,6 +163,7 @@ mod tests {
             args: ["/c", script].iter().map(OsString::from).collect(),
             working_dir: None,
             ready_marker: None,
+            ready_port: None,
             ready_timeout: Duration::from_secs(5),
         }
     }
@@ -180,6 +181,7 @@ mod tests {
                 .collect(),
             working_dir: None,
             ready_marker: None,
+            ready_port: None,
             ready_timeout: Duration::from_secs(5),
         }
     }
@@ -264,6 +266,7 @@ mod pinned_tests {
             args: ["/c", script].iter().map(OsString::from).collect(),
             working_dir: None,
             ready_marker: None,
+            ready_port: None,
             ready_timeout: Duration::from_secs(5),
         }
     }
@@ -279,6 +282,7 @@ mod pinned_tests {
                 .collect(),
             working_dir: None,
             ready_marker: None,
+            ready_port: None,
             ready_timeout: Duration::from_secs(5),
         }
     }

@@ -42,12 +42,60 @@ release waits for them.
 - **A Windows installer**, signed with the project's own key (Windows shows "unknown publisher"), with a
   build attestation. About 15 MB.
 
+- **A log file for the service**, in `%ProgramData%\DNet Engine\logs` (readable only by administrators and the system,
+  about 4 MB at most). It records what the service did and why, and each request it refused. It holds no password or
+  key, and never where you go on the network (the service does not know that).
+- **Closed-preview tools.** `testing/server-lab/Add-Friend.ps1` adds a friend's device to your server from the request their
+  window makes, lists the devices, and takes one off again; `docs/closed-preview.md` is the guide for a friend and for the
+  owner.
+
+### Changed
+
+- **A new icon: the tunnel.** Arches receding to a doorway, polished from the concept you chose. It is the program's icon,
+  the website's, the logo in the window, and the tray icon. The doorway shows the state by shape as well as colour: empty
+  (not connected), filling and draining (finding a way through), lit (connected), half lit (slow), lit with a gap through
+  it (failed), crossed (the service did not answer).
+- **The window and the tray feel alive, and only when something is happening.** An opening that draws the tunnel in and
+  opens it outward (skippable, and not made at all if you ask your computer for less motion); the logo and the tray icon
+  breathe while the connection is being found, and are still otherwise; a ring leaves the core when the state changes;
+  new words and new pages rise into place.
+
+### Fixed
+
+- **The service and `dnetctl` start on a Windows that has never had the Visual C++ runtime installed.** Built the
+  default way they needed a library Windows does not include, so on such a computer the service would not have started.
+  They now carry it, and the release build refuses a program that does not.
+- **A server made by the setup guide now starts, and the program can connect to it over Hysteria 2 and REALITY.**
+  Found by running the real setup script in a lab: the server's main service was not allowed to read the machine's
+  routes and stopped at start, and the program waited for a log line that a quiet connection never prints, so only
+  the AmneziaWG method could connect. Both are fixed.
+- **Websites by name now load through a server made by the setup guide.** Found on the first real server: the
+  connection carried only requests to numeric addresses, because the program had no way to turn a name into an address
+  through the tunnel. It does now, and the server's firewall no longer blocks the machine's own name server.
+- **The kill switch no longer opens for a moment when the connection's program restarts.** Found on the first real
+  server by watching what leaves the network card: every time the connection's program stopped (a crash and its
+  restart, say), the program took the kill switch out of the firewall with the tunnel, and for a second or so new
+  connections went straight out of your network card until the restart put it back. The kill switch now stays in
+  through restarts and failures, as it always claimed, and comes out only when you disconnect or turn it off.
+- **Connections that were open before you connected no longer keep going out of your network card.** Found on the first
+  real server: a connection already open (a kept-alive web page, say) kept reporting your own address through the
+  connect, after the tunnel's program was stopped, and after the disconnect, and the kill switch could not stop it.
+  The program now ends such IPv4 TCP connections when the tunnel comes up (sending nothing to the other end) and the
+  program that held one reconnects through the tunnel. IPv6 TCP and connections that are not TCP are still not covered.
+- `dnetctl endpoints` shows each server's id, which the commands that remove, enable and disable a server need.
+- A new connection is no longer announced as "the network connection changed ... will not survive the move" when nothing
+  had moved.
+
 ### Known limits
 
 - The kill switch is not a guarantee: see above, and the [README](README.md#read-this-before-relying-on-it).
 - Rules by program are best-effort and not connected to the service yet.
 - Every method is treated as one that drops open transfers when the network changes, until a recorded
   measurement says otherwise.
+- While connected, Windows still sends name lookups to the physical network's resolver as well as the tunnel's, so that
+  network can see the names you look up; the kill switch does not stop this. See the README.
+- IPv6 TCP connections and connections that are not TCP (QUIC, calls, games) that were open before you connected keep
+  going out of your network card until they stop of their own accord.
 - Networks that give only IPv6 are not supported.
 - Windows 10 version 1809 or later, 64-bit (x64) only.
 

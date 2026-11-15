@@ -769,7 +769,9 @@ if command -v iptables >/dev/null 2>&1; then
     # and origin and nothing else on it, and the resolvers the machine itself uses (not port 53 anywhere, which
     # would skip the caps and the refusals). Then this machine's other addresses, its public one included (a device
     # must not reach services the provider's firewall hides), the private ranges, mail, and the caps.
-    NS4=$(awk '$1 == "nameserver" && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { print $2 }' /etc/resolv.conf 2>/dev/null || true)
+    # `/etc/resolv.conf` on a systemd machine holds only the local stub (127.0.0.53); the core asks the real upstream
+    # resolver directly, which systemd-resolved keeps in the second file (Oracle's machines: 169.254.169.254).
+    NS4=$(awk '$1 == "nameserver" && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && $2 != "0.0.0.0" { print $2 }' /etc/resolv.conf /run/systemd/resolve/resolv.conf 2>/dev/null || true)
     cap DNET-CAP-OUT RETURN
     fresh DNET-OUT
     rule iptables -A DNET-OUT -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
@@ -793,7 +795,7 @@ if command -v iptables >/dev/null 2>&1; then
       if ip6tables -A DNET-PROBE6 -j REJECT 2>/dev/null; then DENY6=REJECT; else DENY6=DROP; fi
       ip6tables -F DNET-PROBE6 2>/dev/null || true
       ip6tables -X DNET-PROBE6 2>/dev/null || true
-      NS6=$(awk '$1 == "nameserver" && $2 ~ /^[0-9a-fA-F:]+$/ && $2 ~ /:/ { print $2 }' /etc/resolv.conf 2>/dev/null || true)
+      NS6=$(awk '$1 == "nameserver" && $2 ~ /^[0-9a-fA-F:]+$/ && $2 ~ /:/ && $2 != "::" { print $2 }' /etc/resolv.conf /run/systemd/resolve/resolv.conf 2>/dev/null || true)
       cap6() {
         fresh6 "$1"
         rule ip6tables -A "$1" -m hashlimit --hashlimit-name "$1" --hashlimit-mode dstip --hashlimit-above 30/second --hashlimit-burst 60 -j DROP
@@ -985,7 +987,8 @@ Requires=dnet-net.service
 [Service]
 # The part of the server that faces the internet and parses what strangers send. It binds ports above 1024,
 # makes no tunnel device (the session runs inside the core), and writes nothing, so it needs no privilege
-# at all: no capabilities, no new ones, a read-only system, no home, no devices, only IP sockets.
+# at all: no capabilities, no new ones, a read-only system, no home, no devices, only IP and local sockets, and
+# netlink (read-only without a capability) for the session's route watching.
 User=dnet
 Group=dnet
 ExecStart=/opt/dnet/bin/primary-core run -c /var/lib/dnet/primary/server.json
@@ -1000,7 +1003,10 @@ ProtectKernelModules=yes
 ProtectControlGroups=yes
 CapabilityBoundingSet=
 AmbientCapabilities=
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# AF_NETLINK is needed, read-only: the session inside the core watches the machine's routes through it, and without it
+# the core stops at start with "subscribe route updates: address family not supported by protocol" (found by running
+# this script in the lab, T200). With no capabilities, a netlink socket can read routes and change nothing.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 RestrictNamespaces=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes

@@ -11,8 +11,10 @@ use dnet_ipc::client::Trust;
 use dnet_view::events::{follow, Ended};
 use dnet_view::link::PipeLink;
 use dnet_view::session::{poll_interval, Backlog, Grace, GRACE};
-use dnet_view::tray::{self, Control, TrayText};
+use dnet_view::tray::{self, Control, Lamp, TrayText};
 use dnet_view::Bridge;
+
+use crate::tray_icon;
 use serde_json::Value;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{TrayIcon, TrayIconBuilder};
@@ -51,6 +53,8 @@ struct Shell {
     tray: Mutex<Option<TrayParts>>,
     /// The menu as last drawn, so it is only touched when it changes.
     text: Mutex<Option<TrayText>>,
+    /// Whether the tray's breath (the probing pictures) is running: one at a time, and only while probing.
+    breathing: AtomicBool,
 }
 
 impl Shell {
@@ -65,6 +69,7 @@ impl Shell {
             wake: tokio::sync::Notify::new(),
             tray: Mutex::new(None),
             text: Mutex::new(None),
+            breathing: AtomicBool::new(false),
         }
     }
 
@@ -85,8 +90,8 @@ fn now_ms() -> u64 {
 
 // ---------------------------------------------------------------------------------------- the tray
 
-/// Change the menu to say `text`, if it is not saying it already.
-fn apply_tray(shell: &Shell, text: TrayText) {
+/// Change the menu to say `text`, and the icon to show it, if the tray is not doing so already.
+fn apply_tray(shell: &Arc<Shell>, text: TrayText) {
     let mut current = shell.text.lock().unwrap();
     if current.as_ref() == Some(&text) {
         return;
@@ -96,8 +101,48 @@ fn apply_tray(shell: &Shell, text: TrayText) {
         let _ = parts.control.set_text(&text.control);
         let _ = parts.control.set_enabled(text.action != Control::None);
         let _ = parts.icon.set_tooltip(Some(&text.state));
+        if let Some(picture) = tray_icon::image(text.lamp, 0) {
+            let _ = parts.icon.set_icon(Some(picture));
+        }
     }
+    let probing = text.lamp == Lamp::Probe;
     *current = Some(text);
+    drop(current);
+    if probing && !shell.breathing.swap(true, Ordering::SeqCst) {
+        let shell = Arc::clone(shell);
+        tauri::async_runtime::spawn(async move { breathe(shell).await });
+    }
+}
+
+/// The tray's one motion: while the service is finding a way through, the doorway fills and drains. It stops, and
+/// costs nothing, the moment the state is anything else.
+async fn breathe(shell: Arc<Shell>) {
+    let probing = |shell: &Shell| {
+        shell
+            .text
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|text| text.lamp == Lamp::Probe)
+    };
+    let mut step = 0usize;
+    loop {
+        tokio::time::sleep(tray_icon::PROBE_STEP).await;
+        if !probing(&shell) {
+            shell.breathing.store(false, Ordering::SeqCst);
+            // A probe that began between the look and the store must not be left still.
+            if probing(&shell) && !shell.breathing.swap(true, Ordering::SeqCst) {
+                continue;
+            }
+            return;
+        }
+        step = (step + 1) % tray_icon::PROBE_FRAMES;
+        if let Some(parts) = shell.tray.lock().unwrap().as_ref() {
+            if let Some(picture) = tray_icon::image(Lamp::Probe, step) {
+                let _ = parts.icon.set_icon(Some(picture));
+            }
+        }
+    }
 }
 
 fn build_tray(app: &tauri::App, shell: &Arc<Shell>) -> tauri::Result<()> {
@@ -124,7 +169,10 @@ fn build_tray(app: &tauri::App, shell: &Arc<Shell>) -> tauri::Result<()> {
             }
             _ => {}
         });
-    if let Some(icon) = app.default_window_icon() {
+    // The picture of "not connected" until the service has been asked; the state loop changes it from then on.
+    if let Some(picture) = tray_icon::image(Lamp::Off, 0) {
+        builder = builder.icon(picture);
+    } else if let Some(icon) = app.default_window_icon() {
         builder = builder.icon(icon.clone());
     }
     let icon = builder.build(app)?;

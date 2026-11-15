@@ -45,7 +45,7 @@ use crate::measure::{measure_via_proxy, MeasureConfig, Origin};
 use crate::race::{race_with, RaceReport};
 use crate::socks5::Credentials;
 
-/// How long a probe core may take to print its readiness marker.
+/// How long a probe core may take to open its proxy.
 pub const READY_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a stopped probe core gets to exit.
 const KILL_GRACE: Duration = Duration::from_secs(3);
@@ -318,7 +318,12 @@ impl Prober {
                 OsString::from("--disable-color"),
             ],
             working_dir: Some(self.work_dir.clone()),
-            ready_marker: Some("started".into()),
+            // Ready when its proxy takes a connection, not when it prints a word: a core run quietly (the session's
+            // configurations log at `warn`, so that no destination reaches a log) never prints "started", and waiting
+            // for it made every probe of a session endpoint fail as "could not connect" (found running the real server
+            // script, T200).
+            ready_marker: None,
+            ready_port: Some(job.socks_port),
             ready_timeout: self.ready_timeout,
         };
         let mut running = match process::spawn(&command) {

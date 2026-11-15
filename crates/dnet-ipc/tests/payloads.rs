@@ -703,6 +703,37 @@ fn ipc12_event_fields_are_stable() {
         .unwrap(),
     );
     assert_eq!(v["from"], Value::Null);
+    // The first path is not a move: it must not tell a person who has just connected that their network changed and
+    // that connections will (or should) survive "the move" (found in the lab VM, where it appeared at every connect).
+    let first = v["because"].as_str().unwrap();
+    assert!(first.contains("now carried by this network"), "{first}");
+    assert!(
+        !first.contains("move") && !first.contains("changed"),
+        "{first}"
+    );
+    for tier in [FailoverTier::Tier1, FailoverTier::Tier2] {
+        let v = parse(
+            &encode_event(&ConnectionEvent::PathChanged {
+                from: None,
+                to,
+                tier_at_time: tier,
+            })
+            .unwrap(),
+        );
+        assert!(
+            !v["because"].as_str().unwrap().contains("survive"),
+            "{tier:?}"
+        );
+    }
+    // A real move from one network to another still says what it means for open connections.
+    let v = parse(
+        &encode_event(&ConnectionEvent::PathChanged {
+            from: Some(InterfaceId::new(3)),
+            to,
+            tier_at_time: FailoverTier::Tier1,
+        })
+        .unwrap(),
+    );
     assert!(v["because"].as_str().unwrap().contains("should survive"));
 
     let v = parse(

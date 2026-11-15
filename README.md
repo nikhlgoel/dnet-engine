@@ -42,9 +42,29 @@ that does less.
   the network the endpoint sits on can see what any ordinary server operator sees.
 - **The kill switch is optional and not yet a guarantee.** The service has no "send it direct"
   fallback, and a firewall guard that keeps traffic inside the tunnel can be turned on (it is off by
-  default). It has been checked in a lab virtual machine and not on a real network, it survives a
-  restart of the service until the connection is back or you take it out, and one connection method is
-  not covered yet, so it is not yet a promise that nothing leaves the machine unprotected.
+  default). It has been checked in a lab virtual machine against a real server and not on a real network. With
+  it on, a new connection is refused whenever the tunnel is not carrying it: measured by killing the connection's
+  program while a busy connection ran, nothing reached the network card. The guard stays in through failures and
+  restarts of the connection's program and of the service, and comes out when you disconnect, turn it off, or run
+  `dnetctl guard-release`; that also means that if the server cannot be reached while it is on, this computer is
+  offline until you do one of those. With it **off**, for the second or so while the connection's program
+  restarts, the computer's traffic leaves directly. One connection method is not covered yet. So it is not yet a
+  promise that nothing leaves the machine unprotected.
+- **Name lookups can still reach the network you are on.** Measured in the lab on a connected tunnel: Windows
+  asks the tunnel's name server first, but also sends lookups to the resolver of the physical network, as it
+  does with any two connections. That resolver, and whoever runs it, can see which names your computer looks up,
+  and an answer from it can be wrong or blocked. The kill switch does not close this: it keeps the network's own
+  address range reachable, and that is where the resolver is. A fix (a Windows name-resolution policy that sends
+  every lookup to the tunnel) is planned and not built; until then, do not rely on this program to keep the
+  names you look up from the network you are on.
+- **Connections that were already open when you connect.** Windows never moves a connection that already has an
+  address from your network card, so one opened before you connected (a browser's kept-alive page, a download, a
+  Windows service) kept going out of the card, and the kill switch could not stop it, because its rules decide
+  whether a *new* connection may be made. Measured in the lab, and now handled for one case: when the connection
+  comes up, the service ends every open IPv4 TCP connection that would now go through the tunnel (nothing is sent to
+  the other end), and the program that held it reconnects through the tunnel. **Not covered:** IPv6 TCP, and
+  connections that are not TCP (QUIC, calls, games), which keep going out of the card until they stop of their own
+  accord. A second layer in the firewall that would stop those too is planned and not built.
 - **Per-application rules are best-effort.** Rules by destination name or address are reliable.
   Rules by application depend on identifying the program at the moment it connects, which can miss
   short-lived connections. They are labelled best-effort wherever they appear.

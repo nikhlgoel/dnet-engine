@@ -200,6 +200,10 @@ Endpoints, rules, the encrypted-DNS choice and Brutal can be changed only while 
 Adding or turning on a server, a rule that goes around the tunnel and an import wait for your
 approval ('pending', 'approve'): a program running as you cannot give it for you.
 
+The service keeps a log of what it did and why, and of requests it refused, in
+C:\\ProgramData\\DNet Engine\\logs\\dnetd.log. Only administrators can open it. It holds no password
+or key. Attach it to a report if you are asked for one.
+
 options:
   --json                 print the service's answers as JSON (for scripts)
   --timeout <seconds>    how long connect/disconnect wait (default 120, at most 3600)
