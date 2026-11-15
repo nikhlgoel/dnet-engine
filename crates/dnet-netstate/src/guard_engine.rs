@@ -1039,26 +1039,34 @@ pub fn install_guard(
         provider: PROVIDER_KEY.to_text(),
     };
     let had_guard = engine.is_installed().ok();
-    registry
-        .apply(record, || {
-            if let Err(e) = engine.apply(&translated) {
-                // A commit that timed out may still have landed. The record is withdrawn when this fails, so what
-                // may have landed is taken out here while there is still a way to say so (review 2026-11-10,
-                // finding 4), but never a guard that was in before this started (review, medium 1).
-                let cleanup = if cleanup_after_failed_apply(had_guard) {
-                    match engine.remove_all() {
-                        Ok(()) => String::new(),
-                        Err(r) => format!(
-                            "; and they could not be removed again ({r}): release the guard"
-                        ),
+    let put_in = || -> Result<Mutation, NetstateError> {
+        if let Err(e) = engine.apply(&translated) {
+            // A commit that timed out may still have landed. The record is withdrawn when this fails, so what
+            // may have landed is taken out here while there is still a way to say so (review 2026-11-10,
+            // finding 4), but never a guard that was in before this started (review, medium 1).
+            let cleanup = if cleanup_after_failed_apply(had_guard) {
+                match engine.remove_all() {
+                    Ok(()) => String::new(),
+                    Err(r) => {
+                        format!("; and they could not be removed again ({r}): release the guard")
                     }
-                } else {
-                    "; the guard that was already in was left as it was".to_owned()
-                };
-                return Err(NetstateError::Operation(format!("{e}{cleanup}")));
-            }
-            Ok(Mutation::Applied)
-        })
+                }
+            } else {
+                "; the guard that was already in was left as it was".to_owned()
+            };
+            return Err(NetstateError::Operation(format!("{e}{cleanup}")));
+        }
+        Ok(Mutation::Applied)
+    };
+    // A guard that is already recorded stays recorded: it is kept across a restart of the tunnel (T203), so the next
+    // one finds its record in the journal and a second is not added for every restart. Checked and applied under the
+    // registry's lock, so a release that falls between cannot leave this guard without a record.
+    registry
+        .apply_once(
+            record,
+            &|existing| matches!(existing, UndoRecord::GuardFilters { .. }),
+            put_in,
+        )
         .map_err(|e| InstallError::Undo(e.to_string()))?;
 
     let known = vec![plan.core_program.clone(), plan.service_program.clone()];

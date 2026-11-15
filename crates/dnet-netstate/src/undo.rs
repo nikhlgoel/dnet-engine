@@ -262,6 +262,48 @@ impl UndoRegistry {
         outcome.map(|_| None)
     }
 
+    /// [`apply`](Self::apply), except that when a record for which `already` says so is outstanding, no second one is
+    /// added: the mutation runs under the same lock and the record that is there stays, whatever the mutation does
+    /// (a failure does not withdraw it, because it belongs to what was in before). The check and the mutation are one
+    /// step under the lock, so a removal of that record by another thread cannot fall between them and leave what the
+    /// mutation made without a record. Used for the kill switch's guard, which is kept across restarts of the tunnel
+    /// (T203) and so is applied again over its own record.
+    pub fn apply_once(
+        &self,
+        record: UndoRecord,
+        already: &dyn Fn(&UndoRecord) -> bool,
+        mutation: impl FnOnce() -> Result<Mutation, NetstateError>,
+    ) -> Result<Option<UndoId>, NetstateError> {
+        record.validate()?;
+        let mut inner = self.lock();
+        if let Some(existing) = inner
+            .journal
+            .entries
+            .iter()
+            .find(|entry| already(&entry.record))
+            .map(|entry| entry.id)
+        {
+            return mutation().map(|outcome| (outcome == Mutation::Applied).then_some(existing));
+        }
+        let id = UndoId(inner.journal.next_id);
+        let mut registered = inner.journal.clone();
+        registered.next_id += 1;
+        registered.entries.push(UndoEntry { id, record });
+        inner.store.save(&registered)?;
+        inner.journal = registered;
+
+        let outcome = mutation();
+        if matches!(outcome, Ok(Mutation::Applied)) {
+            return Ok(Some(id));
+        }
+        let withdrawn = inner.journal.without(&[id]);
+        if let Err(e) = inner.store.save(&withdrawn) {
+            tracing::error!(error = %e, "withdrawing an unused undo record failed");
+        }
+        inner.journal = withdrawn;
+        outcome.map(|_| None)
+    }
+
     /// Reverse one record now (normal teardown) and remove it. On failure it stays.
     pub fn undo(&self, id: UndoId, executor: &dyn UndoExecutor) -> Result<(), NetstateError> {
         let mut inner = self.lock();
@@ -283,10 +325,25 @@ impl UndoRegistry {
 
     /// Reverse every outstanding record, newest first. Failures stay in the journal.
     pub fn replay(&self, executor: &dyn UndoExecutor) -> Result<ReplayReport, NetstateError> {
+        self.replay_keeping(executor, &|_| false)
+    }
+
+    /// [`replay`](Self::replay), except that a record for which `keep` says so is left alone: not reversed, not counted
+    /// as a failure, and still in the journal. This is how a tunnel is taken down without taking the kill switch's guard
+    /// with it: the guard comes out only when the person disconnects (T203; before, every stop of the tunnel's program,
+    /// a crash included, removed it, and the traffic went out of the card until the next start put it back).
+    pub fn replay_keeping(
+        &self,
+        executor: &dyn UndoExecutor,
+        keep: &dyn Fn(&UndoRecord) -> bool,
+    ) -> Result<ReplayReport, NetstateError> {
         let mut inner = self.lock();
         let mut report = ReplayReport::default();
         let mut restored = Vec::new();
         for entry in inner.journal.entries.iter().rev() {
+            if keep(&entry.record) {
+                continue;
+            }
             match executor.reverse(&entry.record) {
                 Ok(()) => restored.push(entry.id),
                 Err(e) => report.failed.push((entry.id, e)),
@@ -553,6 +610,120 @@ mod tests {
         assert_eq!(report.restored, 2);
         assert_eq!(report.failed.len(), 1);
         assert_eq!(stored_records(&store), vec![route(2)]);
+    }
+
+    /// Taking a tunnel down must not take the kill switch's guard with it (T203): a replay that keeps the guard
+    /// reverses everything else, leaves the guard's record in the journal, and does not count it as a failure.
+    #[test]
+    fn a_replay_that_keeps_the_guard_reverses_the_rest_and_leaves_the_guard_in_the_journal() {
+        let store = MemoryStore::new();
+        let registry = UndoRegistry::open(Box::new(store.clone())).unwrap();
+        let guard = UndoRecord::GuardFilters {
+            provider: crate::guard_wfp::PROVIDER_KEY.to_text(),
+        };
+        registry.apply(route(1), || Ok(Mutation::Applied)).unwrap();
+        registry
+            .apply(guard.clone(), || Ok(Mutation::Applied))
+            .unwrap();
+        registry.apply(route(2), || Ok(Mutation::Applied)).unwrap();
+        let executor = Recorder::default();
+
+        let report = registry
+            .replay_keeping(&executor, &|record| {
+                matches!(record, UndoRecord::GuardFilters { .. })
+            })
+            .unwrap();
+
+        assert_eq!(
+            *executor.reversed.borrow(),
+            vec![route(2), route(1)],
+            "the guard was not reversed"
+        );
+        assert_eq!(report.restored, 2);
+        assert!(
+            report.failed.is_empty(),
+            "a kept record is not a failure: {:?}",
+            report.failed
+        );
+        assert_eq!(stored_records(&store), vec![guard.clone()]);
+        // And it is still there for the person's disconnect, or the next start's recovery, to take out.
+        let rest = Recorder::default();
+        registry.replay(&rest).unwrap();
+        assert_eq!(*rest.reversed.borrow(), vec![guard]);
+    }
+
+    fn is_guard(record: &UndoRecord) -> bool {
+        matches!(record, UndoRecord::GuardFilters { .. })
+    }
+
+    fn guard_record() -> UndoRecord {
+        UndoRecord::GuardFilters {
+            provider: crate::guard_wfp::PROVIDER_KEY.to_text(),
+        }
+    }
+
+    /// A guard that is applied again over its own record (every restart of the tunnel) adds no second record.
+    #[test]
+    fn applying_the_guard_again_adds_no_second_record() {
+        let store = MemoryStore::new();
+        let registry = UndoRegistry::open(Box::new(store.clone())).unwrap();
+        let first = registry
+            .apply_once(guard_record(), &is_guard, || Ok(Mutation::Applied))
+            .unwrap();
+        let second = registry
+            .apply_once(guard_record(), &is_guard, || Ok(Mutation::Applied))
+            .unwrap();
+        assert_eq!(first, second, "the same record answers for both");
+        assert_eq!(stored_records(&store), vec![guard_record()]);
+    }
+
+    /// A failure of the guard's second application must not lose the record of the guard that is already in.
+    #[test]
+    fn a_failure_over_an_existing_guard_record_leaves_the_record() {
+        let store = MemoryStore::new();
+        let registry = UndoRegistry::open(Box::new(store.clone())).unwrap();
+        registry
+            .apply_once(guard_record(), &is_guard, || Ok(Mutation::Applied))
+            .unwrap();
+        let failed = registry.apply_once(guard_record(), &is_guard, || {
+            Err(NetstateError::Operation("the firewall refused".into()))
+        });
+        assert!(failed.is_err());
+        assert_eq!(stored_records(&store), vec![guard_record()]);
+    }
+
+    /// With no record there, the first application registers one and a failure withdraws it, as `apply` does.
+    #[test]
+    fn a_first_application_registers_and_a_failure_withdraws() {
+        let store = MemoryStore::new();
+        let registry = UndoRegistry::open(Box::new(store.clone())).unwrap();
+        let failed = registry.apply_once(guard_record(), &is_guard, || {
+            Err(NetstateError::Operation("the firewall refused".into()))
+        });
+        assert!(failed.is_err());
+        assert!(stored_records(&store).is_empty());
+        registry
+            .apply_once(guard_record(), &is_guard, || Ok(Mutation::Applied))
+            .unwrap();
+        assert_eq!(stored_records(&store), vec![guard_record()]);
+    }
+
+    /// The record is checked and the mutation run in one step: after the guard's record was reversed (the person's
+    /// release), applying the guard registers a fresh one, so nothing the mutation makes is left without a record.
+    #[test]
+    fn after_a_release_the_next_application_registers_a_fresh_record() {
+        let store = MemoryStore::new();
+        let registry = UndoRegistry::open(Box::new(store.clone())).unwrap();
+        let id = registry
+            .apply_once(guard_record(), &is_guard, || Ok(Mutation::Applied))
+            .unwrap()
+            .unwrap();
+        registry.undo(id, &Recorder::default()).unwrap();
+        assert!(stored_records(&store).is_empty());
+        registry
+            .apply_once(guard_record(), &is_guard, || Ok(Mutation::Applied))
+            .unwrap();
+        assert_eq!(stored_records(&store), vec![guard_record()]);
     }
 
     #[test]

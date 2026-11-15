@@ -120,15 +120,41 @@ fn private_dir(dir: &Path) -> io::Result<()> {
 
 /// Replays what teardown could not remove. The AmneziaWG adapter's own address and route vanish with
 /// the adapter, so they are never recorded.
+///
+/// **Not the kill switch's guard (T203).** Taking a tunnel down, for a restart after the program crashed as much as for
+/// a disconnect, replays this journal, and the guard's record is in it; replaying that record removed the guard, so
+/// from the moment the tunnel's program stopped until the next start put the guard back (a second or two, measured in
+/// the lab: a new connection to a public address succeeded from the physical card) nothing was blocked. The guard is
+/// meant to outlast failures and restarts, and to come out only when the person disconnects (`release_guard`, which
+/// removes it by its own record and by the provider's key) or the service's next start recovers it.
 fn undo_hook(undo: Arc<UndoRegistry>) -> UndoHook {
-    Box::new(move || match undo.replay(&WindowsUndoExecutor) {
+    undo_hook_with(undo, Arc::new(WindowsUndoExecutor))
+}
+
+/// [`undo_hook`] with the executor given, so the hook itself (not only what it calls) is tested.
+fn undo_hook_with(
+    undo: Arc<UndoRegistry>,
+    executor: Arc<dyn dnet_netstate::undo::UndoExecutor + Send + Sync>,
+) -> UndoHook {
+    Box::new(move || replay_leaving_the_guard(&undo, executor.as_ref()))
+}
+
+/// Replay the journal, every record but the guard's.
+fn replay_leaving_the_guard(
+    undo: &UndoRegistry,
+    executor: &dyn dnet_netstate::undo::UndoExecutor,
+) -> Result<(), SupervisorError> {
+    let keep_the_guard = |record: &dnet_netstate::undo::UndoRecord| {
+        matches!(record, dnet_netstate::undo::UndoRecord::GuardFilters { .. })
+    };
+    match undo.replay_keeping(executor, &keep_the_guard) {
         Ok(report) if report.failed.is_empty() => Ok(()),
         Ok(report) => Err(SupervisorError::Runtime(format!(
             "undo replay left {} record(s)",
             report.failed.len()
         ))),
         Err(e) => Err(SupervisorError::Runtime(e.to_string())),
-    })
+    }
 }
 
 // ------------------------------------------------------------------ the tunnel host
@@ -408,6 +434,53 @@ impl RealEffects {
         })
         .await
         .map_err(|_| "putting the guard in was interrupted".to_owned())?
+    }
+
+    /// End the connections that were open before the tunnel came up and that a new one would now send into it (T203).
+    /// They keep their old address and keep going out of the physical card, through the connect and after the tunnel's
+    /// program stops, until whatever holds them lets go; the program that held one finds it closed and makes a new one,
+    /// which goes through the tunnel. Never fails a connection, and logs counts only.
+    async fn end_direct_connections(&self, endpoint_ip: Option<Ipv4Addr>) {
+        /// How long the pass may work, and how long a connect waits for it at most (the work itself cannot be
+        /// cancelled, so the wait is shorter than nothing would be: it is a bound on this connect, not on the pass).
+        const BUDGET: Duration = Duration::from_secs(2);
+        const WAIT: Duration = Duration::from_secs(5);
+        let servers: Vec<Ipv4Addr> = endpoint_ip.into_iter().collect();
+        let programs = programs_of(&self.layout);
+        let work = tokio::task::spawn_blocking(move || {
+            let luid =
+                dnet_netstate::adapter::interface_luid_value(dnet_config::primary::TUN_INTERFACE)
+                    .map_err(|e| e.to_string())?;
+            // The tunnel's address is assigned a moment after the adapter appears: one more try, then give up.
+            let mut attempt =
+                dnet_netstate::flow_end::end_direct_connections(luid, &servers, &programs, BUDGET);
+            if attempt.is_err() {
+                std::thread::sleep(Duration::from_millis(700));
+                attempt = dnet_netstate::flow_end::end_direct_connections(
+                    luid, &servers, &programs, BUDGET,
+                );
+            }
+            attempt.map_err(|e| e.to_string())
+        });
+        match tokio::time::timeout(WAIT, work).await {
+            Ok(Ok(Ok(report))) => tracing::info!(
+                examined = report.examined,
+                ended = report.ended,
+                failed = report.failed,
+                stopped_early = report.stopped_early,
+                "ended the connections that were open before the tunnel came up"
+            ),
+            Ok(Ok(Err(reason))) => tracing::warn!(
+                %reason,
+                "could not end the connections that were open before the tunnel came up"
+            ),
+            Ok(Err(_)) => tracing::warn!(
+                "ending the connections that were open before the tunnel came up was interrupted"
+            ),
+            Err(_) => tracing::warn!(
+                "ending the connections that were open before the tunnel came up took too long; the connect went on"
+            ),
+        }
     }
 
     /// Build the effects for the endpoints in `endpoints` that can be used, and return them with
@@ -854,6 +927,9 @@ impl Effects for RealEffects {
         self.set_watching(Some(setup));
         // The race that chose this method just moved a full transfer through it.
         self.live.proved(std::time::Instant::now());
+        // Last, after the connection's own state is recorded, so that nothing here can leave it half made: connections
+        // that were open before the tunnel came up keep going out of the physical card (T203).
+        self.end_direct_connections(endpoint_ip).await;
         Ok(())
     }
 
@@ -869,14 +945,25 @@ impl Effects for RealEffects {
         let Some(wiring) = &self.guard else {
             return;
         };
-        let control = Arc::clone(&wiring.control);
-        match tokio::task::spawn_blocking(move || control.release()).await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                tracing::error!(%error, "the guard could not be taken out on disconnect")
+        // The only removal on a disconnect (T203: a stop of the tunnel no longer takes the guard with it), so one
+        // failed call must not be the last word: tried three times, a moment apart.
+        for attempt in 1..=3u32 {
+            let control = Arc::clone(&wiring.control);
+            match tokio::task::spawn_blocking(move || control.release()).await {
+                Ok(Ok(())) => return,
+                Ok(Err(error)) => {
+                    tracing::error!(%error, attempt, "the guard could not be taken out on disconnect")
+                }
+                Err(_) => tracing::error!(attempt, "taking the guard out was interrupted"),
             }
-            Err(_) => tracing::error!("taking the guard out was interrupted"),
+            if attempt < 3 {
+                tokio::time::sleep(Duration::from_millis(400)).await;
+            }
         }
+        tracing::error!(
+            "the guard is still in the firewall after the disconnect; `dnetctl guard-release` (or `dnetd release-guard` in an \
+             administrator prompt) takes it out"
+        );
     }
 
     async fn move_tunnel(&self, profile: &ProfileId, endpoint: EndpointId) -> bool {
@@ -1033,6 +1120,96 @@ fn is_elevated() -> bool {
         .is_ok();
         let _ = CloseHandle(token);
         ok && elevation.TokenIsElevated != 0
+    }
+}
+
+/// Taking a tunnel down leaves the kill switch's guard in (T203).
+#[cfg(test)]
+mod teardown_tests {
+    use super::*;
+    use dnet_netstate::undo::{Mutation, UndoExecutor, UndoRecord, UndoStore};
+
+    #[derive(Default)]
+    struct Recorder(Mutex<Vec<UndoRecord>>);
+
+    impl UndoExecutor for Recorder {
+        fn reverse(&self, record: &UndoRecord) -> Result<(), NetstateError> {
+            self.0.lock().unwrap().push(record.clone());
+            Ok(())
+        }
+    }
+
+    fn guard() -> UndoRecord {
+        UndoRecord::GuardFilters {
+            provider: dnet_netstate::guard_wfp::PROVIDER_KEY.to_text(),
+        }
+    }
+
+    fn route() -> UndoRecord {
+        UndoRecord::HostRoute {
+            interface_luid: 0x0006_0000_0000_0011,
+            destination: "203.0.113.9".parse().unwrap(),
+            next_hop: "192.168.1.1".parse().unwrap(),
+        }
+    }
+
+    /// Measured on the real service: every stop of the tunnel's program (a crash and its restart included) replayed the
+    /// guard's record and so took the guard out of the firewall until the next start put it back.
+    #[test]
+    fn a_tunnel_coming_down_reverses_the_routes_and_leaves_the_guard_in() {
+        let store = dnet_netstate::undo::MemoryStore::new();
+        let undo = UndoRegistry::open(Box::new(store.clone())).unwrap();
+        undo.apply(route(), || Ok(Mutation::Applied)).unwrap();
+        undo.apply(guard(), || Ok(Mutation::Applied)).unwrap();
+        let executor = Recorder::default();
+
+        replay_leaving_the_guard(&undo, &executor).unwrap();
+
+        assert_eq!(
+            *executor.0.lock().unwrap(),
+            vec![route()],
+            "only the route is reversed"
+        );
+        let left = store.load().unwrap().entries;
+        assert_eq!(left.len(), 1);
+        assert_eq!(
+            left[0].record,
+            guard(),
+            "the guard's record is still in the journal"
+        );
+    }
+
+    /// The hook the runtime is given, not only the function it calls: a tunnel stop through it leaves the guard in.
+    #[test]
+    fn the_hook_the_runtime_is_given_leaves_the_guard_in() {
+        let store = dnet_netstate::undo::MemoryStore::new();
+        let undo = Arc::new(UndoRegistry::open(Box::new(store.clone())).unwrap());
+        undo.apply(guard(), || Ok(Mutation::Applied)).unwrap();
+        undo.apply(route(), || Ok(Mutation::Applied)).unwrap();
+        let executor = Arc::new(Recorder::default());
+        let hook = undo_hook_with(Arc::clone(&undo), executor.clone());
+
+        hook().unwrap();
+        hook().unwrap(); // a second stop, as after a second restart
+
+        assert_eq!(*executor.0.lock().unwrap(), vec![route()]);
+        let left = store.load().unwrap().entries;
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].record, guard());
+    }
+
+    #[test]
+    fn a_failure_to_reverse_something_else_is_still_reported() {
+        struct Refuses;
+        impl UndoExecutor for Refuses {
+            fn reverse(&self, _: &UndoRecord) -> Result<(), NetstateError> {
+                Err(NetstateError::Operation("refused".into()))
+            }
+        }
+        let undo = UndoRegistry::open(Box::new(dnet_netstate::undo::MemoryStore::new())).unwrap();
+        undo.apply(route(), || Ok(Mutation::Applied)).unwrap();
+        undo.apply(guard(), || Ok(Mutation::Applied)).unwrap();
+        assert!(replay_leaving_the_guard(&undo, &Refuses).is_err());
     }
 }
 

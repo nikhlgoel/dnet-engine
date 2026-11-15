@@ -14,7 +14,9 @@
   Scenarios (each prints the destinations seen on the card):
     control   disconnected, kill switch off     -> the probes must be visible (the capture can see a leak)
     steady    connected                         -> nothing but the server
-    restart   connected, the core killed twice  -> nothing but the server, also while it restarts
+    restart   connected, the core killed twice, no kill switch -> INFORMATION ONLY: with no guard the traffic of the
+                                      second or so while the program restarts leaves directly (README, T203); measured, not asserted
+    guard     see below (the one that asserts: nothing public leaves, also while the core restarts)
     guard     kill switch on, connected, core killed twice -> same, and the guard must be in
   Needs the staged programs in C:\Program Files\DNet Engine, an endpoint imported, and a signed-in console user.
 #>
@@ -88,7 +90,7 @@ function Is-Public([string]$Key) {
     $ip -notmatch '^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|22[4-9]\.|23\d\.|255\.|169\.254\.|127\.|0\.|198\.1[89]\.)'
 }
 
-function Report([string]$Scenario, $Sent, [bool]$ExpectLeak, [bool]$PublicOnly = $false) {
+function Report([string]$Scenario, $Sent, [bool]$ExpectLeak, [bool]$PublicOnly = $false, [bool]$Informational = $false) {
     $other = $Sent.GetEnumerator() | Where-Object { $_.Key -notlike "$Server`:*" -and $_.Key -notlike '255.255.255.255:*' -and $_.Key -notlike '10.0.2.255:*' }
     $ours = $Sent.GetEnumerator() | Where-Object { $_.Key -like "$Server`:*" }
     $public = $other | Where-Object { Is-Public $_.Key }
@@ -103,6 +105,7 @@ function Report([string]$Scenario, $Sent, [bool]$ExpectLeak, [bool]$PublicOnly =
     $leaked = if ($PublicOnly) { [bool]$public } else { [bool]$other }
     $what = if ($PublicOnly) { 'the public internet' } else { 'anything but the server' }
     if ($ExpectLeak) { if ($leaked) { 'RESULT {0}: PASS (the capture sees what leaves; this is the control)' -f $Scenario } else { 'RESULT {0}: FAIL (the control saw nothing, so the capture proves nothing)' -f $Scenario } }
+    elseif ($Informational) { if ($leaked) { 'RESULT {0}: INFO ({1} left the card while the program restarted; expected with the kill switch off)' -f $Scenario, $what } else { 'RESULT {0}: INFO (nothing left the card this time)' -f $Scenario } }
     else { if ($leaked) { 'RESULT {0}: FAIL ({1} left the card outside the tunnel)' -f $Scenario, $what } else { 'RESULT {0}: PASS' -f $Scenario } }
 }
 
@@ -131,7 +134,7 @@ if (Run 'restart') {
         }
     }
     'status: ' + (Status-Line)
-    Report 'restart (core killed twice while probing, no kill switch): the public internet' $sent $false $true
+    Report 'restart (core killed twice while probing, no kill switch): the public internet' $sent $false $true $true
 }
 
 if (Run 'guard') {

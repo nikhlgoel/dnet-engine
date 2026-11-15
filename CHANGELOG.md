@@ -58,6 +58,16 @@ release waits for them.
 - **Websites by name now load through a server made by the setup guide.** Found on the first real server: the
   connection carried only requests to numeric addresses, because the program had no way to turn a name into an address
   through the tunnel. It does now, and the server's firewall no longer blocks the machine's own name server.
+- **The kill switch no longer opens for a moment when the connection's program restarts.** Found on the first real
+  server by watching what leaves the network card: every time the connection's program stopped (a crash and its
+  restart, say), the program took the kill switch out of the firewall with the tunnel, and for a second or so new
+  connections went straight out of your network card until the restart put it back. The kill switch now stays in
+  through restarts and failures, as it always claimed, and comes out only when you disconnect or turn it off.
+- **Connections that were open before you connected no longer keep going out of your network card.** Found on the first
+  real server: a connection already open (a kept-alive web page, say) kept reporting your own address through the
+  connect, after the tunnel's program was stopped, and after the disconnect, and the kill switch could not stop it.
+  The program now ends such IPv4 TCP connections when the tunnel comes up (sending nothing to the other end) and the
+  program that held one reconnects through the tunnel. IPv6 TCP and connections that are not TCP are still not covered.
 - `dnetctl endpoints` shows each server's id, which the commands that remove, enable and disable a server need.
 - A new connection is no longer announced as "the network connection changed ... will not survive the move" when nothing
   had moved.
@@ -70,6 +80,8 @@ release waits for them.
   measurement says otherwise.
 - While connected, Windows still sends name lookups to the physical network's resolver as well as the tunnel's, so that
   network can see the names you look up; the kill switch does not stop this. See the README.
+- IPv6 TCP connections and connections that are not TCP (QUIC, calls, games) that were open before you connected keep
+  going out of your network card until they stop of their own accord.
 - Networks that give only IPv6 are not supported.
 - Windows 10 version 1809 or later, 64-bit (x64) only.
 
