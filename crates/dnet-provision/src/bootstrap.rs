@@ -676,6 +676,11 @@ cat > "$BIN/dnet-net-up" <<'NET_EOF'
 #!/bin/sh
 set -eu
 if command -v sysctl >/dev/null 2>&1; then sysctl -qw net.ipv4.ip_forward=1; fi
+# A person's `ping` through the tunnel is forwarded by the core as an ICMP echo it sends itself, as an ordinary
+# account, which the kernel allows only for the groups in this range. Some provider images close it ("1 0", nobody),
+# and then every ping through the tunnel timed out while everything else worked (found on the first real server, T208).
+# Opening it lets any account send an echo and nothing more; it gives no privilege and no other kind of packet.
+if command -v sysctl >/dev/null 2>&1; then sysctl -qw net.ipv4.ping_group_range="0 2147483647" 2>/dev/null || true; fi
 if command -v iptables >/dev/null 2>&1; then
   # Another tool holding the firewall's lock (a package, another firewall manager) is waited for, for every rule below,
   # the three ports included: on the older kind of iptables it would otherwise fail this unit at boot, and the

@@ -248,6 +248,25 @@ fn net_up(text: &str) -> &str {
     &body[..body.find("\nNET_EOF\n").expect("and ends it")]
 }
 
+/// A person's `ping` through the tunnel is an ICMP echo the core sends as an ordinary account. Some images close the range
+/// of groups that may (found on the first real server, T208: every ping timed out while everything else worked), so the
+/// script opens it at every start, and never fails the unit if it cannot.
+#[test]
+fn the_script_lets_the_core_send_the_echo_a_ping_through_the_tunnel_needs() {
+    let text = script(&plan()).unwrap();
+    let net = net_up(&text);
+    assert!(
+        net.contains("sysctl -qw net.ipv4.ping_group_range=\"0 2147483647\""),
+        "{net}"
+    );
+    // A failure of this setting must not stop the firewall unit, which the tunnel's services depend on.
+    let line = net
+        .lines()
+        .find(|l| l.contains("ping_group_range"))
+        .unwrap();
+    assert!(line.contains("|| true"), "{line}");
+}
+
 fn denied_ranges() -> Vec<dnet_core::rule::IpCidr> {
     EXIT_DENIED_V4
         .iter()
