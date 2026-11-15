@@ -186,6 +186,15 @@ pub enum DnsServer {
         server_port: u16,
         bind_interface: String,
     },
+    /// A plain UDP resolver whose queries travel **through** another outbound (`detour`): the session's in-tunnel
+    /// resolver. The question and its answer cross the session, so the network the person is on sees neither.
+    #[serde(rename = "udp")]
+    Detoured {
+        tag: String,
+        server: String,
+        server_port: u16,
+        detour: String,
+    },
 }
 
 /// A DNS rule: route matching queries to a named server, or reject them.
@@ -266,10 +275,43 @@ pub struct RouteRule {
     pub process_path: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub port: Vec<u16>,
-    /// `route` or `hijack-dns`.
+    /// `route`, `hijack-dns`, `reject` or `resolve`.
     pub action: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub outbound: Option<String>,
+    /// For `resolve`: the DNS server that answers.
+    #[serde(rename = "server", skip_serializing_if = "Option::is_none")]
+    pub resolve_with: Option<String>,
+    /// For `resolve`: which address family wins.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<&'static str>,
+}
+
+impl RouteRule {
+    /// Turn the name a connection is for into addresses, by asking `server`. Needed before a connection can be
+    /// routed to an outbound that works on addresses (the session's endpoint), because a connection to a
+    /// FakeIP address arrives as a name.
+    pub fn resolve(server: &str) -> Self {
+        Self {
+            action: "resolve",
+            resolve_with: Some(server.to_owned()),
+            strategy: Some("prefer_ipv4"),
+            ..Self::default()
+        }
+    }
+
+    /// Whether this rule matches by address (a range of addresses), as the built-in rules for private ranges do.
+    pub fn matches_by_address(&self) -> bool {
+        !self.ip_cidr.is_empty()
+    }
+
+    /// Whether this rule sends a connection to the proxy (the session) by anything but an address, so that a
+    /// connection made by name reaches it and needs resolving first.
+    pub fn sends_a_name_to_the_session(&self) -> bool {
+        self.action == "route"
+            && self.outbound.as_deref() == Some(PROXY_TAG)
+            && self.ip_cidr.is_empty()
+    }
 }
 
 /// Generate the primary-core configuration for the active profile.

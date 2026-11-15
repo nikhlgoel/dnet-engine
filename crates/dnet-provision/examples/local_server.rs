@@ -6,7 +6,11 @@
 //! ```text
 //! local_server plan        <pins.json> <state-dir> <amd64|arm64> <awg-port> <hy2-port> <reality-port>
 //! local_server credentials <state-dir> <report-file> <out-file>
+//! local_server script      <state-dir>
 //! ```
+//!
+//! `script` writes `setup.sh` again from the saved plan, with the same keys, when the script's text has changed (it is
+//! safe to run the script again on a server that is already set up).
 //!
 //! `plan` makes the client's own keys (they never leave `<state-dir>`), builds the setup script exactly as the
 //! product does and writes it to `<state-dir>/setup.sh`, with what `credentials` needs to read the answer. The
@@ -36,6 +40,7 @@ fn main() {
     let result = match args.first().map(String::as_str) {
         Some("plan") if args.len() == 7 => plan(&args[1..]),
         Some("credentials") if args.len() == 4 => credentials(&args[1..]),
+        Some("script") if args.len() == 2 => rescript(&args[1..]),
         _ => Err(
             "usage:\n  local_server plan <pins.json> <state-dir> <amd64|arm64> <awg-port> <hy2-port> <reality-port>\n  \
              local_server credentials <state-dir> <report-file> <out-file>"
@@ -228,6 +233,18 @@ fn credentials(args: &[String]) -> Result<(), String> {
     println!(
         "wrote credentials for the three methods and the session to {}",
         args[2]
+    );
+    Ok(())
+}
+
+fn rescript(args: &[String]) -> Result<(), String> {
+    let dir = Path::new(&args[0]);
+    let saved = load(dir)?;
+    let text = script(&saved.plan).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("setup.sh"), text).map_err(|e| e.to_string())?;
+    println!(
+        "wrote {} again from the saved plan",
+        dir.join("setup.sh").display()
     );
     Ok(())
 }

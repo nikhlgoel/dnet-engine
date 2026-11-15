@@ -34,7 +34,8 @@ use crate::error::ConfigError;
 use crate::hysteria2::hysteria2_outbound;
 use crate::primary::{
     direct_outbound, dns_rules, route_rules, tun_inbound, Dns, DnsServer, FakeIpHalf, Log,
-    Outbound, PrimaryCoreConfig, PrimaryTransport, Route, FAKEIP_DNS, LOCAL_DNS, PROXY_TAG,
+    Outbound, PrimaryCoreConfig, PrimaryTransport, Route, RouteRule, FAKEIP_DNS, LOCAL_DNS,
+    PROXY_TAG,
 };
 use crate::probe::{
     ProbeConfig, ProbeDns, ProbeDnsServer, ProbeRoute, SocksAuth, SocksInbound, SocksUser,
@@ -46,6 +47,39 @@ use crate::secret::Secret;
 /// The session endpoint's tag. It is the tag the routing rules already send tunnelled traffic to, so no rule
 /// changes: the endpoint simply is what "the tunnel" means.
 pub const SESSION_TAG: &str = PROXY_TAG;
+
+/// The tag of the resolver that is asked through the session.
+pub const SESSION_DNS: &str = "session-dns";
+
+/// The resolver the session's names are asked of, through the session (the same default the AmneziaWG profile uses).
+/// It is reached from the server, so what the server's own rules allow is what decides whether it answers.
+pub const SESSION_RESOLVER: &str = "1.1.1.1";
+
+/// The session's endpoint works on addresses, and a connection to a FakeIP address arrives as a name, so the name is
+/// resolved (through the session) before it is sent to the session. Without this step the core refused every
+/// connection made by name ("a resolve action is required before routing" to the session), and only connections
+/// to numeric addresses worked: found on the first real server (T200).
+///
+/// **Where matters.** After every rule that matches by address, so that a name's *resolved* address never meets the
+/// rules that send private, link-local and multicast ranges direct: a site could otherwise answer its own name with
+/// `192.168.1.1` or `169.254.169.254` and be reached directly from this computer's network (DNS rebinding). Left
+/// unresolved until here, such a name goes into the session instead, and the session's server refuses the private
+/// address. And not after the first rule that sends a name to the session, which would be refused by the core; if a
+/// person's own ordering puts one before an address rule, the step goes first, because a connection that cannot be
+/// made is worse than a range that is matched late.
+fn with_resolve_step(mut rules: Vec<RouteRule>) -> Vec<RouteRule> {
+    let after_the_address_rules = rules
+        .iter()
+        .rposition(RouteRule::matches_by_address)
+        .map_or(0, |last| last + 1);
+    let before_the_first_name_to_the_session = rules
+        .iter()
+        .position(RouteRule::sends_a_name_to_the_session)
+        .unwrap_or(rules.len());
+    let at = after_the_address_rules.min(before_the_first_name_to_the_session);
+    rules.insert(at, RouteRule::resolve(SESSION_DNS));
+    rules
+}
 /// The selector over the carriers.
 pub const CARRIER_TAG: &str = "carrier";
 /// The only cross-origin caller the control API admits: a name that cannot occur (`.invalid` is reserved).
@@ -252,8 +286,16 @@ pub fn generate_session_config(input: SessionInput<'_>) -> Result<PrimaryCoreCon
                 DnsServer::Local {
                     tag: LOCAL_DNS.to_string(),
                 },
+                // The in-tunnel resolver: asked through the session, so the network the person is on sees neither
+                // the question nor the answer. Used by the `resolve` step of the route below.
+                DnsServer::Detoured {
+                    tag: SESSION_DNS.to_string(),
+                    server: SESSION_RESOLVER.to_string(),
+                    server_port: 53,
+                    detour: SESSION_TAG.to_string(),
+                },
             ],
-            // No in-tunnel resolver yet: the same chain as the Hysteria 2 and REALITY profiles.
+            // Every other kind of query is refused here, as for the Hysteria 2 and REALITY profiles.
             rules: dns_rules(input.rules, None),
             final_server: LOCAL_DNS.to_string(),
         },
@@ -267,7 +309,7 @@ pub fn generate_session_config(input: SessionInput<'_>) -> Result<PrimaryCoreCon
             input.session_port,
         )],
         route: Route {
-            rules: route_rules(input.rules),
+            rules: with_resolve_step(route_rules(input.rules)),
             final_outbound: SESSION_TAG.to_string(),
             auto_detect_interface: true,
             default_domain_resolver: LOCAL_DNS.to_string(),
@@ -603,6 +645,106 @@ mod tests {
     /// shorter than the fixture.
     fn refused(input: SessionInput<'_>) -> String {
         generate_session_config(input).unwrap_err().to_string()
+    }
+
+    /// A connection made by name arrives as a FakeIP address. The session's endpoint works on addresses, and the core
+    /// refuses to route a name to it without a `resolve` step first ("a resolve action is required before routing" to the
+    /// session): every connection by name failed on the first real server, and only numeric addresses
+    /// worked (T200). The name is asked of a resolver that is reached through the session itself.
+    #[test]
+    fn a_name_is_resolved_through_the_session_before_it_is_routed_to_it() {
+        let f = fixture();
+        let v = json(&f, |_| {});
+        let servers = v["dns"]["servers"].as_array().unwrap();
+        let resolver = servers
+            .iter()
+            .find(|s| s["tag"] == SESSION_DNS)
+            .expect("the session's resolver");
+        assert_eq!(resolver["type"], "udp");
+        assert_eq!(resolver["detour"], SESSION_TAG, "asked through the session");
+        assert_eq!(resolver["server"], SESSION_RESOLVER);
+        assert_eq!(resolver["server_port"], 53);
+
+        let rules = v["route"]["rules"].as_array().unwrap();
+        let resolve_at = rules
+            .iter()
+            .position(|r| r["action"] == "resolve")
+            .expect("a resolve step");
+        assert_eq!(rules[resolve_at]["server"], SESSION_DNS);
+        assert_eq!(
+            rules.iter().filter(|r| r["action"] == "resolve").count(),
+            1,
+            "one step, not one per rule"
+        );
+        // Before every rule that sends a NAME to the session (the rules that match addresses never see a name).
+        for (i, rule) in rules.iter().enumerate() {
+            if rule["action"] == "route"
+                && rule["outbound"] == SESSION_TAG
+                && rule.get("ip_cidr").is_none()
+            {
+                assert!(
+                    resolve_at < i,
+                    "rule {i} sends a name to the session before it is resolved: {rule}"
+                );
+            }
+        }
+        // And after every rule that sends an address direct: a name's resolved address must never reach those. A
+        // site that answers its own name with a private or metadata address would otherwise be reached directly
+        // from this computer's network (DNS rebinding); sent into the session instead, the server refuses it.
+        for (i, rule) in rules.iter().enumerate() {
+            if rule.get("ip_cidr").is_some() && rule["outbound"] == "direct" {
+                assert!(
+                    i < resolve_at,
+                    "rule {i} sends an address direct after the name is resolved: {rule}"
+                );
+            }
+        }
+        // The default route goes to the session too, so a resolve step is there even with no rule that sends to it.
+        assert_eq!(v["route"]["final"], SESSION_TAG);
+    }
+
+    /// With no rules of the person's at all, the connection still reaches the session by default and so still needs
+    /// the step.
+    #[test]
+    fn with_no_rules_the_resolve_step_is_still_there() {
+        let rules = with_resolve_step(Vec::new());
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].action, "resolve");
+    }
+
+    fn route(outbound: &str, ip_cidr: &[&str], domain: &[&str]) -> RouteRule {
+        RouteRule {
+            action: "route",
+            outbound: Some(outbound.to_owned()),
+            ip_cidr: ip_cidr.iter().map(|s| (*s).to_owned()).collect(),
+            domain: domain.iter().map(|s| (*s).to_owned()).collect(),
+            ..RouteRule::default()
+        }
+    }
+
+    /// The step goes after the last rule that matches by address, so a resolved address never meets one.
+    #[test]
+    fn the_step_follows_the_last_address_rule_and_precedes_the_first_name_sent_to_the_session() {
+        let direct_private = route("direct", &["10.0.0.0/8"], &[]);
+        let to_session_by_name = route(SESSION_TAG, &[], &["example.org"]);
+        let to_session_by_address = route(SESSION_TAG, &["10.9.0.254/32"], &[]);
+        let direct_by_name = route("direct", &[], &["portal.example"]);
+
+        let ordered = with_resolve_step(vec![
+            to_session_by_address.clone(),
+            direct_private.clone(),
+            direct_by_name.clone(),
+            to_session_by_name.clone(),
+        ]);
+        let at = ordered.iter().position(|r| r.action == "resolve").unwrap();
+        assert_eq!(at, 2, "after both address rules, before the name rules");
+        assert_eq!(ordered[1], direct_private);
+        assert_eq!(ordered[3], direct_by_name);
+
+        // A person's ordering that sends a name to the session before an address rule: the step goes first, because
+        // the core refuses the connection otherwise.
+        let odd = with_resolve_step(vec![to_session_by_name, direct_private]);
+        assert_eq!(odd[0].action, "resolve");
     }
 
     #[test]

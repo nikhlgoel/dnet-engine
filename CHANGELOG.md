@@ -55,6 +55,9 @@ release waits for them.
   Found by running the real setup script in a lab: the server's main service was not allowed to read the machine's
   routes and stopped at start, and the program waited for a log line that a quiet connection never prints, so only
   the AmneziaWG method could connect. Both are fixed.
+- **Websites by name now load through a server made by the setup guide.** Found on the first real server: the
+  connection carried only requests to numeric addresses, because the program had no way to turn a name into an address
+  through the tunnel. It does now, and the server's firewall no longer blocks the machine's own name server.
 - `dnetctl endpoints` shows each server's id, which the commands that remove, enable and disable a server need.
 - A new connection is no longer announced as "the network connection changed ... will not survive the move" when nothing
   had moved.
