@@ -45,6 +45,9 @@ release waits for them.
 - **A log file for the service**, in `%ProgramData%\DNet Engine\logs` (readable only by administrators and the system,
   about 4 MB at most). It records what the service did and why, and each request it refused. It holds no password or
   key, and never where you go on the network (the service does not know that).
+- **Closed-preview tools.** `testing/server-lab/Add-Friend.ps1` adds a friend's device to your server from the request their
+  window makes, lists the devices, and takes one off again; `docs/closed-preview.md` is the guide for a friend and for the
+  owner.
 
 ### Changed
 

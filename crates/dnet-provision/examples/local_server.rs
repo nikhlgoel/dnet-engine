@@ -7,7 +7,19 @@
 //! local_server plan        <pins.json> <state-dir> <amd64|arm64> <awg-port> <hy2-port> <reality-port>
 //! local_server credentials <state-dir> <report-file> <out-file>
 //! local_server script      <state-dir>
+//! local_server keepalive   <out-file>
+//! local_server test-request <name> <request-out>        (a made-up friend, to try the flow; its key is thrown away)
+//! local_server remove-device <request-file> <script-out>  (takes a friend's device off the server again)
+//! local_server list-devices <script-out>
+//! local_server add-device  <request-file> <script-out>
+//! local_server invite      <credentials-file> <request-file> <report-file> <label> <host> <invite-out>
 //! ```
+//!
+//! `add-device` and `invite` are the owner's two halves of "add a friend's device" (T188) for a server whose owner
+//! works from a terminal: the friend sends the request their window made; `add-device` writes the script to run on
+//! the server; the server prints a report line; `invite` reads it with the product's own parser, checks it against
+//! the owner's own credentials for that server, and writes the invite to send back. The friend's private key is never
+//! seen here.
 //!
 //! `script` writes `setup.sh` again from the saved plan, with the same keys, when the script's text has changed (it is
 //! safe to run the script again on a server that is already set up).
@@ -41,6 +53,14 @@ fn main() {
         Some("plan") if args.len() == 7 => plan(&args[1..]),
         Some("credentials") if args.len() == 4 => credentials(&args[1..]),
         Some("script") if args.len() == 2 => rescript(&args[1..]),
+        Some("keepalive") if args.len() == 2 => keepalive(&args[1]),
+        Some("add-device") if args.len() == 3 => add_device(&args[1..]),
+        Some("test-request") if args.len() == 3 => test_request(&args[1..]),
+        Some("remove-device") if args.len() == 3 => remove_device(&args[1..]),
+        Some("list-devices") if args.len() == 2 => {
+            std::fs::write(&args[1], dnet_provision::devices::list_devices_script()).map_err(|e| e.to_string())
+        }
+        Some("invite") if args.len() == 7 => invite(&args[1..]),
         _ => Err(
             "usage:\n  local_server plan <pins.json> <state-dir> <amd64|arm64> <awg-port> <hy2-port> <reality-port>\n  \
              local_server credentials <state-dir> <report-file> <out-file>"
@@ -50,6 +70,103 @@ fn main() {
         eprintln!("{message}");
         std::process::exit(1);
     }
+}
+
+/// The keepalive script the product installs as a stage of its own provisioning (T094), for a server made by hand: a
+/// burst of idle-priority work about a tenth of the time, so a free machine that carries little is not reclaimed as idle.
+fn keepalive(out: &str) -> Result<(), String> {
+    let plan = dnet_provision::keepalive::KeepalivePlan::default();
+    std::fs::write(out, dnet_provision::keepalive::script(&plan)).map_err(|e| e.to_string())
+}
+
+/// A request from a made-up device, to try the flow end to end. Its private key is dropped at once.
+fn test_request(args: &[String]) -> Result<(), String> {
+    let keys = SessionKeys::generate().map_err(|e| e.to_string())?;
+    let request = dnet_provision::devices::DeviceRequest::new(&args[0], keys.public_b64())
+        .map_err(|e| e.to_string())?;
+    std::fs::write(&args[1], request.encode()).map_err(|e| e.to_string())?;
+    println!(
+        "wrote a request for a made-up device \"{}\" to {}",
+        args[0], args[1]
+    );
+    Ok(())
+}
+
+/// The script that takes a friend's device off the server again, from the request it was added with.
+fn remove_device(args: &[String]) -> Result<(), String> {
+    let text = std::fs::read_to_string(&args[0]).map_err(|e| format!("request: {e}"))?;
+    let request =
+        dnet_provision::devices::DeviceRequest::decode(&text).map_err(|e| e.to_string())?;
+    let script = dnet_provision::devices::remove_device_script(request.public_key())
+        .map_err(|e| e.to_string())?;
+    std::fs::write(&args[1], script).map_err(|e| e.to_string())?;
+    println!(
+        "wrote the script that takes \"{}\" off the server to {}",
+        request.name(),
+        args[1]
+    );
+    Ok(())
+}
+
+/// The script that adds the friend's device to the server, from the request the friend's window made.
+fn add_device(args: &[String]) -> Result<(), String> {
+    let text = std::fs::read_to_string(&args[0]).map_err(|e| format!("request: {e}"))?;
+    let request =
+        dnet_provision::devices::DeviceRequest::decode(&text).map_err(|e| e.to_string())?;
+    std::fs::write(
+        &args[1],
+        dnet_provision::devices::add_device_script(&request),
+    )
+    .map_err(|e| e.to_string())?;
+    println!(
+        "wrote the script that adds \"{}\" to {}",
+        request.name(),
+        args[1]
+    );
+    Ok(())
+}
+
+/// The invite for a device the server has added, from the server's report and the owner's own credentials.
+fn invite(args: &[String]) -> Result<(), String> {
+    use dnet_config::credentials::EndpointCredentials;
+    use dnet_config::invite::Invite;
+    use dnet_provision::devices::{DeviceAdded, DeviceRequest};
+
+    let owner = EndpointCredentials::from_plaintext_json(
+        &std::fs::read(&args[0]).map_err(|e| format!("credentials: {e}"))?,
+    )
+    .map_err(|e| e.to_string())?;
+    let request = DeviceRequest::decode(
+        &std::fs::read_to_string(&args[1]).map_err(|e| format!("request: {e}"))?,
+    )
+    .map_err(|e| e.to_string())?;
+    let report = std::fs::read_to_string(&args[2]).map_err(|e| format!("report: {e}"))?;
+    let session = owner
+        .session
+        .as_ref()
+        .ok_or("this server has no session: it cannot take a friend's device")?;
+    let added = DeviceAdded::parse_for_server(
+        &report,
+        &request,
+        &session.server_public_key,
+        session.session_port,
+    )
+    .map_err(|e| e.to_string())?;
+    let invite = Invite::new(
+        &args[3],
+        &args[4],
+        &owner,
+        added.address,
+        request.public_key(),
+    )
+    .map_err(|e| e.to_string())?;
+    let text = invite.encode().map_err(|e| e.to_string())?;
+    std::fs::write(&args[5], text).map_err(|e| e.to_string())?;
+    println!(
+        "wrote the invite for \"{}\" (address {} on the server, {} device(s) on it) to {}",
+        added.name, added.address, added.devices, args[5]
+    );
+    Ok(())
 }
 
 fn arch(text: &str) -> Result<ServerArch, String> {
