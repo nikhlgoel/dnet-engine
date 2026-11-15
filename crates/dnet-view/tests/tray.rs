@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use dnet_view::tray::{text, Control};
+use dnet_view::tray::{text, Control, Lamp};
 use serde_json::{json, Value};
 
 fn fixture(name: &str) -> Value {
@@ -86,5 +86,35 @@ fn the_menu_always_offers_open_and_quit_and_quitting_says_the_connection_stays()
     ] {
         assert_eq!(t.open, "Open");
         assert_eq!(t.quit, "Quit this app (the connection stays up)");
+    }
+}
+
+/// The tray icon shows the state by shape, and the picture follows the same view-model as the words.
+#[test]
+fn every_state_has_its_own_picture() {
+    assert_eq!(text(Some(&fixture("snapshot-connected"))).lamp, Lamp::Ok);
+    assert_eq!(text(Some(&fixture("snapshot-degraded"))).lamp, Lamp::Warn);
+    assert_eq!(
+        text(Some(&fixture("snapshot-disconnected"))).lamp,
+        Lamp::Off
+    );
+    assert_eq!(
+        text(Some(&json!({ "status": "Probing" }))).lamp,
+        Lamp::Probe
+    );
+    assert_eq!(
+        text(Some(&fixture("snapshot-failed-noendpointreachable"))).lamp,
+        Lamp::Fail
+    );
+}
+
+#[test]
+fn no_answer_and_an_unreadable_answer_show_the_crossed_doorway_not_an_empty_one() {
+    for t in [
+        text(None),
+        text(Some(&json!({ "status": "Wobbling" }))),
+        text(Some(&json!({}))),
+    ] {
+        assert_eq!(t.lamp, Lamp::Down);
     }
 }

@@ -28,6 +28,8 @@ compile_error!("the DNet Engine window is Windows-only until ADR-0005 (Linux) is
 mod shell;
 #[cfg(windows)]
 mod single;
+#[cfg(windows)]
+mod tray_icon;
 
 #[cfg(windows)]
 fn main() {

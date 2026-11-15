@@ -1,6 +1,1 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="DNet Engine">
-  <!-- Colours are the app's own tokens (docs/design/tokens.css): base #1b2523, paper #f1ebdd, ok #4fdcb0. -->
-  <rect width="32" height="32" rx="7" fill="#1b2523"/>
-  <path d="M6 21 C 11 8, 17 24, 26 11" fill="none" stroke="#f1ebdd" stroke-width="2.5" stroke-linecap="round"/>
-  <circle cx="26" cy="11" r="3" fill="#4fdcb0"/>
-</svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="#1b2523"/><path d="M88 420 V260 A168 168 0 0 1 424 260 V420" fill="none" stroke="#f1ebdd" stroke-width="46" stroke-linecap="round" stroke-linejoin="round"/><path d="M172 420 V300 A84 84 0 0 1 340 300 V420 Z" fill="#4fdcb0"/></svg>

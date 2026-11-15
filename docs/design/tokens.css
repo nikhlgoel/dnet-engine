@@ -53,6 +53,9 @@
   --dur-1: 90ms;
   --dur-2: 160ms;
   --dur-3: 240ms;
+  --dur-4: 420ms; /* a drawn-in stroke; the opening's last move */
+  --dur-intro: 1500ms; /* the whole opening: draw, light, open (Intro.svelte); skippable, none under reduced motion */
+  --ping: 1100ms; /* a ring leaving the core when the state changes */
   --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
   --probe-period: 1.6s;
 }

@@ -8,7 +8,8 @@ import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const ROOT = join(__dirname, '..');
-const TOKENS = readFileSync(join(ROOT, '..', '..', 'docs', 'design', 'tokens.css'), 'utf8');
+// Line endings do not matter to a stylesheet: a Windows checkout has CRLF, and the selectors below are written with LF.
+const TOKENS = readFileSync(join(ROOT, '..', '..', 'docs', 'design', 'tokens.css'), 'utf8').replaceAll('\r\n', '\n');
 
 function* walk(dir: string): Generator<string> {
   for (const name of readdirSync(dir)) {

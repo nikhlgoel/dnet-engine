@@ -124,6 +124,17 @@
 
 <div class="scene" bind:this={box} role="group" aria-label="Your networks">
   <canvas bind:this={canvas} aria-hidden="true"></canvas>
+  <!-- A ring leaves the core when the state changes, and only then: motion that says a real thing happened. -->
+  {#key look.lamp}
+    <i
+      class="ping"
+      aria-hidden="true"
+      style:left="{width / 2}px"
+      style:top="{height / 2}px"
+      style:width="{hit * 2}px"
+      style:height="{hit * 2}px"
+    ></i>
+  {/key}
   <!-- A pointer convenience only. The labelled switch below is the accessible control. -->
   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
   <div
@@ -181,6 +192,31 @@
     inset: 0;
     width: 100%;
     height: 100%;
+  }
+
+  .ping {
+    position: absolute;
+    border: 1px solid var(--ambient);
+    border-radius: 50%;
+    pointer-events: none;
+    opacity: 0;
+    translate: -50% -50%;
+    animation: ping var(--ping) var(--ease) forwards;
+  }
+
+  @keyframes ping {
+    from {
+      opacity: 0.55;
+      scale: 0.5;
+    }
+    to {
+      opacity: 0;
+      scale: 1.9;
+    }
+  }
+
+  :global([data-motion='reduce']) .ping {
+    display: none;
   }
 
   .core-hit {

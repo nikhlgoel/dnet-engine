@@ -20,11 +20,15 @@
 </script>
 
 <div class="caption" data-fail={look.lamp === 'fail' ? '' : undefined}>
-  <h1 id="headline">{look.headline}</h1>
+  {#key look.headline}
+    <h1 id="headline" class="swap">{look.headline}</h1>
+  {/key}
   {#if look.facts}
     <p class="facts num">{look.facts}</p>
   {/if}
-  <p class="because">{look.because}</p>
+  {#key look.because}
+    <p class="because swap">{look.because}</p>
+  {/key}
   {#if look.advice}
     <p class="because advice">{look.advice}</p>
   {/if}
@@ -60,6 +64,22 @@
     gap: var(--s-2);
     padding: 0 var(--s-5) var(--s-3);
     text-align: center;
+  }
+
+  /* The words arrive when they change: a small rise and fade, so a new state is seen to land, not swapped. */
+  .swap {
+    animation: land var(--dur-3) var(--ease) backwards;
+  }
+
+  @keyframes land {
+    from {
+      opacity: 0;
+      transform: translateY(var(--s-1));
+    }
+  }
+
+  :global([data-motion='reduce']) .swap {
+    animation: none;
   }
 
   h1 {

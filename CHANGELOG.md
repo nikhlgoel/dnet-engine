@@ -46,6 +46,17 @@ release waits for them.
   about 4 MB at most). It records what the service did and why, and each request it refused. It holds no password or
   key, and never where you go on the network (the service does not know that).
 
+### Changed
+
+- **A new icon: the tunnel.** Arches receding to a doorway, polished from the concept you chose. It is the program's icon,
+  the website's, the logo in the window, and the tray icon. The doorway shows the state by shape as well as colour: empty
+  (not connected), filling and draining (finding a way through), lit (connected), half lit (slow), lit with a gap through
+  it (failed), crossed (the service did not answer).
+- **The window and the tray feel alive, and only when something is happening.** An opening that draws the tunnel in and
+  opens it outward (skippable, and not made at all if you ask your computer for less motion); the logo and the tray icon
+  breathe while the connection is being found, and are still otherwise; a ring leaves the core when the state changes;
+  new words and new pages rise into place.
+
 ### Fixed
 
 - **The service and `dnetctl` start on a Windows that has never had the Visual C++ runtime installed.** Built the
