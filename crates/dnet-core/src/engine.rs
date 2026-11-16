@@ -43,7 +43,7 @@ use crate::degraded::Change;
 use crate::endpoint::Endpoint;
 use crate::endpoint_health::rank;
 use crate::failure::{classify, Reach, Situation};
-use crate::health::{HealthConfig, ProbeOutcome as EndpointProbeOutcome};
+use crate::health::{HealthConfig, HealthState, ProbeOutcome as EndpointProbeOutcome};
 use crate::ids::{EndpointId, InterfaceId, ProfileId};
 use crate::migrate::{plan_migration, Migration};
 use crate::probe::{judge, ProfileProbe, RaceDecision, Unusable, Verdict};
@@ -275,6 +275,19 @@ impl Engine {
         self.replacing = None;
         self.reach.clear();
         self.requested = requested.clone();
+        // A request to connect is a new attempt, and the network may not be the one an endpoint failed on. An endpoint
+        // that was judged unreachable while a tunnel was up is only ever probed again while a tunnel is up, so left
+        // alone it could never be tried again, on any network, until the service was restarted: found on the owner's
+        // own computer after a phone tether dropped, when every later connect failed at once with "none of your
+        // endpoints answered" and nothing was tried (T209).
+        for endpoint in &mut self.endpoints {
+            if endpoint.health().state == HealthState::Unreachable {
+                let mut fresh = endpoint.health().clone();
+                fresh.state = HealthState::Unknown;
+                fresh.consecutive_failures = 0;
+                endpoint.set_health(fresh);
+            }
+        }
 
         // Only what is known before any probing. Reach and "every profile blocked" are judged
         // after a race, when there is something to judge them against.
@@ -1033,10 +1046,57 @@ mod tests {
     }
 
     #[test]
-    fn connecting_with_every_endpoint_unusable_fails_as_no_endpoint_reachable() {
-        let mut e = Engine::new(standard_profiles(), vec![unreachable("down")]);
+    fn connecting_with_every_endpoint_disabled_fails_as_no_endpoint_reachable() {
+        let mut down = unreachable("down");
+        down.set_enabled(false);
+        let mut e = Engine::new(standard_profiles(), vec![down]);
         step(&mut e, connect());
         assert_eq!(failed_cause(&e), FailureCause::NoEndpointReachable);
+    }
+
+    /// T209: an endpoint judged unreachable on one network must be tried again when the person asks to connect, on
+    /// the same network or another. It is only probed while a tunnel is up, so before this it stayed unreachable for
+    /// good: every later connect failed at once and nothing was ever tried.
+    #[test]
+    fn a_request_to_connect_tries_an_endpoint_that_was_judged_unreachable_before() {
+        let mut e = Engine::new(standard_profiles(), vec![unreachable("down")]);
+        let actions = step(&mut e, connect());
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::StartRace { .. })),
+            "nothing was tried: {actions:?}"
+        );
+        assert!(matches!(e.phase(), Phase::Probing));
+    }
+
+    #[test]
+    fn an_endpoint_that_stopped_answering_in_use_is_tried_again_by_the_next_connect() {
+        let only = healthy("only", 30);
+        let id = only.id();
+        let mut e = Engine::new(standard_profiles(), vec![only]);
+        step(&mut e, connect());
+        step(
+            &mut e,
+            Input::RaceFinished {
+                decision: selected("hy2", 100),
+                results: vec![(self::id("hy2"), good(1_000_000))],
+            },
+        );
+        step(&mut e, Input::TunnelUp);
+        // It stops answering while in use, and there is nowhere else to go.
+        for _ in 0..10 {
+            probe_failed(&mut e, id);
+        }
+        assert_eq!(failed_cause(&e), FailureCause::NoEndpointReachable);
+        // The person asks again.
+        let actions = step(&mut e, connect());
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::StartRace { .. })),
+            "the second connect tried nothing: {actions:?}"
+        );
     }
 
     #[test]
