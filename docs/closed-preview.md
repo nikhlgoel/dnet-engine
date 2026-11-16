@@ -24,6 +24,11 @@ You need Windows 10 (version 1809 or later) or Windows 11, 64-bit, and an admini
 words in full), and your Windows version. `dnetctl events` in a terminal prints the recent history; do not send the
 invite itself or screenshots of it.
 
+**What speed to expect (measured on a real network, 2026-11-16):** on a network where the UDP method (Hysteria 2) works, the
+full speed of your line (the server is not the limit). On a network that blocks UDP (a mobile hotspot on Jio was one) only the
+TCP method works and it gave about **10 Mbit/s** and struggled with many downloads at once, although the line gives 180. That is a known
+problem we are working on (T210), not something you did. Tell the owner which network you were on.
+
 **Do not rely on it for:**
 - **Exams and other supervised software.** Proctoring and lockdown programs commonly refuse to run next to a VPN, or
   react to one. Turn DNet Engine off (the switch on Status) before you start one. This program does not hide itself from
